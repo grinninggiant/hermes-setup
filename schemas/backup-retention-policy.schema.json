@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polatcangames.local/schemas/backup-retention-policy.schema.json",
+  "title": "Hermes backup retention report policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "allowed_roots", "classes"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "allowed_roots": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "classes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/retentionClass"}
+    }
+  },
+  "$defs": {
+    "diskBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["warning", "high", "critical"],
+      "properties": {
+        "warning": {"type": "integer", "minimum": 1},
+        "high": {"type": "integer", "minimum": 1},
+        "critical": {"type": "integer", "minimum": 1}
+      }
+    },
+    "retentionClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "root",
+        "pattern",
+        "kind",
+        "keep_count",
+        "min_age_days",
+        "required_sidecars",
+        "verification_sidecar",
+        "protected_marker",
+        "active_references",
+        "disk_budget_bytes",
+        "candidate_budget_level"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "root": {"type": "string", "minLength": 1},
+        "pattern": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["file", "directory"]},
+        "keep_count": {"type": "integer", "minimum": 1},
+        "min_age_days": {"type": "integer", "minimum": 0},
+        "required_sidecars": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "verification_sidecar": {"type": "string", "minLength": 1},
+        "protected_marker": {"type": "string", "minLength": 1},
+        "active_references": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "disk_budget_bytes": {"$ref": "#/$defs/diskBudget"},
+        "candidate_budget_level": {"enum": ["warning", "high", "critical"]}
+      }
+    }
+  }
+}

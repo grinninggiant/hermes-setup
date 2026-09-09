@@ -197,3 +197,24 @@ Quicksilver retirement is deliberately gated:
 The canonical cleanup remains general-profile no-agent job `c083e57807d7` at 04:40. A proposed destructive post-soak job was rejected during independent review and removed before its first run; no post-cleanup script remains deployed.
 
 The npm audit remains advisory-only for the unresolved build surfaces. The installed TUI graph already resolves direct `eslint-plugin-react` to `7.37.5`; npm's remaining automatic remediation requires incompatible actions (React Router/`electron-builder` downgrades or ESLint major changes). Do not use `npm audit fix --force`. Re-evaluate when upstream publishes compatible patched releases, then require web/TUI/Desktop typecheck, test, and build gates before committing lockfile changes.
+
+## 28. Retention-report control plane
+
+The policy-driven path is deliberately report-only. **No policy-driven delete command is exposed**; permanent cleanup still requires a reviewed exact candidate manifest and Mutlu's separate approval.
+
+- **Canonical source:** `scripts/backup_ops.py` in this repository. Policy shape is pinned by `schemas/backup-retention-policy.schema.json`.
+- **Deployed runtime:** `~/.hermes/scripts/backup_ops.py`; promote only after the canonical suite passes, then require a byte-for-byte SHA-256 match with canonical source.
+- **Verifier:** `tests/test_backup_ops.py` covers count + age, disk warning/high/critical classification, newest verified recovery point, sidecar pairing, protected markers, active rollout/incident references, symlink/traversal/unexpected-root/cross-filesystem rejection, deterministic output, and failure-preserving zero-candidate behavior.
+- **Watchdog:** remains read-only for freshness and manifest presence. A blocked retention report must be surfaced as an alert/checkpoint, never converted into a delete attempt.
+- **launchd parity:** existing backup jobs keep their current schedules and entrypoints. Before any future policy-driven cleanup rollout, the plist arguments, canonical policy hash, deployed script hash, verifier result, and watchdog behavior must be read back together. This change installs no destructive launchd job.
+- **Rollback coordinate:** canonical source parent `627eac5`; restore `scripts/backup_ops.py` from that Git coordinate and restore deployed runtime from `~/.hermes/backups/ops-227/backup_ops.py.pre-7b42774` (SHA-256 `75120579c75643c202adeb290af7b57e2caf0ee1adcd8bf1c566b1e53ceb24c8`), then rerun canonical and deployed verifier suites. Existing producer entrypoints and schedules are not changed by this report-only rollout.
+
+Deterministic invocation requires an explicit observation time:
+
+```bash
+python3 scripts/backup_ops.py retention-report \
+  --policy /absolute/reviewed/policy.json \
+  --now-epoch 2000000000
+```
+
+A class returns zero candidates when its root or pattern is unsafe, inspection fails, a required sidecar is missing, or a symlink/cross-filesystem boundary is observed; blocked CLI reports still emit JSON and exit `2`. Candidate eligibility requires all three gates: outside `keep_count`, older than `min_age_days`, and at or above the class's explicit `candidate_budget_level`. Candidate size includes required paired sidecars. Protected or actively referenced artifacts remain non-candidates, and `keep_count` is ranked over verified recovery points so a newer unverified copy cannot displace the newest verified point. Root and artifact device/inode identities are emitted for later approval-manifest revalidation; all inspection is descriptor-relative with no-follow opens and before/after identity snapshots. Any future delete implementation must re-open and revalidate those identities and every guard immediately before mutation rather than trusting a stale report.

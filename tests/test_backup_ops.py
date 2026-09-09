@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import importlib.util
+import json
 import os
 import plistlib
 import sqlite3
@@ -11,6 +12,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path('/Users/mutlupolatcan/.hermes')
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -103,7 +105,412 @@ class BackupOpsUnitTests(unittest.TestCase):
         self.assertTrue((self.root / 'b-4.zip').exists())
 
 
+class RetentionReportTests(unittest.TestCase):
+    NOW = 2_000_000_000
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            'canonical_backup_ops', REPO_ROOT / 'scripts/backup_ops.py'
+        )
+        assert spec is not None and spec.loader is not None
+        self.ops = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ops)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = (Path(self.tmp.name) / 'backups').resolve()
+        self.root.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def artifact(self, name, age_days, size=10, verified=True):
+        path = self.root / name
+        path.write_bytes(b'x' * size)
+        os.utime(path, (self.NOW - age_days * 86400,) * 2)
+        sidecar = path.with_name(path.name + '.meta.json')
+        sidecar.write_text(json.dumps({'verified': verified}))
+        return path
+
+    def policy(self, **overrides):
+        item = {
+            'name': 'test-backups',
+            'root': str(self.root),
+            'pattern': '*.bak',
+            'kind': 'file',
+            'keep_count': 2,
+            'min_age_days': 30,
+            'required_sidecars': ['.meta.json'],
+            'verification_sidecar': '.meta.json',
+            'protected_marker': '.protected',
+            'active_references': [],
+            'disk_budget_bytes': {'warning': 20, 'high': 30, 'critical': 40},
+            'candidate_budget_level': 'high',
+        }
+        item.update(overrides)
+        return {'schema_version': 1, 'allowed_roots': [str(self.root)], 'classes': [item]}
+
+    def test_count_age_and_disk_budget_report_is_deterministic_and_read_only(self):
+        old = self.artifact('old.bak', 60, size=25)
+        self.artifact('middle.bak', 40, size=10)
+        self.artifact('new.bak', 1, size=10)
+        before = {path.name: path.read_bytes() for path in self.root.iterdir()}
+
+        first = self.ops.build_retention_report(self.policy(), now_epoch=self.NOW)
+        second = self.ops.build_retention_report(self.policy(), now_epoch=self.NOW)
+
+        self.assertEqual(first, second)
+        self.assertEqual([item['path'] for item in first['candidates']], [str(old)])
+        self.assertEqual(first['bytes_to_reclaim'], 43)
+        self.assertEqual(first['classes'][0]['budget']['status'], 'critical')
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.root.iterdir()})
+
+    def assert_blocked(self, report, reason):
+        self.assertTrue(report['blocked'])
+        self.assertEqual(report['candidates'], [])
+        self.assertIn(reason, report['classes'][0]['blocked_reasons'])
+
+    def test_protected_and_active_referenced_artifacts_are_never_candidates(self):
+        self.artifact('new.bak', 1)
+        protected = self.artifact('protected.bak', 50)
+        protected.with_name(protected.name + '.protected').touch()
+        referenced = self.artifact('referenced.bak', 60)
+        candidate = self.artifact('candidate.bak', 70)
+
+        report = self.ops.build_retention_report(
+            self.policy(keep_count=1, active_references=[str(referenced)]),
+            now_epoch=self.NOW,
+        )
+
+        self.assertEqual([item['path'] for item in report['candidates']], [str(candidate)])
+        states = {item['path']: item['state'] for item in report['classes'][0]['artifacts']}
+        self.assertEqual(states[str(protected)], 'protected')
+        self.assertEqual(states[str(referenced)], 'active_reference')
+
+    def test_newest_verified_recovery_point_is_kept_when_newer_copy_is_unverified(self):
+        self.artifact('new-unverified.bak', 1, verified=False)
+        verified = self.artifact('old-verified.bak', 90)
+
+        report = self.ops.build_retention_report(
+            self.policy(keep_count=1), now_epoch=self.NOW
+        )
+
+        self.assertEqual(report['candidates'], [])
+        states = {item['path']: item['state'] for item in report['classes'][0]['artifacts']}
+        self.assertEqual(states[str(verified)], 'kept_count')
+
+    def test_directory_artifact_pairs_internal_manifest(self):
+        for name, age_days in (('snap-new', 1), ('snap-old', 90)):
+            snapshot = self.root / name
+            snapshot.mkdir()
+            (snapshot / 'state.db').write_bytes(b'database')
+            (snapshot / 'manifest.json').write_text(json.dumps({'verified': True}))
+            mtime = self.NOW - age_days * 86400
+            os.utime(snapshot, (mtime, mtime))
+        old = self.root / 'snap-old'
+
+        report = self.ops.build_retention_report(
+            self.policy(
+                pattern='snap-*',
+                kind='directory',
+                keep_count=1,
+                required_sidecars=['manifest.json'],
+                verification_sidecar='manifest.json',
+            ),
+            now_epoch=self.NOW,
+        )
+
+        self.assertEqual([item['path'] for item in report['candidates']], [str(old)])
+        self.assertEqual(report['candidates'][0]['paired_paths'], [str(old / 'manifest.json')])
+
+    def test_missing_required_sidecar_blocks_entire_class(self):
+        self.artifact('new.bak', 1)
+        missing = self.artifact('old.bak', 90)
+        missing.with_name(missing.name + '.meta.json').unlink()
+
+        report = self.ops.build_retention_report(self.policy(keep_count=1), now_epoch=self.NOW)
+
+        self.assert_blocked(report, f'missing_sidecar:{missing}.meta.json')
+
+    def test_symlink_blocks_entire_class(self):
+        target = self.artifact('target.bin', 90)
+        (self.root / 'linked.bak').symlink_to(target)
+
+        report = self.ops.build_retention_report(self.policy(), now_epoch=self.NOW)
+
+        self.assert_blocked(report, f'symlink:{self.root / "linked.bak"}')
+
+    def test_path_traversal_and_unexpected_root_fail_closed(self):
+        self.artifact('old.bak', 90)
+        traversal = self.ops.build_retention_report(
+            self.policy(pattern='../*.bak'), now_epoch=self.NOW
+        )
+        unexpected = self.ops.build_retention_report(
+            self.policy(root=str(self.root.parent / 'other')), now_epoch=self.NOW
+        )
+
+        self.assert_blocked(traversal, 'unsafe_pattern:../*.bak')
+        self.assert_blocked(unexpected, f'unexpected_root:{self.root.parent / "other"}')
+
+    def test_cross_filesystem_artifact_blocks_entire_class(self):
+        self.artifact('old.bak', 90)
+        with mock.patch.object(self.ops, '_path_device_ids', return_value={1, 2}):
+            report = self.ops.build_retention_report(self.policy(), now_epoch=self.NOW)
+
+        self.assert_blocked(report, f'cross_filesystem:{self.root}')
+
+    def test_inspection_failure_preserves_all_artifacts(self):
+        self.artifact('old.bak', 90)
+        with mock.patch.object(self.ops, '_inspect_artifact', side_effect=OSError('probe failed')):
+            report = self.ops.build_retention_report(self.policy(), now_epoch=self.NOW)
+
+        self.assert_blocked(report, 'inspection_failed:probe failed')
+
+    def test_sidecar_and_marker_names_cannot_escape_artifact_boundary(self):
+        self.artifact('old.bak', 90)
+        for override, reason in (
+            ({'required_sidecars': ['../outside']}, 'unsafe_sidecar:../outside'),
+            ({'protected_marker': '../outside'}, 'unsafe_protected_marker:../outside'),
+        ):
+            with self.subTest(reason=reason):
+                report = self.ops.build_retention_report(
+                    self.policy(**override), now_epoch=self.NOW
+                )
+                self.assert_blocked(report, reason)
+
+    def test_disk_budget_thresholds_must_be_strictly_increasing(self):
+        with self.assertRaisesRegex(ValueError, 'disk budget thresholds'):
+            self.ops.build_retention_report(
+                self.policy(disk_budget_bytes={'warning': 40, 'high': 30, 'critical': 20}),
+                now_epoch=self.NOW,
+            )
+
+    def test_below_selected_disk_budget_keeps_old_count_excess(self):
+        self.artifact('new.bak', 1, size=1)
+        old = self.artifact('old.bak', 90, size=1)
+
+        report = self.ops.build_retention_report(
+            self.policy(
+                keep_count=1,
+                disk_budget_bytes={'warning': 100, 'high': 200, 'critical': 300},
+            ),
+            now_epoch=self.NOW,
+        )
+
+        self.assertEqual(report['candidates'], [])
+        states = {item['path']: item['state'] for item in report['classes'][0]['artifacts']}
+        self.assertEqual(states[str(old)], 'kept_budget')
+
+    def test_relative_active_reference_is_rejected(self):
+        self.artifact('old.bak', 90)
+        report = self.ops.build_retention_report(
+            self.policy(active_references=['old.bak']), now_epoch=self.NOW
+        )
+        self.assert_blocked(report, 'unsafe_active_reference:old.bak')
+
+    def test_unknown_policy_field_and_empty_class_list_are_rejected(self):
+        unknown = self.policy()
+        unknown['unexpected'] = True
+        with self.assertRaisesRegex(ValueError, 'unexpected policy fields'):
+            self.ops.build_retention_report(unknown, now_epoch=self.NOW)
+        with self.assertRaisesRegex(ValueError, 'at least one class'):
+            self.ops.build_retention_report(
+                {'schema_version': 1, 'allowed_roots': [str(self.root)], 'classes': []},
+                now_epoch=self.NOW,
+            )
+
+    def test_runtime_policy_validation_rejects_schema_type_violations(self):
+        cases = []
+        schema_bool = self.policy()
+        schema_bool['schema_version'] = True
+        cases.append(schema_bool)
+        cases.append(self.policy(name=''))
+        cases.append(self.policy(root=42))
+        cases.append(self.policy(required_sidecars=[{}]))
+        cases.append(self.policy(active_references=[{}]))
+
+        for policy in cases:
+            with self.subTest(policy=policy), self.assertRaises(ValueError):
+                self.ops.build_retention_report(policy, now_epoch=self.NOW)
+
+    def test_schema_integral_numbers_are_accepted_at_runtime(self):
+        self.assertTrue(self.ops._schema_integer(10**1000))
+        self.artifact('only.bak', 1)
+        report = self.ops.build_retention_report(
+            self.policy(
+                keep_count=1.0,
+                min_age_days=30.0,
+                disk_budget_bytes={'warning': 20.0, 'high': 30.0, 'critical': 40.0},
+            ),
+            now_epoch=self.NOW,
+        )
+        self.assertFalse(report['blocked'])
+
+    def test_duplicate_or_overlapping_class_authority_is_rejected(self):
+        duplicate_name = self.policy()['classes'][0].copy()
+        second_name = duplicate_name.copy()
+        second_name['root'] = str(self.root.parent / 'other')
+        policy = self.policy()
+        policy['allowed_roots'].append(second_name['root'])
+        policy['classes'].append(second_name)
+        with self.assertRaisesRegex(ValueError, 'class names must be unique'):
+            self.ops.build_retention_report(policy, now_epoch=self.NOW)
+
+        nested = self.root / 'nested'
+        nested.mkdir()
+        nested_class = duplicate_name.copy()
+        nested_class['name'] = 'nested'
+        nested_class['root'] = str(nested)
+        policy = self.policy()
+        policy['allowed_roots'].append(str(nested))
+        policy['classes'].append(nested_class)
+        with self.assertRaisesRegex(ValueError, 'roots must not overlap'):
+            self.ops.build_retention_report(policy, now_epoch=self.NOW)
+
+    def test_filesystem_alias_class_authority_is_rejected(self):
+        alias = self.root.with_name(self.root.name.upper())
+        if not alias.exists() or not os.path.samefile(alias, self.root):
+            self.skipTest('filesystem is case-sensitive')
+        second = self.policy()['classes'][0].copy()
+        second['name'] = 'case-alias'
+        second['root'] = str(alias)
+        policy = self.policy()
+        policy['allowed_roots'].append(str(alias))
+        policy['classes'].append(second)
+
+        with self.assertRaisesRegex(ValueError, 'filesystem authority overlaps'):
+            self.ops.build_retention_report(policy, now_epoch=self.NOW)
+
+    def test_symlinked_root_ancestor_is_rejected(self):
+        alias = self.root.parent / 'alias'
+        alias.symlink_to(self.root)
+        aliased_root = alias / 'nested'
+        aliased_root.mkdir()
+        policy = self.policy(root=str(aliased_root))
+        policy['allowed_roots'] = [str(aliased_root)]
+
+        report = self.ops.build_retention_report(policy, now_epoch=self.NOW)
+
+        self.assert_blocked(report, f'symlinked_root:{aliased_root}')
+
+    def test_directory_scan_failure_blocks_class(self):
+        self.artifact('old.bak', 90)
+        with mock.patch.object(self.ops, '_scan_artifacts_fd', side_effect=OSError('scan denied')):
+            report = self.ops.build_retention_report(self.policy(), now_epoch=self.NOW)
+        self.assert_blocked(report, 'inspection_failed:scan denied')
+
+    def test_report_contains_pinned_filesystem_identities(self):
+        artifact = self.artifact('only.bak', 1)
+        self.artifact('old.bak', 90)
+        report = self.ops.build_retention_report(self.policy(keep_count=1), now_epoch=self.NOW)
+
+        class_report = report['classes'][0]
+        self.assertEqual(set(class_report['root_identity']), {'device', 'inode'})
+        artifact_report = next(item for item in class_report['artifacts'] if item['path'] == str(artifact))
+        self.assertEqual(set(artifact_report['identity']), {'device', 'inode'})
+        candidate_report = self.ops.build_retention_report(
+            self.policy(keep_count=1), now_epoch=self.NOW + 100 * 86400
+        )
+        candidate = candidate_report['candidates'][0]
+        self.assertEqual(len(candidate['paired_identities']), 1)
+        self.assertEqual(set(candidate['paired_identities'][0]), {'path', 'device', 'inode'})
+        source = (REPO_ROOT / 'scripts/backup_ops.py').read_text()
+        for marker in ('O_NOFOLLOW', 'O_NONBLOCK', 'dir_fd=', 'st_ctime_ns', '_validate_directory_chain'):
+            self.assertIn(marker, source)
+
+    def test_retention_report_cli_emits_json_without_mutation(self):
+        self.artifact('new.bak', 1)
+        old = self.artifact('old.bak', 90)
+        policy_path = self.root.parent / 'policy.json'
+        policy_path.write_text(json.dumps(self.policy(keep_count=1)))
+        before = {path.name: path.read_bytes() for path in self.root.iterdir()}
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / 'scripts/backup_ops.py'),
+                'retention-report',
+                '--policy',
+                str(policy_path),
+                '--now-epoch',
+                str(self.NOW),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        report = json.loads(result.stdout)
+        self.assertEqual([item['path'] for item in report['candidates']], [str(old)])
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.root.iterdir()})
+
+    def test_blocked_retention_report_cli_returns_nonzero_with_json(self):
+        target = self.artifact('target.bin', 90)
+        (self.root / 'linked.bak').symlink_to(target)
+        policy_path = self.root.parent / 'policy.json'
+        policy_path.write_text(json.dumps(self.policy()))
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / 'scripts/backup_ops.py'),
+                'retention-report',
+                '--policy',
+                str(policy_path),
+                '--now-epoch',
+                str(self.NOW),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(json.loads(result.stdout)['blocked'])
+
+
 class BackupPolicyContractTests(unittest.TestCase):
+    def test_retention_policy_schema_is_strict_and_documents_required_guards(self):
+        schema = json.loads(
+            (REPO_ROOT / 'schemas/backup-retention-policy.schema.json').read_text()
+        )
+        self.assertFalse(schema['additionalProperties'])
+        class_schema = schema['$defs']['retentionClass']
+        self.assertFalse(class_schema['additionalProperties'])
+        spec = importlib.util.spec_from_file_location(
+            'schema_backup_ops', REPO_ROOT / 'scripts/backup_ops.py'
+        )
+        assert spec is not None and spec.loader is not None
+        ops = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ops)
+        self.assertEqual(set(schema['properties']), ops._POLICY_FIELDS)
+        self.assertEqual(set(class_schema['properties']), ops._CLASS_FIELDS)
+        for field in (
+            'root',
+            'pattern',
+            'keep_count',
+            'min_age_days',
+            'required_sidecars',
+            'verification_sidecar',
+            'protected_marker',
+            'active_references',
+            'disk_budget_bytes',
+            'candidate_budget_level',
+        ):
+            self.assertIn(field, class_schema['required'])
+
+    def test_retention_runbook_records_parity_and_rollback_coordinates(self):
+        text = (REPO_ROOT / 'docs/14-upgrade-and-maintenance.md').read_text()
+        for required in (
+            'Retention-report control plane',
+            'Canonical source:',
+            'Deployed runtime:',
+            'Verifier:',
+            'Watchdog:',
+            'launchd parity:',
+            'Rollback coordinate:',
+            'No policy-driven delete command is exposed',
+        ):
+            self.assertIn(required, text)
+
     def test_honcho_canonical_script_contract(self):
         text = (ROOT / 'services/honcho-stack/backup-honcho.sh').read_text()
         for required in ('set -euo pipefail', 'umask 077', '.partial', 'gzip -t', 'write-sha256', 'prune'):
