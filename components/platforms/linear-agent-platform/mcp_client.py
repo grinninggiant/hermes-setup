@@ -28,16 +28,17 @@ EXPECTED_VENDOR_TOOL_NAMES = frozenset(
         "delete_attachment", "delete_comment", "delete_diff_comment",
         "delete_status_update", "extract_images", "get_agent_skill", "get_attachment",
         "get_diff", "get_diff_threads", "get_document", "get_issue", "get_issue_status",
-        "get_milestone", "get_project", "get_release", "get_release_note",
+        "get_milestone", "get_notifications", "get_project", "get_release", "get_release_note",
         "get_status_updates", "get_team", "get_template", "get_user", "get_workspace", "list_agent_skills",
         "list_comments", "list_cycles", "list_diffs", "list_documents",
         "list_issue_labels", "list_issue_statuses", "list_issues", "list_milestones",
         "list_project_labels", "list_projects", "list_release_notes",
         "list_release_pipelines", "list_releases", "list_teams", "list_templates", "list_users",
-        "merge_diff", "prepare_attachment_upload", "resolve_diff_thread", "save_comment",
-        "save_diff_comment", "save_document", "save_issue", "save_milestone",
-        "save_project", "save_release", "save_release_note", "save_status_update",
-        "search_documentation", "share_issue", "submit_diff_review", "unshare_issue",
+        "mark_notification", "merge_diff", "prepare_attachment_upload", "resolve_diff_thread",
+        "restore_issue_label", "restore_project_label", "retire_issue_label", "retire_project_label",
+        "save_comment", "save_diff_comment", "save_document", "save_issue", "save_issue_label",
+        "save_milestone", "save_project", "save_project_label", "save_release", "save_release_note",
+        "save_status_update", "search_documentation", "share_issue", "submit_diff_review", "unshare_issue",
     }
 )
 REQUIRED_TOOL_INPUT_FIELDS = {
@@ -157,9 +158,7 @@ NULLABLE_VENDOR_FIELDS = frozenset(
 def _expected_forwarded_contract(tool_name: str, field: str) -> dict[str, Any]:
     expected_type = _expected_input_type(field)
     if (tool_name, field) in NULLABLE_VENDOR_FIELDS:
-        contract: dict[str, Any] = {
-            "anyOf": [{"type": expected_type}, {"type": "null"}]
-        }
+        contract: dict[str, Any] = {"type": [expected_type, "null"]}
     else:
         contract = {"type": expected_type}
     if expected_type == "array":

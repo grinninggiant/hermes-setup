@@ -113,7 +113,7 @@ class LinearMCPClientTests(unittest.IsolatedAsyncioTestCase):
             else:
                 result = {"type": "string"}
             if (tool_name, field) in nullable_fields:
-                result = {"anyOf": [{"type": result["type"]}, {"type": "null"}]}
+                result = {"type": [result["type"], "null"]}
             if (tool_name, field) == ("get_issue", "includeRelations"):
                 result["default"] = False
             elif (tool_name, field) == ("list_issues", "includeArchived"):
@@ -664,13 +664,17 @@ class LinearMCPClientTests(unittest.IsolatedAsyncioTestCase):
                 await self.asyncTearDown()
                 await self.asyncSetUp()
 
-    def test_vendor_tool_contract_tracks_2026_08_29_live_set(self):
-        self.assertEqual(len(EXPECTED_VENDOR_TOOL_NAMES), 57)
+    def test_vendor_tool_contract_tracks_2026_09_09_live_set(self):
+        self.assertEqual(len(EXPECTED_VENDOR_TOOL_NAMES), 65)
         self.assertIn("get_template", EXPECTED_VENDOR_TOOL_NAMES)
         self.assertIn("list_templates", EXPECTED_VENDOR_TOOL_NAMES)
         self.assertIn("template", LIVE_TOOL_PROPERTY_FIELDS["save_issue"])
         self.assertIn("share_issue", EXPECTED_VENDOR_TOOL_NAMES)
         self.assertIn("unshare_issue", EXPECTED_VENDOR_TOOL_NAMES)
+        self.assertIn("get_notifications", EXPECTED_VENDOR_TOOL_NAMES)
+        self.assertIn("mark_notification", EXPECTED_VENDOR_TOOL_NAMES)
+        self.assertIn("save_issue_label", EXPECTED_VENDOR_TOOL_NAMES)
+        self.assertIn("save_project_label", EXPECTED_VENDOR_TOOL_NAMES)
 
     async def test_duplicate_or_oversized_tool_contract_fails_closed(self):
         self.tools.append(dict(self.tools[0]))
