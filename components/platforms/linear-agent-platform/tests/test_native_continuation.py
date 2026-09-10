@@ -143,6 +143,7 @@ class FakeGoalManager:
         "message": "continuing",
     }
     before_evaluate: ClassVar[Callable[[], None] | None] = None
+    owner_checks: list[Callable[[], bool] | None] = []
     resume_calls = 0
     resume_reset_budget: list[bool] = []
     pause_calls = 0
@@ -182,10 +183,21 @@ class FakeGoalManager:
 
     def evaluate_after_turn(
         self, response: str, *, user_initiated: bool, background_processes=None,
-        active_delegations: int = 0,
+        active_delegations: int = 0, owner_check=None,
     ) -> dict:
         assert response
         assert user_initiated is True
+        type(self).owner_checks.append(owner_check)
+        if owner_check is not None and not owner_check():
+            return {
+                "status": None,
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "stale",
+                "reason": "goal ownership changed",
+                "message": "",
+                "stale_owner": True,
+            }
         type(self).background_snapshots.append(background_processes)
         if type(self).waiting:
             return dict(self.decision)
@@ -440,6 +452,7 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         FakeGoalManager.instances.clear()
         FakeGoalManager.existing = False
         FakeGoalManager.before_evaluate = None
+        FakeGoalManager.owner_checks = []
         FakeGoalManager.resume_calls = 0
         FakeGoalManager.resume_reset_budget = []
         FakeGoalManager.pause_calls = 0
@@ -488,6 +501,142 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.drain_patch.stop()
         self.adapter._ledger.close()
         self.temp.cleanup()
+
+    async def test_verified_blocker_dispatches_turkish_structured_notice(self):
+        row = self.adapter._ledger.reserve_turn_decision(
+            "linear-session", "issue-164", "hermes-session", 1, 1, "continue"
+        )
+
+        self.assertTrue(
+            self.adapter._enqueue_turn_terminal_activity(
+                row, "blocked", expected_state="pending", final_state="fenced"
+            )
+        )
+
+        activity = self.adapter._ledger.get_outbox_item(
+            f"activity:turn-decision:{row['decision_id']}"
+        )
+        body = activity["payload"]["body"]
+        self.assertIn("Etkilenen adım: devam teslimi.", body)
+        self.assertIn("Devam durduruldu; ayrıntılı neden doğrulanamadı.", body)
+        self.assertIn("Gerekli işlem:", body)
+        self.assertNotIn("İnsan", body)
+        self.assertNotIn("issue-164", body)
+        self.assertNotIn("acceptance evidence missing", body)
+
+    async def test_verified_stopped_dispatches_closed_session_notice(self):
+        row = self.adapter._ledger.reserve_turn_decision(
+            "linear-session", "issue-164", "hermes-session", 1, 1, "continue"
+        )
+
+        self.assertTrue(
+            self.adapter._enqueue_turn_terminal_activity(
+                row, "stopped", expected_state="pending", final_state="fenced"
+            )
+        )
+
+        activity = self.adapter._ledger.get_outbox_item(
+            f"activity:turn-decision:{row['decision_id']}"
+        )
+        body = activity["payload"]["body"]
+        self.assertIn("Etkilenen adım: devam teslimi.", body)
+        self.assertIn("kesin terminal nedeni doğrulanamadı", body)
+        self.assertIn("Gerekli işlem:", body)
+        self.assertNotIn("İnsan", body)
+        self.assertNotIn("issue-164", body)
+
+    async def test_unknown_blocker_code_is_unverified_without_invented_details(self):
+        event = turn_event()
+
+        self.assertTrue(
+            await self.adapter._visible_ingress_veto(
+                event, "judge prose: secret actor should delete credentials"
+            )
+        )
+
+        activity = self.adapter._ledger.get_outbox_item(
+            self.adapter._ledger._db.execute(
+                "SELECT id FROM outbox ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+        body = activity["payload"]["body"]
+        self.assertIn("Devam durduruldu; ayrıntılı neden doğrulanamadı", body)
+        self.assertIn("Sorumlu ajan: sorumlu ajan.", body)
+        self.assertNotIn("secret actor", body)
+        self.assertNotIn("delete credentials", body)
+        self.assertNotIn("OPS-164", body)
+
+    async def test_ingress_awaiting_input_does_not_forward_unverified_request(self):
+        event = turn_event()
+        event.raw_message = {
+            "agentActivity": {
+                "body": "Which deployment target should I use?",
+            }
+        }
+
+        self.assertTrue(await self.adapter._visible_ingress_veto(event, "awaiting_input"))
+
+        item = self.adapter._ledger.get_outbox_item(
+            self.adapter._ledger._db.execute(
+                "SELECT id FROM outbox ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+        self.assertEqual(item["payload"]["activity_type"], "elicitation")
+        self.assertNotIn("Which deployment target should I use?", item["payload"]["body"])
+        self.assertIn("Gerekli işlem:", item["payload"]["body"])
+        self.assertIn("teknik sorumlu ajan", item["payload"]["body"])
+        self.assertIn("yetkili insan", item["payload"]["body"])
+        self.assertNotIn("live safety", item["payload"]["body"])
+
+    async def test_ingress_blocked_does_not_invent_human_request_and_deduplicates(self):
+        event = turn_event()
+        event.raw_message = {
+            "agentActivity": {"body": "judge prose with secret PII"}
+        }
+
+        self.assertTrue(await self.adapter._visible_ingress_veto(event, "blocked"))
+        self.assertTrue(await self.adapter._visible_ingress_veto(event, "unknown judge prose"))
+
+        rows = self.adapter._ledger._db.execute(
+            "SELECT payload_json FROM outbox"
+        ).fetchall()
+        rows = [row for row in rows if json.loads(row[0]).get("activity_type") == "error"]
+        self.assertEqual(len(rows), 1)
+        body = json.loads(rows[0][0])["body"]
+        self.assertNotIn("secret PII", body)
+        self.assertNotIn("judge prose", body)
+        self.assertNotIn("İnsan isteği", body)
+
+    async def test_terminal_elicitation_does_not_forward_raw_message_or_persist_it(self):
+        fake_messages = {
+            "approval": "Approve production? SECRET=judge-prose-PII-7",
+            "awaiting_input": "Which target? raw judge prose with secret token-8",
+        }
+        for ordinal, (outcome, fake_message) in enumerate(fake_messages.items(), start=1):
+            with self.subTest(outcome=outcome):
+                row = self.adapter._ledger.reserve_turn_decision(
+                    "linear-session", "issue-164", "hermes-session", 1, ordinal, "continue"
+                )
+                self.assertTrue(
+                    self.adapter._enqueue_turn_terminal_activity(
+                        row,
+                        outcome,
+                        fake_message,
+                        expected_state="pending",
+                        final_state="fenced",
+                    )
+                )
+                activity = self.adapter._ledger.get_outbox_item(
+                    f"activity:turn-decision:{row['decision_id']}"
+                )
+                self.assertEqual(activity["payload"]["activity_type"], "elicitation")
+                self.assertNotIn(fake_message, activity["payload"]["body"])
+                self.assertIn("Gerekli işlem:", activity["payload"]["body"])
+                self.assertIn("teknik sorumlu ajan", activity["payload"]["body"])
+                self.assertIn("yetkili insan", activity["payload"]["body"])
+                stored = self.adapter._ledger.get_turn_decision(row["decision_id"])
+                self.assertNotIn(fake_message, str(stored["error"] or ""))
+                self.assertEqual(stored["error"], outcome)
 
     def test_continuation_uses_public_platform_callback_only(self):
         source_text = (PLUGIN_DIR / "adapter.py").read_text(encoding="utf-8")
@@ -687,6 +836,55 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["outcome"], "continue")
         self.assertEqual(rows[0]["dispatch_state"], "completed")
         self.assertEqual(self.admitted, [])
+
+    async def test_real_preparation_completion_preserves_continue_and_reasoned_block(self):
+        """A capped turn is resumable while live, but a live error is terminal."""
+        FakeGoalManager.existing = True
+        FakeGoalManager.existing_status = "active"
+        event = turn_event()
+        await self.adapter.on_processing_start(event)
+        self.adapter.record_completed_turn(
+            chat_id="linear-session", hermes_session_id="hermes-session",
+            turn_id="turn-regression-live", completed=False, failed=False,
+            interrupted=False, turn_exit_reason="max_iterations_reached(90/90)",
+        )
+        await self.adapter.send("linear-session", "capped turn summary")
+        await self.adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+
+        live = self.adapter._ledger.list_turn_decisions("linear-session")
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0]["outcome"], "continue")
+        self.assertEqual(
+            self.adapter._ledger._db.execute(
+                "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\\\"activity_type\\\":\\\"error\\\"%'"
+            ).fetchone()[0],
+            0,
+        )
+
+        self.adapter._linear.status = "error"
+        FakeGoalManager.existing_turns = 3
+        failed_event = turn_event()
+        failed_event.message_id = "webhook-live-session-error"
+        await self.adapter.on_processing_start(failed_event)
+        self.adapter.record_completed_turn(
+            chat_id="linear-session", hermes_session_id="hermes-session",
+            turn_id="turn-regression-error", completed=False, failed=False,
+            interrupted=False, turn_exit_reason="max_iterations_reached(90/90)",
+        )
+        await self.adapter.send("linear-session", "error summary")
+        await self.adapter.on_processing_complete(failed_event, ProcessingOutcome.SUCCESS)
+
+        blocked = [
+            row for row in self.adapter._ledger.list_turn_decisions("linear-session")
+            if row["decision_id"] != live[0]["decision_id"]
+        ]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["outcome"], "blocked")
+        self.assertEqual(blocked[0]["error"], "session_error")
+        terminal = self.adapter._ledger.get_outbox_item(
+            f"activity:turn-decision:{blocked[0]['decision_id']}"
+        )
+        self.assertIn("session_error", terminal["payload"]["body"])
 
     async def test_unchecked_native_done_resumes_same_goal_without_budget_reset_once(self):
         event = turn_event()
@@ -1036,6 +1234,25 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(judged, ["done"])
 
+    def test_fake_goal_manager_owner_check_fences_stale_evaluation(self):
+        manager = FakeGoalManager("hermes-session")
+        manager.state = SimpleNamespace(
+            status="active", created_at=123.0, turns_used=2,
+            max_turns=20, paused_reason=None,
+        )
+        callback = mock.Mock(return_value=False)
+
+        decision = manager.evaluate_after_turn(
+            "stale response", user_initiated=True, owner_check=callback
+        )
+
+        self.assertIs(FakeGoalManager.owner_checks[-1], callback)
+        self.assertEqual(decision["status"], None)
+        self.assertEqual(decision["verdict"], "stale")
+        self.assertTrue(decision["stale_owner"])
+        self.assertEqual(manager.state.turns_used, 2)
+        self.assertEqual(FakeGoalManager.background_snapshots, [])
+
     async def test_real_base_lifecycle_strict_mismatch_is_visible_and_never_executes(self):
         FakeGoalManager.existing = True
         self.adapter.gateway_runner = fake_gateway_runner(
@@ -1056,7 +1273,7 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
 
         handler.assert_not_awaited()
         errors = self.adapter._ledger._db.execute(
-            "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%strict%session%mismatch%'"
+            "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%strict_session_mismatch%'"
         ).fetchone()[0]
         self.assertEqual(errors, 1)
 
@@ -2016,7 +2233,7 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
 
         recovered = self.adapter._ledger.get_turn_decision(row["decision_id"])
         self.assertEqual(recovered["dispatch_state"], "fenced")
-        self.assertIn("interrupted by restart", recovered["error"])
+        self.assertEqual(recovered["error"], "blocked")
 
     async def test_completed_issue_fences_turn_instead_of_delivering_success(self):
         self.adapter._linear = FakeLinear(state_type="completed")
