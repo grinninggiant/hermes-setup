@@ -34,6 +34,7 @@ sys.modules[PACKAGE_NAME] = package
 spec.loader.exec_module(package)
 
 from gateway.config import Platform, PlatformConfig  # noqa: E402
+from gateway.run_inbound import GatewayInboundMixin  # noqa: E402
 
 adapter_mod = __import__(f"{PACKAGE_NAME}.adapter", fromlist=["*"])
 client_mod = __import__(f"{PACKAGE_NAME}.linear_client", fromlist=["*"])
@@ -57,6 +58,13 @@ class FakeRequest:
 
     async def read(self) -> bytes:
         return self._body
+
+
+class DrainingGatewayProbe(GatewayInboundMixin):
+    _draining = True
+
+    def _status_action_gerund(self):
+        return "restarting"
 
 
 class FakeLinear:
@@ -6979,6 +6987,113 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
                     self.adapter._linear.calls[-1],
                     (f"session-core-budget-near-{index}", "response", notice),
                 )
+
+    async def test_exact_restart_and_recovered_notices_are_ephemeral_thoughts(self):
+        handled, restart_notice, command = await (
+            DrainingGatewayProbe()._hm_dispatch_quick_and_plugin_commands(
+                None, None, "/status"
+            )
+        )
+        self.assertTrue(handled)
+        self.assertEqual(command, "/status")
+        self.assertEqual(
+            restart_notice,
+            "⏳ Gateway is restarting and is not accepting new work right now.",
+        )
+        recovered_notice = (
+            "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+            + restart_notice
+        )
+
+        for index, notice in enumerate((restart_notice, recovered_notice)):
+            with self.subTest(notice=notice):
+                result = await self.adapter.send(f"session-restart-notice-{index}", notice)
+                self.assertTrue(result.success)
+                self.assertEqual(
+                    self.adapter._linear.calls[-1],
+                    (f"session-restart-notice-{index}", "thought", notice),
+                )
+                self.assertTrue(self.adapter._linear.activity_ephemeral[-1])
+
+    async def test_restart_notices_do_not_consume_native_turn_bookkeeping(self):
+        restart_notice = "⏳ Gateway is restarting and is not accepting new work right now."
+        recovered_notice = (
+            "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+            + restart_notice
+        )
+        chat_id = "session-restart-bookkeeping"
+        active_event = MessageEvent(
+            text="continue",
+            message_type=MessageType.TEXT,
+            source=self.adapter.build_source(
+                chat_id=chat_id,
+                chat_name="OPS-221 — Restart notice",
+                chat_type="dm",
+                user_id="user-1",
+                user_name="Mutlu",
+                role_authorized=True,
+            ),
+            metadata={"linear_agent_session_id": "native-session-1"},
+        )
+        completed_turn_result = {"turn_id": "turn-1", "session_id": "hermes-1"}
+        self.adapter._native_goal_continuation_enabled = True
+        self.adapter._active_turn_events[chat_id] = active_event
+        self.adapter._completed_turn_results[chat_id] = completed_turn_result
+
+        for notice in (restart_notice, recovered_notice):
+            result = await self.adapter.send(chat_id, notice)
+            self.assertTrue(result.success)
+
+        self.assertIs(self.adapter._active_turn_events[chat_id], active_event)
+        self.assertIs(
+            self.adapter._completed_turn_results[chat_id], completed_turn_result
+        )
+
+    async def test_restart_notice_near_matches_remain_final_content(self):
+        notices = (
+            "⏳ Gateway is restarting and is not accepting new work right now!",
+            "⏳ Gateway is restarting and is not accepting new work right now. Please retry.",
+            "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n"
+            " \n⏳ Gateway is restarting and is not accepting new work right now.",
+        )
+        for index, notice in enumerate(notices):
+            with self.subTest(notice=notice):
+                result = await self.adapter.send(f"session-restart-near-{index}", notice)
+                self.assertTrue(result.success)
+                self.assertEqual(
+                    self.adapter._linear.calls[-1],
+                    (f"session-restart-near-{index}", "response", notice),
+                )
+                self.assertFalse(self.adapter._linear.activity_ephemeral[-1])
+
+    async def test_exact_restart_notices_are_suppressed_after_terminal_fence(self):
+        restart_notice = "⏳ Gateway is restarting and is not accepting new work right now."
+        recovered_notice = (
+            "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+            + restart_notice
+        )
+        chat_id = "session-restart-terminal-fence"
+        final = await self.adapter.send(chat_id, "Final deliverable")
+        self.assertTrue(final.success)
+        before = len(self.adapter._linear.calls)
+
+        for notice in (restart_notice, recovered_notice):
+            result = await self.adapter.send(chat_id, notice)
+            self.assertTrue(result.success)
+            self.assertEqual(len(self.adapter._linear.calls), before)
+
+    async def test_core_release_produces_the_trusted_restart_notice(self):
+        handled, result, command = await (
+            DrainingGatewayProbe()._hm_dispatch_quick_and_plugin_commands(
+                None, None, "/status"
+            )
+        )
+        self.assertTrue(handled)
+        self.assertEqual(command, "/status")
+        self.assertIn(
+            "⏳ Gateway is restarting and is not accepting new work right now.",
+            result,
+        )
 
     async def test_interim_marker_requires_literal_true(self):
         for index, value in enumerate((False, "true", 1, None)):
