@@ -109,6 +109,7 @@ class BrokerTests(unittest.TestCase):
             {
                 "permissions": {
                     "actions": "read",
+                    "administration": "write",
                     "contents": "write",
                     "pull_requests": "write",
                 },
@@ -127,6 +128,7 @@ class BrokerTests(unittest.TestCase):
                     "repository_selection": "all",
                     "permissions": {
                         "actions": "read",
+                        "administration": "write",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
@@ -148,6 +150,7 @@ class BrokerTests(unittest.TestCase):
                     "repository_selection": "selected",
                     "permissions": {
                         "actions": "read",
+                        "administration": "write",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",

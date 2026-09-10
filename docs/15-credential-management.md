@@ -91,7 +91,7 @@ The default is no profile-scoped GitHub access. Public-web research does not cou
 
 | Persona / profile | Repository allowlist | Read | Write | API / PR / CI | Decision |
 | --- | --- | --- | --- | --- | --- |
-| Derya / `general` | `grinninggiant/hermes-setup` | brokered HTTPS | brokered HTTPS | API + PR write; Actions read | active |
+| Derya / `general` | `grinninggiant/hermes-setup` | brokered HTTPS | brokered HTTPS | Repository admin + Contents/PR write; Actions read | active |
 | Naz / `coder` | none | no | no | no | no access until an exact game/build/CI repository and App scope are approved |
 | Doruk / `researcher` | none | no | no | no | no access; a future research need defaults to repository-specific read-only review |
 | Tuna / `assistant` | none | no | no | no | no access |
