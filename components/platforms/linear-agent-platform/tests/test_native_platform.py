@@ -6899,6 +6899,87 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success)
         self.assertEqual(len(self.adapter._linear.calls), before)
 
+    async def test_core_budget_notice_without_metadata_is_ephemeral_thought(self):
+        notice = "⚠️ Iteration budget exhausted (1/1) — asking model to summarise"
+        chat_id = "session-core-budget-notice"
+        active_event = MessageEvent(
+            text="continue",
+            message_type=MessageType.TEXT,
+            source=self.adapter.build_source(
+                chat_id=chat_id,
+                chat_name="OPS-221 — Budget notice",
+                chat_type="dm",
+                user_id="user-1",
+                user_name="Mutlu",
+                role_authorized=True,
+            ),
+            metadata={"linear_agent_session_id": "native-session-1"},
+        )
+        completed_turn_result = {
+            "completed": False,
+            "failed": False,
+            "interrupted": False,
+            "turn_exit_reason": "max_iterations_reached(1/1)",
+            "session_id": "hermes-session-1",
+            "turn_id": "turn-1",
+        }
+        self.adapter._native_goal_continuation_enabled = True
+        self.adapter._active_turn_events[chat_id] = active_event
+        self.adapter._completed_turn_results[chat_id] = completed_turn_result
+
+        result = await self.adapter.send(chat_id, notice)
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            self.adapter._linear.calls[-1],
+            (chat_id, "thought", notice),
+        )
+        self.assertTrue(self.adapter._linear.activity_ephemeral[-1])
+        self.assertIs(self.adapter._active_turn_events[chat_id], active_event)
+        self.assertIs(
+            self.adapter._completed_turn_results[chat_id], completed_turn_result
+        )
+
+    async def test_exact_budget_notice_is_suppressed_after_terminal_fences(self):
+        notice = "⚠️ Iteration budget exhausted (1/1) — asking model to summarise"
+
+        for fence in ("terminal_progress", "closure"):
+            with self.subTest(fence=fence):
+                chat_id = f"session-core-budget-{fence}"
+                if fence == "terminal_progress":
+                    self.adapter.open_progress_turn(chat_id, "turn-1")
+                    final = await self.adapter.send(chat_id, "Final deliverable")
+                    self.assertTrue(final.success)
+                else:
+                    self.adapter._ledger.enqueue_closure_activity(
+                        f"closure-{fence}",
+                        "issue-budget-fence",
+                        chat_id,
+                        f"activity-{fence}",
+                        "Closure reconciled.",
+                        {},
+                    )
+
+                before = len(self.adapter._linear.calls)
+                result = await self.adapter.send(chat_id, notice)
+
+                self.assertTrue(result.success)
+                self.assertEqual(len(self.adapter._linear.calls), before)
+
+    async def test_budget_notice_near_matches_remain_final_content(self):
+        notices = (
+            "⚠️ Iteration budget exhausted (1/1) — asking model to summarize",
+            "⚠️ Iteration budget exhausted (1/1) — asking model to summarise now",
+            "I saw ⚠️ Iteration budget exhausted (1/1) — asking model to summarise",
+        )
+        for index, notice in enumerate(notices):
+            with self.subTest(notice=notice):
+                await self.adapter.send(f"session-core-budget-near-{index}", notice)
+                self.assertEqual(
+                    self.adapter._linear.calls[-1],
+                    (f"session-core-budget-near-{index}", "response", notice),
+                )
+
     async def test_interim_marker_requires_literal_true(self):
         for index, value in enumerate((False, "true", 1, None)):
             with self.subTest(value=value):
