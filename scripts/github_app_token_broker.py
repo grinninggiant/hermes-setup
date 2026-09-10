@@ -25,7 +25,8 @@ INTEGRATION_NAME = "Derya GitHub App Token Broker"
 INTEGRATION_VERSION = "v0.1.0"
 TOKEN_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
 GH_BINARY = "/opt/homebrew/bin/gh"
-ALLOWED_REPOSITORY = "grinninggiant/hermes-setup"
+ALLOWED_OWNER = "grinninggiant"
+EXPECTED_REPOSITORY_SCOPE = f"{ALLOWED_OWNER}/*"
 EXPECTED_APP_ID = 4550664
 EXPECTED_INSTALLATION_ID = 160545271
 EXPECTED_OWNER = "grinninggiant"
@@ -84,7 +85,7 @@ def normalize_resolved(values: Mapping[str, str]) -> dict[str, Any]:
         raise BrokerError("invalid GitHub App credential metadata") from exc
     if app_id != EXPECTED_APP_ID or installation_id != EXPECTED_INSTALLATION_ID:
         raise BrokerError("GitHub App identity mismatch")
-    if repository != ALLOWED_REPOSITORY:
+    if repository != EXPECTED_REPOSITORY_SCOPE:
         raise BrokerError("GitHub App repository scope mismatch")
     first_line = private_key.splitlines()[0] if private_key.splitlines() else ""
     footer = private_key.rstrip().splitlines()[-1] if private_key.rstrip().splitlines() else ""
@@ -207,12 +208,8 @@ def mint_installation_token(
     *,
     jwt: str,
     installation_id: int,
-    repository: str,
     opener: Callable[..., Any] = urllib.request.urlopen,
 ) -> str:
-    owner, repo = repository.split("/", 1)
-    if owner != "grinninggiant" or repo != "hermes-setup":
-        raise BrokerError("GitHub App repository scope mismatch")
     payload = json.dumps(
         {
             "permissions": {
@@ -220,8 +217,7 @@ def mint_installation_token(
                 "administration": "write",
                 "contents": "write",
                 "pull_requests": "write",
-            },
-            "repositories": [repo],
+            }
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -310,7 +306,6 @@ def validate_command(command: Sequence[str]) -> list[str]:
     if len(args) < 3 or args[1] != "api":
         raise BrokerError("only gh auth status and pinned gh api routes are allowed")
     endpoint = args[2]
-    repo_root = "repos/grinninggiant/hermes-setup"
     if (
         not re.fullmatch(r"[A-Za-z0-9._~!$&'()*+,;=:@/-]+", endpoint)
         or any(segment in {"", ".", ".."} for segment in endpoint.split("/"))
@@ -318,10 +313,18 @@ def validate_command(command: Sequence[str]) -> list[str]:
         or "\\" in endpoint
     ):
         raise BrokerError("GitHub API route is not canonical")
-    if endpoint != "installation/repositories" and not (
-        endpoint == repo_root or endpoint.startswith(f"{repo_root}/")
-    ):
-        raise BrokerError("GitHub API route is outside the pinned repository")
+    repo_root = ""
+    if endpoint != "installation/repositories":
+        parts = endpoint.split("/")
+        if (
+            len(parts) < 3
+            or parts[0] != "repos"
+            or parts[1] != ALLOWED_OWNER
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", parts[2])
+            or parts[2] in {".", ".."}
+        ):
+            raise BrokerError("GitHub API route is outside the approved organization")
+        repo_root = "/".join(parts[:3])
     method = "GET"
     method_explicit = False
     raw_fields: dict[str, str] = {}
@@ -432,11 +435,7 @@ def parse_credential_request(stdin_data: str) -> dict[str, str]:
 
 
 def validate_credential_request(fields: Mapping[str, str]) -> str:
-    """Return the canonical repository when the request is in scope.
-
-    Only HTTPS pushes against github.com for grinninggiant/hermes-setup are
-    answered. Anything else (protocol, host, path, extra keys) fails closed.
-    """
+    """Return a canonical Grinning Giant repository when the request is in scope."""
     allowed_keys = {"protocol", "host", "path"}
     if set(fields) - allowed_keys:
         raise BrokerError("git credential request carries unexpected fields")
@@ -447,19 +446,23 @@ def validate_credential_request(fields: Mapping[str, str]) -> str:
         raise BrokerError("git credential request is not HTTPS")
     if host != "github.com":
         raise BrokerError("git credential request host is not github.com")
-    if path not in {ALLOWED_REPOSITORY, f"{ALLOWED_REPOSITORY}.git"}:
-        raise BrokerError("git credential request is outside the pinned repository")
-    return ALLOWED_REPOSITORY
+    canonical = path.removesuffix(".git")
+    if not re.fullmatch(rf"{re.escape(ALLOWED_OWNER)}/[A-Za-z0-9._-]+", canonical):
+        raise BrokerError("git credential request is outside the approved organization")
+    repository = canonical.split("/", 1)[1]
+    if repository in {".", ".."}:
+        raise BrokerError("git credential request repository is not canonical")
+    return canonical
 
 
-def emit_credential_response(token: str) -> str:
+def emit_credential_response(token: str, repository: str) -> str:
     """Format a git credential response; the token is only written to stdout."""
     if not token:
         raise BrokerError("empty GitHub installation token")
     return (
         f"protocol=https\n"
         f"host=github.com\n"
-        f"path={ALLOWED_REPOSITORY}\n"
+        f"path={repository}\n"
         f"username=x-access-token\n"
         f"password={token}\n"
     )
@@ -468,7 +471,7 @@ def emit_credential_response(token: str) -> str:
 def credential_get(*, opener: Callable[..., Any] = urllib.request.urlopen) -> int:
     """Handle `--credential get`: mint and print a scoped installation token."""
     request = parse_credential_request(sys.stdin.read())
-    validate_credential_request(request)
+    repository = validate_credential_request(request)
     bootstrap_token = os.environ.get(TOKEN_ENV, "")
     resolved = asyncio.run(resolve_references(bootstrap_token))
     os.environ.pop(TOKEN_ENV, None)
@@ -477,10 +480,9 @@ def credential_get(*, opener: Callable[..., Any] = urllib.request.urlopen) -> in
     installation_token = mint_installation_token(
         jwt=jwt,
         installation_id=resolved["installation_id"],
-        repository=resolved["repository"],
         opener=opener,
     )
-    sys.stdout.write(emit_credential_response(installation_token))
+    sys.stdout.write(emit_credential_response(installation_token, repository))
     return 0
 
 
@@ -520,7 +522,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     installation_token = mint_installation_token(
         jwt=jwt,
         installation_id=resolved["installation_id"],
-        repository=resolved["repository"],
     )
     with tempfile.TemporaryDirectory(
         prefix="derya-gh-config-", dir="/private/tmp"

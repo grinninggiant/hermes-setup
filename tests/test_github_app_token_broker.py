@@ -41,7 +41,7 @@ class BrokerTests(unittest.TestCase):
             {
                 "app_id": "4550664",
                 "installation_id": "160545271",
-                "repository": "grinninggiant/hermes-setup",
+                "repository": "grinninggiant/*",
                 "private_key": "-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----",
             }
         )
@@ -57,7 +57,7 @@ class BrokerTests(unittest.TestCase):
             broken = {
                 "app_id": "4550664",
                 "installation_id": "160545271",
-                "repository": "grinninggiant/hermes-setup",
+                "repository": "grinninggiant/*",
                 "private_key": "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
             }
             broken[field] = invalid
@@ -82,7 +82,7 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(signature, "c2lnbmF0dXJl")
         self.assertEqual(captured["private_key"], "private")
 
-    def test_mint_installation_token_pins_repository_and_permissions(self):
+    def test_mint_installation_token_uses_all_installed_repositories_and_pinned_permissions(self):
         captured = {}
 
         def opener(request, timeout):
@@ -95,7 +95,6 @@ class BrokerTests(unittest.TestCase):
         result = BROKER.mint_installation_token(
             jwt="app-jwt",
             installation_id=160545271,
-            repository="grinninggiant/hermes-setup",
             opener=opener,
         )
         self.assertEqual(result, "installation-token")
@@ -112,8 +111,7 @@ class BrokerTests(unittest.TestCase):
                     "administration": "write",
                     "contents": "write",
                     "pull_requests": "write",
-                },
-                "repositories": ["hermes-setup"],
+                }
             },
         )
         self.assertEqual(captured["timeout"], 30)
@@ -193,6 +191,12 @@ class BrokerTests(unittest.TestCase):
             ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-setup"],
         )
         self.assertEqual(
+            BROKER.validate_command(
+                ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-agent"]
+            ),
+            ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-agent"],
+        )
+        self.assertEqual(
             BROKER.validate_command(["/opt/homebrew/bin/gh", "auth", "status"]),
             ["/opt/homebrew/bin/gh", "auth", "status"],
         )
@@ -259,7 +263,7 @@ class BrokerTests(unittest.TestCase):
         resolve_references.return_value = {
             "app_id": 4550664,
             "installation_id": 160545271,
-            "repository": "grinninggiant/hermes-setup",
+            "repository": "grinninggiant/*",
             "private_key": "private",
         }
         run_command.return_value = SimpleNamespace(
@@ -309,7 +313,7 @@ class BrokerTests(unittest.TestCase):
             with self.subTest(request=request), self.assertRaises(BROKER.BrokerError):
                 BROKER.parse_credential_request(request)
 
-    def test_validate_credential_request_accepts_only_pinned_repository(self):
+    def test_validate_credential_request_accepts_any_canonical_grinninggiant_repository(self):
         self.assertEqual(
             BROKER.validate_credential_request(
                 {
@@ -330,6 +334,16 @@ class BrokerTests(unittest.TestCase):
             ),
             "grinninggiant/hermes-setup",
         )
+        self.assertEqual(
+            BROKER.validate_credential_request(
+                {
+                    "protocol": "https",
+                    "host": "github.com",
+                    "path": "grinninggiant/hermes-agent.git",
+                }
+            ),
+            "grinninggiant/hermes-agent",
+        )
 
         invalid_requests = (
             {"protocol": "http", "host": "github.com", "path": "grinninggiant/hermes-setup"},
@@ -349,14 +363,16 @@ class BrokerTests(unittest.TestCase):
                 BROKER.validate_credential_request(fields)
 
     def test_emit_credential_response_writes_token_only_to_stdout_protocol(self):
-        response = BROKER.emit_credential_response("installation-token-123")
+        response = BROKER.emit_credential_response(
+            "installation-token-123", "grinninggiant/hermes-agent"
+        )
         self.assertIn("protocol=https\n", response)
         self.assertIn("host=github.com\n", response)
-        self.assertIn("path=grinninggiant/hermes-setup\n", response)
+        self.assertIn("path=grinninggiant/hermes-agent\n", response)
         self.assertIn("username=x-access-token\n", response)
         self.assertIn("password=installation-token-123\n", response)
         with self.assertRaises(BROKER.BrokerError):
-            BROKER.emit_credential_response("")
+            BROKER.emit_credential_response("", "grinninggiant/hermes-agent")
 
     @mock.patch.object(BROKER, "mint_installation_token", return_value="credential-token")
     @mock.patch.object(BROKER, "verify_installation")
@@ -372,18 +388,19 @@ class BrokerTests(unittest.TestCase):
         resolve_references.return_value = {
             "app_id": 4550664,
             "installation_id": 160545271,
-            "repository": "grinninggiant/hermes-setup",
+            "repository": "grinninggiant/*",
             "private_key": "private",
         }
         stdout = io.StringIO()
         with (
             mock.patch.dict(os.environ, {BROKER.TOKEN_ENV: "bootstrap"}, clear=False),
-            mock.patch.object(BROKER.sys, "stdin", io.StringIO("protocol=https\nhost=github.com\npath=grinninggiant/hermes-setup\n\n")),
+            mock.patch.object(BROKER.sys, "stdin", io.StringIO("protocol=https\nhost=github.com\npath=grinninggiant/hermes-agent\n\n")),
             mock.patch.object(BROKER.sys, "stdout", stdout),
         ):
             result = BROKER.main(["--credential", "get"])
         self.assertEqual(result, 0)
         self.assertIn("username=x-access-token\n", stdout.getvalue())
+        self.assertIn("path=grinninggiant/hermes-agent\n", stdout.getvalue())
         self.assertIn("password=credential-token\n", stdout.getvalue())
         self.assertNotIn("bootstrap", stdout.getvalue())
 
