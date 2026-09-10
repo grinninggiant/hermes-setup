@@ -8,6 +8,11 @@ case "$profile" in
   *) print -u2 -- "Unsupported Hermes profile: $profile"; exit 64 ;;
 esac
 
+hermes_executable="/Users/mutlupolatcan/.local/bin/hermes"
+if [[ "$profile" == "general" ]]; then
+  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-293daf98684321b628c29adbd3eef064b1d3fdc9/venv/bin/hermes"
+fi
+
 service="com.polatcangames.hermes.op-service-account"
 token=$(/usr/bin/security find-generic-password -s "$service" -a "$profile" -w)
 [[ -n "$token" ]] || { print -u2 -- "Missing 1Password service-account token for $profile"; exit 65; }
@@ -25,4 +30,5 @@ bootstrap_script="$bootstrap_root/hermes_gateway_sdk_bootstrap.py"
   exit 66
 }
 
-exec "$bootstrap_python" "$bootstrap_script" "$profile"
+exec "$bootstrap_python" "$bootstrap_script" "$profile" \
+  --hermes-executable "$hermes_executable"
