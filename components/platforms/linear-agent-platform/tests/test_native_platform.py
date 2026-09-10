@@ -135,6 +135,41 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIs(context.hooks["pre_gateway_dispatch"], package._pre_gateway_dispatch)
         self.assertIs(context.hooks["pre_tool_call"], package._pre_tool_progress)
         self.assertIs(context.hooks["on_interim_message"], package._on_interim_message)
+        self.assertIs(context.hooks["on_session_end"], package._on_session_end)
+
+    def test_session_end_hook_forwards_structured_result_to_profile_adapter(self):
+        adapter = mock.Mock()
+
+        def session_env(name, default=""):
+            return {
+                "HERMES_SESSION_CHAT_ID": "linear-session",
+                "HERMES_SESSION_PROFILE": "researcher",
+            }.get(name, default)
+
+        with (
+            mock.patch.object(package, "_progress_adapters", [adapter]),
+            mock.patch("gateway.session_context.get_session_env", side_effect=session_env),
+        ):
+            package._on_session_end(
+                session_id="hermes-session",
+                turn_id="turn-1",
+                completed=False,
+                failed=False,
+                interrupted=False,
+                turn_exit_reason="max_iterations_reached(90/90)",
+                platform="linear",
+            )
+
+        adapter.record_completed_turn.assert_called_once_with(
+            chat_id="linear-session",
+            profile="researcher",
+            hermes_session_id="hermes-session",
+            turn_id="turn-1",
+            completed=False,
+            failed=False,
+            interrupted=False,
+            turn_exit_reason="max_iterations_reached(90/90)",
+        )
 
     def test_codex_streamed_commentary_hook_gap_is_an_explicit_residual(self):
         from run_agent import AIAgent
@@ -506,8 +541,8 @@ class PluginRegistrationTests(unittest.TestCase):
                 get_channel_routing_context=mock.AsyncMock(return_value=context),
             )
             adapter.handle_message = handle
-            event_1 = mock.Mock()
-            event_2 = mock.Mock()
+            event_1 = mock.Mock(metadata={})
+            event_2 = mock.Mock(metadata={})
 
             first = asyncio.create_task(adapter.dispatch_channel_route(
                 "OPS-159", "issue-159", "session-active", event_1
@@ -1827,7 +1862,7 @@ class LedgerTests(unittest.TestCase):
             ledger = DeliveryLedger(str(path))
 
             self.assertEqual(
-                ledger._db.execute("PRAGMA user_version").fetchone()[0], 8
+                ledger._db.execute("PRAGMA user_version").fetchone()[0], 10
             )
             self.assertEqual(
                 ledger._db.execute(
@@ -1887,7 +1922,7 @@ class LedgerTests(unittest.TestCase):
                 )
             )
             self.assertEqual(recovered.activation_counts()["dispatch_unknown"], 1)
-            self.assertEqual(recovered._db.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(recovered._db.execute("PRAGMA user_version").fetchone()[0], 10)
             recovered.close()
 
     def test_direct_activation_claim_is_restart_ambiguous_and_watchdog_visible(self):
@@ -2174,7 +2209,7 @@ class LedgerTests(unittest.TestCase):
             self.assertTrue(recovered.claim_wait("session-8", now=103))
             recovered.mark_wait_resumed("session-8", now=104)
             self.assertEqual(recovered.get_wait("session-8")["state"], "resumed")
-            self.assertEqual(recovered._db.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(recovered._db.execute("PRAGMA user_version").fetchone()[0], 10)
             recovered.close()
 
     def test_closure_outbox_orders_ephemeral_indicator_before_final_response(self):
@@ -2291,7 +2326,7 @@ class LedgerTests(unittest.TestCase):
             ledger.close()
 
             recovered = DeliveryLedger(path)
-            self.assertEqual(recovered._db.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(recovered._db.execute("PRAGMA user_version").fetchone()[0], 10)
             self.assertEqual(
                 recovered.get_outbox_item(final.id)["state"],
                 "dead",
@@ -2465,6 +2500,27 @@ class AdapterCredentialTests(unittest.TestCase):
         self.assertEqual(constructed._closure_allowed_team_ids, set())
         self.assertEqual(constructed._activation_allowed_team_ids, set())
         self.assertEqual(constructed._planned_owner_ids, set())
+
+    def test_goal_rollover_cap_only_accepts_a_narrower_non_boolean_integer(self):
+        base = {
+            "oauth_file": "/tmp/linear-oauth.json",
+            "database_path": "/tmp/linear.sqlite3",
+        }
+        with mock.patch.dict(os.environ, {"LINEAR_WEBHOOK_SECRET": "s" * 32}, clear=False):
+            for value in (0, 1, 2, 3):
+                with self.subTest(value=value):
+                    config = PlatformConfig(
+                        enabled=True,
+                        extra={**base, "goal_max_budget_rollovers": value},
+                    )
+                    self.assertTrue(LinearPlatformAdapter.validate_config(config))
+            for value in (True, -1, 4, "2", 1.5):
+                with self.subTest(value=value):
+                    config = PlatformConfig(
+                        enabled=True,
+                        extra={**base, "goal_max_budget_rollovers": value},
+                    )
+                    self.assertFalse(LinearPlatformAdapter.validate_config(config))
 
     def test_validate_config_accepts_process_environment_secret_without_file(self):
         config = PlatformConfig(
@@ -6820,6 +6876,51 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(durable["activity_type"], "response")
         self.assertTrue(durable["terminal_progress_key"].startswith("terminal:"))
 
+    async def test_core_interim_metadata_is_nonterminal_without_text_matching(self):
+        for index, text in enumerate((
+            "⏳ Working — 15 min — iteration 53/90, context compression started",
+            "✓ Context compaction complete — continuing turn...",
+            "arbitrary future core progress wording",
+        )):
+            with self.subTest(text=text):
+                chat = f"session-core-interim-{index}"
+                result = await self.adapter.send(chat, text, metadata={"_interim_send": True})
+                self.assertTrue(result.success)
+                self.assertEqual(self.adapter._linear.calls[-1], (chat, "thought", text))
+                self.assertTrue(self.adapter._linear.activity_ephemeral[-1])
+
+    async def test_core_interim_notice_cannot_reopen_terminal_progress(self):
+        chat = "session-core-interim-terminal"
+        await self.adapter.send(chat, "actual final")
+        before = len(self.adapter._linear.calls)
+        result = await self.adapter.send(
+            chat, "future status notice", metadata={"_interim_send": True}
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(len(self.adapter._linear.calls), before)
+
+    async def test_interim_marker_requires_literal_true(self):
+        for index, value in enumerate((False, "true", 1, None)):
+            with self.subTest(value=value):
+                chat = f"session-not-interim-{index}"
+                await self.adapter.send(chat, "actual final", metadata={"_interim_send": value})
+                self.assertEqual(self.adapter._linear.calls[-1], (chat, "response", "actual final"))
+
+    async def test_non_streaming_api_wait_heartbeat_is_ephemeral_thought(self):
+        heartbeat = (
+            "⏳ Working — 9 min — iteration 26/90, "
+            "waiting for non-streaming API response"
+        )
+
+        result = await self.adapter.send("session-non-streaming-wait", heartbeat)
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            self.adapter._linear.calls[-1],
+            ("session-non-streaming-wait", "thought", heartbeat),
+        )
+        self.assertTrue(self.adapter._linear.activity_ephemeral[-1])
+
     async def test_terminal_without_prior_tool_fences_late_heartbeat_until_fresh_turn(self):
         late_heartbeat = "⏳ Working — 5 min — iteration 20/90, receiving stream response"
         fresh_heartbeat = "⏳ Working — 6 min — iteration 21/90, receiving stream response"
@@ -7811,6 +7912,7 @@ class LinearClientBehaviorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("inverseRelations", query)
             return {
                 "issue": {
+                    "id": "issue-8",
                     "inverseRelations": {
                         "nodes": [
                             {
@@ -7839,7 +7941,8 @@ class LinearClientBehaviorTests(unittest.IsolatedAsyncioTestCase):
                                     "state": {"name": "Todo", "type": "unstarted"},
                                 },
                             },
-                        ]
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
                     }
                 }
             }
