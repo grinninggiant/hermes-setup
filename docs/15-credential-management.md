@@ -81,9 +81,9 @@ Codex `auth.json`, Hermes `mcp-tokens/*.json`, Linear's OAuth JSON, and the offi
 
 ### Derya GitHub App identity
 
-Derya's unattended GitHub API path uses a dedicated GitHub App installed only on `mpolatcan/hermes-setup`. The App ID, installation ID, repository scope, and private-key attachment live in the profile-scoped `Derya - Secrets` item. The private key is never mapped into the long-running gateway environment.
+Derya's unattended GitHub API path uses the organization-owned `Derya Hermes` GitHub App. The App installation is attached to all current and future repositories in `grinninggiant`, while the local broker independently restricts each minted token and command to its reviewed repository allowlist. The App ID, installation ID, active repository allowlist entry, and private-key attachment live in the profile-scoped `Derya - Secrets` item. The private key is never mapped into the long-running gateway environment.
 
-`~/.hermes/scripts/derya-gh` obtains the general profile's existing 1Password service-account bootstrap identity from Keychain, resolves only the four pinned GitHub App references through the official SDK, signs a short-lived App JWT in memory, verifies the pinned installation owner/selection/permission set, requests a repository-restricted installation token, removes the bootstrap identity, and runs the pinned `/opt/homebrew/bin/gh` with a fresh mode-`0700` config directory. The wrapper never prints either credential and does not cache the installation token. Its command gate allows only exact `gh auth status` and API routes under `repos/mpolatcan/hermes-setup` plus the read-only installation-scope check; aliases, extensions, token printing, custom hosts and generic gh commands fail closed. Agent Git operations use the explicit `derya-gh-credential` helper over HTTPS. The host user's personal SSH identity remains available only outside Hermes agent sessions.
+`~/.hermes/scripts/derya-gh` obtains the general profile's existing 1Password service-account bootstrap identity from Keychain, resolves only the four pinned GitHub App references through the official SDK, signs a short-lived App JWT in memory, verifies the pinned organization installation, all-repositories selection, and exact permission set, requests a token restricted to `grinninggiant/hermes-setup`, removes the bootstrap identity, and runs the pinned `/opt/homebrew/bin/gh` with a fresh mode-`0700` config directory. The wrapper never prints either credential and does not cache the installation token. Its command gate allows only exact `gh auth status` and API routes under `repos/grinninggiant/hermes-setup` plus the read-only installation-scope check; aliases, extensions, token printing, custom hosts and generic gh commands fail closed. Agent Git operations use the explicit `derya-gh-credential` helper over HTTPS. The host user's personal SSH identity remains available only outside Hermes agent sessions. Adding another Grinning Giant repository to the broker remains a reviewed allowlist change even though the GitHub installation already covers future repositories.
 
 ### Fleet GitHub access matrix
 
@@ -91,7 +91,7 @@ The default is no profile-scoped GitHub access. Public-web research does not cou
 
 | Persona / profile | Repository allowlist | Read | Write | API / PR / CI | Decision |
 | --- | --- | --- | --- | --- | --- |
-| Derya / `general` | `mpolatcan/hermes-setup` | brokered HTTPS | brokered HTTPS | API + PR write; Actions read | active |
+| Derya / `general` | `grinninggiant/hermes-setup` | brokered HTTPS | brokered HTTPS | API + PR write; Actions read | active |
 | Naz / `coder` | none | no | no | no | no access until an exact game/build/CI repository and App scope are approved |
 | Doruk / `researcher` | none | no | no | no | no access; a future research need defaults to repository-specific read-only review |
 | Tuna / `assistant` | none | no | no | no | no access |
@@ -112,7 +112,7 @@ Acceptance checks:
 ```bash
 ~/.hermes/scripts/derya-gh auth status
 ~/.hermes/scripts/derya-gh api installation/repositories | jq '{total_count,repositories:[.repositories[].full_name]}'
-~/.hermes/scripts/derya-gh api repos/mpolatcan/hermes-setup | jq '.full_name'
+~/.hermes/scripts/derya-gh api repos/grinninggiant/hermes-setup | jq '.full_name'
 ssh -T -o BatchMode=yes git@github.com
 ```
 

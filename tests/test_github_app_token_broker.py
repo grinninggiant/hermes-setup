@@ -40,24 +40,24 @@ class BrokerTests(unittest.TestCase):
         values = BROKER.normalize_resolved(
             {
                 "app_id": "4550664",
-                "installation_id": "152740425",
-                "repository": "mpolatcan/hermes-setup",
+                "installation_id": "160545271",
+                "repository": "grinninggiant/hermes-setup",
                 "private_key": "-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----",
             }
         )
         self.assertEqual(values["app_id"], 4550664)
-        self.assertEqual(values["installation_id"], 152740425)
+        self.assertEqual(values["installation_id"], 160545271)
 
         for field, invalid in (
             ("app_id", "4550665"),
-            ("installation_id", "152740426"),
+            ("installation_id", "160545272"),
             ("repository", "mpolatcan/other"),
             ("private_key", "not-a-key"),
         ):
             broken = {
                 "app_id": "4550664",
-                "installation_id": "152740425",
-                "repository": "mpolatcan/hermes-setup",
+                "installation_id": "160545271",
+                "repository": "grinninggiant/hermes-setup",
                 "private_key": "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
             }
             broken[field] = invalid
@@ -94,14 +94,14 @@ class BrokerTests(unittest.TestCase):
 
         result = BROKER.mint_installation_token(
             jwt="app-jwt",
-            installation_id=152740425,
-            repository="mpolatcan/hermes-setup",
+            installation_id=160545271,
+            repository="grinninggiant/hermes-setup",
             opener=opener,
         )
         self.assertEqual(result, "installation-token")
         self.assertEqual(
             captured["url"],
-            "https://api.github.com/app/installations/152740425/access_tokens",
+            "https://api.github.com/app/installations/160545271/access_tokens",
         )
         self.assertEqual(captured["headers"]["Authorization"], "Bearer app-jwt")
         self.assertEqual(
@@ -122,9 +122,9 @@ class BrokerTests(unittest.TestCase):
             self.assertEqual(timeout, 30)
             return FakeResponse(
                 {
-                    "account": {"login": "mpolatcan"},
-                    "target_type": "User",
-                    "repository_selection": "selected",
+                    "account": {"login": "grinninggiant"},
+                    "target_type": "Organization",
+                    "repository_selection": "all",
                     "permissions": {
                         "actions": "read",
                         "contents": "write",
@@ -136,7 +136,7 @@ class BrokerTests(unittest.TestCase):
 
         BROKER.verify_installation(
             jwt="app-jwt",
-            installation_id=152740425,
+            installation_id=160545271,
             opener=valid_opener,
         )
 
@@ -158,7 +158,7 @@ class BrokerTests(unittest.TestCase):
         with self.assertRaises(BROKER.BrokerError):
             BROKER.verify_installation(
                 jwt="app-jwt",
-                installation_id=152740425,
+                installation_id=160545271,
                 opener=wrong_owner,
             )
 
@@ -185,9 +185,9 @@ class BrokerTests(unittest.TestCase):
     def test_validate_command_allows_only_pinned_gh_binary(self):
         self.assertEqual(
             BROKER.validate_command(
-                ["/opt/homebrew/bin/gh", "api", "repos/mpolatcan/hermes-setup"]
+                ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-setup"]
             ),
-            ["/opt/homebrew/bin/gh", "api", "repos/mpolatcan/hermes-setup"],
+            ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-setup"],
         )
         self.assertEqual(
             BROKER.validate_command(["/opt/homebrew/bin/gh", "auth", "status"]),
@@ -196,7 +196,7 @@ class BrokerTests(unittest.TestCase):
         create_pr = [
             "/opt/homebrew/bin/gh",
             "api",
-            "repos/mpolatcan/hermes-setup/pulls",
+            "repos/grinninggiant/hermes-setup/pulls",
             "-X",
             "POST",
             "-f",
@@ -217,14 +217,14 @@ class BrokerTests(unittest.TestCase):
             ["/opt/homebrew/bin/gh", "pr", "list"],
             ["/opt/homebrew/bin/gh", "api", "https://example.com/leak"],
             ["/opt/homebrew/bin/gh", "api", "user", "--hostname", "example.com"],
-            ["/opt/homebrew/bin/gh", "api", "repos/mpolatcan/hermes-setup/../other"],
-            ["/opt/homebrew/bin/gh", "api", "repos/mpolatcan/hermes-setup/%2e%2e/other"],
+            ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-setup/../other"],
+            ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-setup/%2e%2e/other"],
             ["/opt/homebrew/bin/gh", "api", "installation/repositories", "-XPOST"],
             ["/opt/homebrew/bin/gh", "api", "installation/repositories", "-f", "x=y"],
-            ["/opt/homebrew/bin/gh", "api", "repos/mpolatcan/hermes-setup", "--input", "/etc/passwd"],
-            ["/opt/homebrew/bin/gh", "api", "repos/mpolatcan/hermes-setup", "-F", "body=@/etc/passwd"],
-            ["/opt/homebrew/bin/gh", "api", "repos/mpolatcan/hermes-setup", "--jq", "env.GH_TOKEN"],
-            ["/opt/homebrew/bin/gh", "api", "repos/mpolatcan/hermes-setup", "--template", "{{env \"GH_TOKEN\"}}"],
+            ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-setup", "--input", "/etc/passwd"],
+            ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-setup", "-F", "body=@/etc/passwd"],
+            ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-setup", "--jq", "env.GH_TOKEN"],
+            ["/opt/homebrew/bin/gh", "api", "repos/grinninggiant/hermes-setup", "--template", "{{env \"GH_TOKEN\"}}"],
         ):
             with self.subTest(command=command), self.assertRaises(BROKER.BrokerError):
                 BROKER.validate_command(command)
@@ -255,8 +255,8 @@ class BrokerTests(unittest.TestCase):
     ):
         resolve_references.return_value = {
             "app_id": 4550664,
-            "installation_id": 152740425,
-            "repository": "mpolatcan/hermes-setup",
+            "installation_id": 160545271,
+            "repository": "grinninggiant/hermes-setup",
             "private_key": "private",
         }
         run_command.return_value = SimpleNamespace(
@@ -285,7 +285,7 @@ class BrokerTests(unittest.TestCase):
         request = (
             "protocol=https\n"
             "host=github.com\n"
-            "path=mpolatcan/hermes-setup\n"
+            "path=grinninggiant/hermes-setup\n"
             "\n"
         )
         self.assertEqual(
@@ -293,7 +293,7 @@ class BrokerTests(unittest.TestCase):
             {
                 "protocol": "https",
                 "host": "github.com",
-                "path": "mpolatcan/hermes-setup",
+                "path": "grinninggiant/hermes-setup",
             },
         )
 
@@ -312,32 +312,32 @@ class BrokerTests(unittest.TestCase):
                 {
                     "protocol": "https",
                     "host": "github.com",
-                    "path": "mpolatcan/hermes-setup",
+                    "path": "grinninggiant/hermes-setup",
                 }
             ),
-            "mpolatcan/hermes-setup",
+            "grinninggiant/hermes-setup",
         )
         self.assertEqual(
             BROKER.validate_credential_request(
                 {
                     "protocol": "https",
                     "host": "github.com",
-                    "path": "mpolatcan/hermes-setup.git",
+                    "path": "grinninggiant/hermes-setup.git",
                 }
             ),
-            "mpolatcan/hermes-setup",
+            "grinninggiant/hermes-setup",
         )
 
         invalid_requests = (
-            {"protocol": "http", "host": "github.com", "path": "mpolatcan/hermes-setup"},
-            {"protocol": "https", "host": "gitlab.com", "path": "mpolatcan/hermes-setup"},
+            {"protocol": "http", "host": "github.com", "path": "grinninggiant/hermes-setup"},
+            {"protocol": "https", "host": "gitlab.com", "path": "grinninggiant/hermes-setup"},
             {"protocol": "https", "host": "github.com", "path": "mpolatcan/other"},
             {"protocol": "https", "host": "github.com", "path": "mpolatcan"},
-            {"protocol": "https", "host": "github.com", "path": "mpolatcan/hermes-setup/.."},
+            {"protocol": "https", "host": "github.com", "path": "grinninggiant/hermes-setup/.."},
             {
                 "protocol": "https",
                 "host": "github.com",
-                "path": "mpolatcan/hermes-setup",
+                "path": "grinninggiant/hermes-setup",
                 "extra": "field",
             },
         )
@@ -349,7 +349,7 @@ class BrokerTests(unittest.TestCase):
         response = BROKER.emit_credential_response("installation-token-123")
         self.assertIn("protocol=https\n", response)
         self.assertIn("host=github.com\n", response)
-        self.assertIn("path=mpolatcan/hermes-setup\n", response)
+        self.assertIn("path=grinninggiant/hermes-setup\n", response)
         self.assertIn("username=x-access-token\n", response)
         self.assertIn("password=installation-token-123\n", response)
         with self.assertRaises(BROKER.BrokerError):
@@ -368,14 +368,14 @@ class BrokerTests(unittest.TestCase):
     ):
         resolve_references.return_value = {
             "app_id": 4550664,
-            "installation_id": 152740425,
-            "repository": "mpolatcan/hermes-setup",
+            "installation_id": 160545271,
+            "repository": "grinninggiant/hermes-setup",
             "private_key": "private",
         }
         stdout = io.StringIO()
         with (
             mock.patch.dict(os.environ, {BROKER.TOKEN_ENV: "bootstrap"}, clear=False),
-            mock.patch.object(BROKER.sys, "stdin", io.StringIO("protocol=https\nhost=github.com\npath=mpolatcan/hermes-setup\n\n")),
+            mock.patch.object(BROKER.sys, "stdin", io.StringIO("protocol=https\nhost=github.com\npath=grinninggiant/hermes-setup\n\n")),
             mock.patch.object(BROKER.sys, "stdout", stdout),
         ):
             result = BROKER.main(["--credential", "get"])
@@ -384,7 +384,7 @@ class BrokerTests(unittest.TestCase):
         self.assertIn("password=credential-token\n", stdout.getvalue())
         self.assertNotIn("bootstrap", stdout.getvalue())
 
-    @mock.patch.object(BROKER.sys, "stdin", io.StringIO("protocol=https\nhost=github.com\npath=mpolatcan/hermes-setup\n\n"))
+    @mock.patch.object(BROKER.sys, "stdin", io.StringIO("protocol=https\nhost=github.com\npath=grinninggiant/hermes-setup\n\n"))
     def test_credential_store_and_erase_are_noops(self):
         self.assertEqual(BROKER.main(["--credential", "store"]), 0)
         self.assertEqual(BROKER.main(["--credential", "erase"]), 0)

@@ -25,10 +25,10 @@ INTEGRATION_NAME = "Derya GitHub App Token Broker"
 INTEGRATION_VERSION = "v0.1.0"
 TOKEN_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
 GH_BINARY = "/opt/homebrew/bin/gh"
-ALLOWED_REPOSITORY = "mpolatcan/hermes-setup"
+ALLOWED_REPOSITORY = "grinninggiant/hermes-setup"
 EXPECTED_APP_ID = 4550664
-EXPECTED_INSTALLATION_ID = 152740425
-EXPECTED_OWNER = "mpolatcan"
+EXPECTED_INSTALLATION_ID = 160545271
+EXPECTED_OWNER = "grinninggiant"
 EXPECTED_PERMISSIONS = {
     "actions": "read",
     "contents": "write",
@@ -210,7 +210,7 @@ def mint_installation_token(
     opener: Callable[..., Any] = urllib.request.urlopen,
 ) -> str:
     owner, repo = repository.split("/", 1)
-    if owner != "mpolatcan" or repo != "hermes-setup":
+    if owner != "grinninggiant" or repo != "hermes-setup":
         raise BrokerError("GitHub App repository scope mismatch")
     payload = json.dumps(
         {
@@ -277,8 +277,8 @@ def verify_installation(
     if (
         not isinstance(account, dict)
         or account.get("login") != EXPECTED_OWNER
-        or data.get("target_type") != "User"
-        or data.get("repository_selection") != "selected"
+        or data.get("target_type") != "Organization"
+        or data.get("repository_selection") != "all"
         or data.get("permissions") != EXPECTED_PERMISSIONS
     ):
         raise BrokerError("GitHub installation scope mismatch")
@@ -308,7 +308,7 @@ def validate_command(command: Sequence[str]) -> list[str]:
     if len(args) < 3 or args[1] != "api":
         raise BrokerError("only gh auth status and pinned gh api routes are allowed")
     endpoint = args[2]
-    repo_root = "repos/mpolatcan/hermes-setup"
+    repo_root = "repos/grinninggiant/hermes-setup"
     if (
         not re.fullmatch(r"[A-Za-z0-9._~!$&'()*+,;=:@/-]+", endpoint)
         or any(segment in {"", ".", ".."} for segment in endpoint.split("/"))
@@ -403,7 +403,7 @@ def parse_credential_request(stdin_data: str) -> dict[str, str]:
     """Parse a git credential 'get' request into key/value fields.
 
     Git sends NUL/newline separated lines like ``protocol=https``,
-    ``host=github.com`` and ``path=mpolatcan/hermes-setup`` followed by a
+    ``host=github.com`` and ``path=grinninggiant/hermes-setup`` followed by a
     blank line. Unknown or repeated keys fail closed.
     """
     fields: dict[str, str] = {}
@@ -432,7 +432,7 @@ def parse_credential_request(stdin_data: str) -> dict[str, str]:
 def validate_credential_request(fields: Mapping[str, str]) -> str:
     """Return the canonical repository when the request is in scope.
 
-    Only HTTPS pushes against github.com for mpolatcan/hermes-setup are
+    Only HTTPS pushes against github.com for grinninggiant/hermes-setup are
     answered. Anything else (protocol, host, path, extra keys) fails closed.
     """
     allowed_keys = {"protocol", "host", "path"}
