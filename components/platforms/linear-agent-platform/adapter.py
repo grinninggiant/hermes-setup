@@ -73,6 +73,9 @@ _LINEAR_LONG_RUNNING_HEARTBEAT_RE = re.compile(
     r"waiting for non-streaming API response))?"
     r"|[A-Za-z][A-Za-z0-9_.:-]{0,127}))?$"
 )
+_LINEAR_CORE_BUDGET_NOTICE_RE = re.compile(
+    r"^⚠️ Iteration budget exhausted \([0-9]+/[0-9]+\) — asking model to summarise$"
+)
 _OPEN_AGENT_SESSION_STATUSES = frozenset({"pending", "active", "awaitingInput"})
 _CHANNEL_ROUTE_BATCH_SIZE = 10
 _CHANNEL_ROUTE_MAX_ATTEMPTS = 5
@@ -4715,6 +4718,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         long_running_heartbeat = bool(
             (isinstance(metadata, dict) and metadata.get("_interim_send") is True)
             or _LINEAR_LONG_RUNNING_HEARTBEAT_RE.fullmatch(content)
+            or _LINEAR_CORE_BUDGET_NOTICE_RE.fullmatch(content)
         )
         active_event = (
             self._active_turn_events.get(chat_id)
