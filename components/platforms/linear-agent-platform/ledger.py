@@ -36,6 +36,7 @@ class DeliveryLedger:
         retention_seconds: int = 604800,
         outbox_claim_timeout_seconds: int = 60,
         startup_recovery: bool = True,
+        continuation_state_enabled: bool = True,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,6 +47,7 @@ class DeliveryLedger:
             raise RuntimeError("Linear ledger directory must be owner-only (0700)")
         self.processing_timeout_seconds = processing_timeout_seconds
         self.retention_seconds = retention_seconds
+        self.continuation_state_enabled = bool(continuation_state_enabled)
         self.outbox_claim_timeout_seconds = outbox_claim_timeout_seconds
         self._lock = threading.Lock()
         sidecars = (Path(f"{self.path}-wal"), Path(f"{self.path}-shm"))
@@ -212,8 +214,50 @@ class DeliveryLedger:
             "aggregate_key TEXT PRIMARY KEY, turn_key TEXT NOT NULL, "
             "fenced INTEGER NOT NULL CHECK(fenced IN (0, 1)), updated_at INTEGER NOT NULL)"
         )
-        if int(self._db.execute("PRAGMA user_version").fetchone()[0]) < 8:
-            self._db.execute("PRAGMA user_version=8")
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS turn_decisions ("
+            "decision_id TEXT PRIMARY KEY, "
+            "agent_session_id TEXT NOT NULL, issue_id TEXT NOT NULL, "
+            "hermes_session_id TEXT NOT NULL, goal_generation INTEGER NOT NULL, "
+            "ordinal INTEGER NOT NULL, "
+            "outcome TEXT NOT NULL CHECK(outcome IN "
+            "('success', 'continue', 'awaiting_input', 'approval', 'blocked', 'stopped')), "
+            "dispatch_state TEXT NOT NULL CHECK(dispatch_state IN "
+            "('pending', 'enqueued', 'running', 'completed', 'fenced')), "
+            "error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
+            "completed_at INTEGER, source_json TEXT NOT NULL DEFAULT '{}', "
+            "UNIQUE(agent_session_id, goal_generation, ordinal))"
+        )
+        turn_columns = {
+            str(row[1]) for row in self._db.execute("PRAGMA table_info(turn_decisions)")
+        }
+        if "source_json" not in turn_columns:
+            self._db.execute(
+                "ALTER TABLE turn_decisions ADD COLUMN source_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS turn_decisions_recovery_idx "
+            "ON turn_decisions(dispatch_state, created_at)"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS goal_budget_rollovers ("
+            "agent_session_id TEXT NOT NULL, base_goal_generation INTEGER NOT NULL, "
+            "rollovers INTEGER NOT NULL CHECK(rollovers >= 0), "
+            "pending_decision_id TEXT UNIQUE, updated_at INTEGER NOT NULL, "
+            "PRIMARY KEY(agent_session_id, base_goal_generation))"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS continuation_admissions ("
+            "decision_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL "
+            "CHECK(attempts >= 0), updated_at INTEGER NOT NULL)"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS goal_resume_recovery ("
+            "decision_id TEXT PRIMARY KEY, phase TEXT NOT NULL CHECK(phase IN "
+            "('resume_required', 'resume_applied')), updated_at INTEGER NOT NULL)"
+        )
+        if int(self._db.execute("PRAGMA user_version").fetchone()[0]) < 10:
+            self._db.execute("PRAGMA user_version=10")
         # A process restart proves that no previous local worker still owns a
         # resuming claim. Outbound-only clients may open this database while
         # the gateway is live, so they must not run process-start recovery.
@@ -280,6 +324,16 @@ class DeliveryLedger:
                 (issue_id,),
             ).fetchone()
         return str(row[0]) if row else None
+
+    def get_session_issue(self, session_id: str) -> str | None:
+        """Return the uniquely bound issue for an AgentSession, failing closed on ambiguity."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT issue_id FROM issue_session_bindings WHERE session_id = ? "
+                "ORDER BY updated_at DESC, issue_id LIMIT 2",
+                (session_id,),
+            ).fetchall()
+        return str(rows[0][0]) if len(rows) == 1 else None
 
     def claim_channel_route(
         self,
@@ -1295,6 +1349,12 @@ class DeliveryLedger:
                 (now, issue_id),
             )
             self._db.execute(
+                "UPDATE turn_decisions SET dispatch_state='fenced', outcome='stopped', "
+                "error='authoritative_human_closure', updated_at=?, completed_at=? "
+                "WHERE agent_session_id=? AND dispatch_state IN ('pending', 'enqueued')",
+                (now, now, session_id),
+            )
+            self._db.execute(
                 "UPDATE outbox SET state = 'delivered', "
                 "last_error = 'Suppressed by authoritative human closure', "
                 "updated_at = ?, delivered_at = ? "
@@ -1401,17 +1461,23 @@ class DeliveryLedger:
         result.update({str(state): int(count) for state, count in rows})
         return result
 
-    def claim_due_outbox(self, *, now: float | None = None) -> OutboxItem | None:
+    def claim_due_outbox(
+        self, *, now: float | None = None, include_continuations: bool = True
+    ) -> OutboxItem | None:
         """Claim one due head-of-line item; dead activities block completion, dead status writes do not."""
         now = time.time() if now is None else float(now)
         stale_before = int(now - self.outbox_claim_timeout_seconds)
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
-            row = self._db.execute(
+            continuation_filter = (
+                "" if include_continuations else "AND o.id NOT LIKE 'activity:turn-%' "
+            )
+            query = (
                 "SELECT o.id, o.aggregate_key, o.sequence, o.operation, o.payload_json, o.attempts "
                 "FROM outbox o "
                 "WHERE ((o.state = 'pending' AND o.next_attempt_at <= ?) "
                 "OR (o.state = 'in_flight' AND o.updated_at < ?)) "
+                f"{continuation_filter}"
                 "AND NOT EXISTS ("
                 "  SELECT 1 FROM outbox earlier "
                 "  WHERE earlier.aggregate_key = o.aggregate_key "
@@ -1419,7 +1485,10 @@ class DeliveryLedger:
                 "  AND (earlier.state IN ('pending', 'in_flight') "
                 "       OR (earlier.state = 'dead' AND earlier.operation = 'activity.create'))"
                 ") "
-                "ORDER BY o.created_at, o.aggregate_key, o.sequence LIMIT 1",
+                "ORDER BY o.created_at, o.aggregate_key, o.sequence LIMIT 1"
+            )
+            row = self._db.execute(
+                query,
                 (now, stale_before),
             ).fetchone()
             if row is None:
@@ -1993,12 +2062,649 @@ class DeliveryLedger:
                 "('dispatched', 'blocked', 'failed', 'ambiguous') AND updated_at < ?",
                 (cutoff,),
             ).rowcount
+            decisions = 0
+            if self.continuation_state_enabled:
+                self._db.execute(
+                    "DELETE FROM continuation_admissions WHERE decision_id IN ("
+                    "SELECT decision_id FROM turn_decisions WHERE dispatch_state IN "
+                    "('completed', 'fenced') AND updated_at < ?)",
+                    (cutoff,),
+                )
+                decisions = self._db.execute(
+                    "DELETE FROM turn_decisions WHERE dispatch_state IN ('completed', 'fenced') "
+                    "AND updated_at < ?", (cutoff,),
+                ).rowcount
             self._db.commit()
             return (
                 int(inbound) + int(outbound) + int(waits)
                 + int(activations) + int(managers) + int(direct_grants)
-                + int(direct_events) + int(routes)
+                + int(direct_events) + int(routes) + int(decisions)
             )
+
+    @staticmethod
+    def _turn_decision_id(
+        agent_session_id: str, goal_generation: int, ordinal: int
+    ) -> str:
+        material = f"{agent_session_id}\0{int(goal_generation)}\0{int(ordinal)}".encode()
+        return "linear-turn-" + hashlib.sha256(material).hexdigest()
+
+    @staticmethod
+    def _turn_decision_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "decision_id": str(row[0]),
+            "agent_session_id": str(row[1]),
+            "issue_id": str(row[2]),
+            "hermes_session_id": str(row[3]),
+            "goal_generation": int(row[4]),
+            "ordinal": int(row[5]),
+            "outcome": str(row[6]),
+            "dispatch_state": str(row[7]),
+            "error": row[8],
+            "budget_rollover": int(row[8] == "native_budget_rollover"),
+            "created_at": int(row[9]),
+            "updated_at": int(row[10]),
+            "completed_at": int(row[11]) if row[11] is not None else None,
+            "source": json.loads(str(row[12] or "{}")),
+        }
+
+    def reserve_turn_decision(
+        self,
+        agent_session_id: str,
+        issue_id: str,
+        hermes_session_id: str,
+        goal_generation: int,
+        ordinal: int,
+        outcome: str,
+        *,
+        source: dict[str, Any] | None = None,
+        now: int | None = None,
+    ) -> dict[str, Any]:
+        """Insert one deterministic decision, or return its exact prior row."""
+        now = int(time.time()) if now is None else int(now)
+        decision_id = self._turn_decision_id(agent_session_id, goal_generation, ordinal)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            self._db.execute(
+                "INSERT OR IGNORE INTO turn_decisions("
+                "decision_id, agent_session_id, issue_id, hermes_session_id, "
+                "goal_generation, ordinal, outcome, dispatch_state, created_at, updated_at, "
+                "source_json) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                (
+                    decision_id, agent_session_id, issue_id, hermes_session_id,
+                    int(goal_generation), int(ordinal), outcome, now, now,
+                    json.dumps(source or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            row = self._db.execute(
+                "SELECT decision_id, agent_session_id, issue_id, hermes_session_id, "
+                "goal_generation, ordinal, outcome, dispatch_state, error, created_at, "
+                "updated_at, completed_at, source_json FROM turn_decisions WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            self._db.commit()
+        assert row is not None
+        result = self._turn_decision_dict(row)
+        expected = {
+            "agent_session_id": agent_session_id,
+            "issue_id": issue_id,
+            "hermes_session_id": hermes_session_id,
+            "goal_generation": int(goal_generation),
+            "ordinal": int(ordinal),
+            "outcome": outcome,
+        }
+        if source is not None:
+            expected["source"] = source
+        if any(result[key] != value for key, value in expected.items()):
+            raise sqlite3.IntegrityError("Conflicting deterministic Linear turn decision")
+        return result
+
+    def complete_turn_success(
+        self,
+        decision_id: str,
+        item_id: str,
+        aggregate_key: str,
+        payload: dict[str, Any],
+        *,
+        now: int | None = None,
+    ) -> bool:
+        """Atomically persist the successful response and terminal decision."""
+        now = int(time.time()) if now is None else int(now)
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute(
+                "SELECT outcome, dispatch_state, agent_session_id FROM turn_decisions "
+                "WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            if row is None or str(row[0]) != "success" or str(row[2]) != aggregate_key:
+                self._db.rollback()
+                raise sqlite3.IntegrityError("Successful Linear turn decision does not match")
+            existing = self._db.execute(
+                "SELECT aggregate_key, operation, payload_json FROM outbox WHERE id=?",
+                (item_id,),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != (aggregate_key, "activity.create", encoded):
+                    self._db.rollback()
+                    raise sqlite3.IntegrityError("Conflicting successful Linear turn response")
+            else:
+                sequence = int(
+                    self._db.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM outbox WHERE aggregate_key=?",
+                        (aggregate_key,),
+                    ).fetchone()[0]
+                )
+                self._db.execute(
+                    "INSERT INTO outbox("
+                    "id, aggregate_key, sequence, operation, payload_json, state, attempts, "
+                    "next_attempt_at, created_at, updated_at"
+                    ") VALUES (?, ?, ?, 'activity.create', ?, 'pending', 0, ?, ?, ?)",
+                    (item_id, aggregate_key, sequence, encoded, now, now, now),
+                )
+            state = str(row[1])
+            if state == "completed":
+                self._db.commit()
+                return False
+            if state != "pending":
+                self._db.rollback()
+                raise sqlite3.IntegrityError("Successful Linear turn is not pending")
+            changed = self._db.execute(
+                "UPDATE turn_decisions SET dispatch_state='completed', error=NULL, "
+                "updated_at=?, completed_at=? WHERE decision_id=? "
+                "AND outcome='success' AND dispatch_state='pending'",
+                (now, now, decision_id),
+            ).rowcount
+            if changed != 1:
+                self._db.rollback()
+                raise sqlite3.IntegrityError("Successful Linear turn completion raced")
+            self._db.commit()
+            return True
+
+    def complete_turn_with_activity(
+        self,
+        decision_id: str,
+        expected_state: str,
+        final_state: str,
+        item_id: str,
+        aggregate_key: str,
+        payload: dict[str, Any],
+        *,
+        outcome: str | None = None,
+        error: str | None = None,
+        now: int | None = None,
+    ) -> bool:
+        """Atomically persist a terminal activity and its decision fence."""
+        if final_state not in {"completed", "fenced"}:
+            raise ValueError("terminal turn state required")
+        now = int(time.time()) if now is None else int(now)
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute(
+                "SELECT agent_session_id, dispatch_state FROM turn_decisions WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            if row is None or str(row[0]) != aggregate_key:
+                self._db.rollback()
+                raise sqlite3.IntegrityError("Terminal Linear turn decision does not match")
+            if str(row[1]) in {"completed", "fenced"}:
+                self._db.commit()
+                return False
+            if str(row[1]) != expected_state:
+                self._db.rollback()
+                raise sqlite3.IntegrityError("Terminal Linear turn state does not match")
+            if self._db.execute(
+                "SELECT 1 FROM outbox WHERE id=?",
+                (f"activity:turn-success:{decision_id}",),
+            ).fetchone() is not None:
+                self._db.commit()
+                return False
+            existing = self._db.execute(
+                "SELECT aggregate_key, operation, payload_json FROM outbox WHERE id=?",
+                (item_id,),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != (aggregate_key, "activity.create", encoded):
+                    self._db.rollback()
+                    raise sqlite3.IntegrityError("Conflicting terminal Linear activity")
+            else:
+                sequence = int(self._db.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM outbox WHERE aggregate_key=?",
+                    (aggregate_key,),
+                ).fetchone()[0])
+                self._db.execute(
+                    "INSERT INTO outbox(id, aggregate_key, sequence, operation, payload_json, "
+                    "state, attempts, next_attempt_at, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'activity.create', ?, 'pending', 0, ?, ?, ?)",
+                    (item_id, aggregate_key, sequence, encoded, now, now, now),
+                )
+            changed = self._db.execute(
+                "UPDATE turn_decisions SET dispatch_state=?, outcome=COALESCE(?, outcome), "
+                "error=?, updated_at=?, completed_at=? WHERE decision_id=? AND dispatch_state=?",
+                (
+                    final_state,
+                    outcome,
+                    error[:1000] if error else None,
+                    now,
+                    now,
+                    decision_id,
+                    expected_state,
+                ),
+            ).rowcount
+            if changed != 1:
+                self._db.rollback()
+                raise sqlite3.IntegrityError("Terminal Linear turn completion raced")
+            self._db.commit()
+            return True
+
+    def fence_claimed_turn_success(
+        self,
+        decision_id: str,
+        response_item_id: str,
+        error_item_id: str,
+        aggregate_key: str,
+        error_payload: dict[str, Any],
+        outcome: str,
+        error: str,
+        *,
+        now: int | None = None,
+    ) -> bool:
+        """Atomically suppress a claimed stale success and enqueue its error."""
+        now = int(time.time()) if now is None else int(now)
+        encoded = json.dumps(
+            error_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute(
+                "SELECT outcome, dispatch_state, agent_session_id FROM turn_decisions "
+                "WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            response = self._db.execute(
+                "SELECT state FROM outbox WHERE id=? AND aggregate_key=?",
+                (response_item_id, aggregate_key),
+            ).fetchone()
+            if (
+                row is None
+                or tuple(map(str, row)) != ("success", "completed", aggregate_key)
+                or response is None
+                or str(response[0]) != "in_flight"
+            ):
+                self._db.rollback()
+                return False
+            self._db.execute(
+                "UPDATE outbox SET state='delivered', last_error=?, updated_at=?, delivered_at=? "
+                "WHERE id=? AND state='in_flight'",
+                (error[:1000], now, now, response_item_id),
+            )
+            sequence = int(self._db.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM outbox WHERE aggregate_key=?",
+                (aggregate_key,),
+            ).fetchone()[0])
+            self._db.execute(
+                "INSERT OR IGNORE INTO outbox(id, aggregate_key, sequence, operation, "
+                "payload_json, state, attempts, next_attempt_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'activity.create', ?, 'pending', 0, ?, ?, ?)",
+                (error_item_id, aggregate_key, sequence, encoded, now, now, now),
+            )
+            self._db.execute(
+                "UPDATE turn_decisions SET outcome=?, dispatch_state='fenced', error=?, "
+                "updated_at=?, completed_at=? WHERE decision_id=?",
+                (outcome, error[:1000], now, now, decision_id),
+            )
+            self._db.commit()
+            return True
+
+    def fence_turn_success_without_activity(
+        self,
+        decision_id: str,
+        error: str,
+        *,
+        response_item_id: str | None = None,
+        aggregate_key: str | None = None,
+        now: int | None = None,
+    ) -> bool:
+        """Fence a stale success without emitting any terminal activity."""
+        now = int(time.time()) if now is None else int(now)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute(
+                "SELECT outcome, dispatch_state, agent_session_id FROM turn_decisions "
+                "WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            if row is None or str(row[0]) != "success":
+                self._db.rollback()
+                return False
+            state = str(row[1])
+            session_id = str(row[2])
+            if response_item_id is None:
+                if self._db.execute(
+                    "SELECT 1 FROM outbox WHERE id=?",
+                    (f"activity:turn-success:{decision_id}",),
+                ).fetchone() is not None:
+                    self._db.commit()
+                    return False
+                if state != "pending":
+                    self._db.rollback()
+                    return False
+            else:
+                response = self._db.execute(
+                    "SELECT state FROM outbox WHERE id=? AND aggregate_key=?",
+                    (response_item_id, aggregate_key),
+                ).fetchone()
+                if (
+                    state != "completed"
+                    or not aggregate_key
+                    or session_id != aggregate_key
+                    or response is None
+                    or str(response[0]) != "in_flight"
+                ):
+                    self._db.rollback()
+                    return False
+                self._db.execute(
+                    "UPDATE outbox SET state='delivered', last_error=?, updated_at=?, "
+                    "delivered_at=? WHERE id=? AND state='in_flight'",
+                    (error[:1000], now, now, response_item_id),
+                )
+            changed = self._db.execute(
+                "UPDATE turn_decisions SET outcome='blocked', dispatch_state='fenced', "
+                "error=?, updated_at=?, completed_at=? WHERE decision_id=? "
+                "AND outcome='success' AND dispatch_state=?",
+                (error[:1000], now, now, decision_id, state),
+            ).rowcount
+            if changed != 1:
+                self._db.rollback()
+                return False
+            self._db.commit()
+            return True
+
+    def transition_turn_decision(
+        self,
+        decision_id: str,
+        expected_state: str,
+        new_state: str,
+        *,
+        error: str | None = None,
+        now: int | None = None,
+    ) -> bool:
+        """Compare-and-swap a dispatch state without widening its replay window."""
+        now = int(time.time()) if now is None else int(now)
+        completed_at = now if new_state in {"completed", "fenced"} else None
+        with self._lock:
+            changed = self._db.execute(
+                "UPDATE turn_decisions SET dispatch_state=?, error=COALESCE(?, error), updated_at=?, "
+                "completed_at=? WHERE decision_id=? AND dispatch_state=?",
+                (new_state, error[:1000] if error else None, now, completed_at,
+                 decision_id, expected_state),
+            ).rowcount
+            self._db.commit()
+        return bool(changed)
+
+    def update_pending_turn_outcome(
+        self,
+        decision_id: str,
+        expected_outcome: str,
+        new_outcome: str,
+        *,
+        now: int | None = None,
+    ) -> bool:
+        """Classify a pre-reserved decision before any dispatch starts."""
+        now = int(time.time()) if now is None else int(now)
+        with self._lock:
+            changed = self._db.execute(
+                "UPDATE turn_decisions SET outcome=?, updated_at=? "
+                "WHERE decision_id=? AND dispatch_state='pending' AND outcome=?",
+                (new_outcome, now, decision_id, expected_outcome),
+            ).rowcount
+            self._db.commit()
+        return bool(changed)
+
+    def get_turn_decision(self, decision_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT decision_id, agent_session_id, issue_id, hermes_session_id, "
+                "goal_generation, ordinal, outcome, dispatch_state, error, created_at, "
+                "updated_at, completed_at, source_json FROM turn_decisions WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+        return self._turn_decision_dict(row) if row is not None else None
+
+    def count_budget_rollovers(
+        self, agent_session_id: str, base_goal_generation: int
+    ) -> int:
+        """Read the non-prunable reset count for one native goal generation."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT rollovers FROM goal_budget_rollovers "
+                "WHERE agent_session_id=? AND base_goal_generation=?",
+                (agent_session_id, int(base_goal_generation)),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def claim_budget_rollover(
+        self,
+        decision_id: str,
+        agent_session_id: str,
+        base_goal_generation: int,
+        max_rollovers: int,
+    ) -> bool:
+        """Atomically consume one durable reset allowance and mark its decision."""
+        now = int(time.time())
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            self._db.execute(
+                "INSERT OR IGNORE INTO goal_budget_rollovers("
+                "agent_session_id, base_goal_generation, rollovers, "
+                "pending_decision_id, updated_at) VALUES (?, ?, 0, NULL, ?)",
+                (agent_session_id, int(base_goal_generation), now),
+            )
+            row = self._db.execute(
+                "SELECT rollovers, pending_decision_id FROM goal_budget_rollovers "
+                "WHERE agent_session_id=? AND base_goal_generation=?",
+                (agent_session_id, int(base_goal_generation)),
+            ).fetchone()
+            if row is None:
+                self._db.rollback()
+                raise sqlite3.IntegrityError("Native goal rollover state disappeared")
+            if row[1] == decision_id:
+                self._db.commit()
+                return True
+            if row[1] is not None or int(row[0]) >= int(max_rollovers):
+                self._db.commit()
+                return False
+            changed = self._db.execute(
+                "UPDATE goal_budget_rollovers SET rollovers=rollovers+1, "
+                "pending_decision_id=?, updated_at=? WHERE agent_session_id=? "
+                "AND base_goal_generation=? AND pending_decision_id IS NULL "
+                "AND rollovers < ?",
+                (
+                    decision_id, now, agent_session_id,
+                    int(base_goal_generation), int(max_rollovers),
+                ),
+            ).rowcount
+            if changed == 1:
+                marker = self._db.execute(
+                    "UPDATE turn_decisions SET error='native_budget_rollover', updated_at=? "
+                    "WHERE decision_id=? AND outcome='continue' "
+                    "AND dispatch_state='pending' AND error IS NULL",
+                    (now, decision_id),
+                )
+                if marker.rowcount != 1:
+                    self._db.rollback()
+                    return False
+            self._db.commit()
+        return changed == 1
+
+    def complete_budget_rollover(
+        self, decision_id: str, agent_session_id: str, base_goal_generation: int
+    ) -> bool:
+        """Clear only the in-flight marker; the consumed count remains durable."""
+        now = int(time.time())
+        with self._lock:
+            changed = self._db.execute(
+                "UPDATE goal_budget_rollovers SET pending_decision_id=NULL, updated_at=? "
+                "WHERE agent_session_id=? AND base_goal_generation=? "
+                "AND pending_decision_id=?",
+                (now, agent_session_id, int(base_goal_generation), decision_id),
+            ).rowcount
+            self._db.commit()
+        return changed == 1
+
+    def pending_budget_rollover(self, decision_id: str) -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM goal_budget_rollovers WHERE pending_decision_id=?",
+                (decision_id,),
+            ).fetchone()
+        return row is not None
+
+    def claim_turn_admission_attempt(
+        self, decision_id: str, max_attempts: int
+    ) -> bool:
+        """Durably consume one bounded public-wake admission attempt."""
+        now = int(time.time())
+        limit = max(1, int(max_attempts))
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            decision = self._db.execute(
+                "SELECT dispatch_state FROM turn_decisions WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            if decision is None or str(decision[0]) not in {"pending", "enqueued"}:
+                self._db.commit()
+                return False
+            self._db.execute(
+                "INSERT OR IGNORE INTO continuation_admissions("
+                "decision_id, attempts, updated_at) VALUES (?, 0, ?)",
+                (decision_id, now),
+            )
+            changed = self._db.execute(
+                "UPDATE continuation_admissions SET attempts=attempts+1, updated_at=? "
+                "WHERE decision_id=? AND attempts < ?",
+                (now, decision_id, limit),
+            ).rowcount
+            self._db.commit()
+        return changed == 1
+
+    def turn_admission_attempts(self, decision_id: str) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT attempts FROM continuation_admissions WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def goal_resume_phase(self, decision_id: str) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT phase FROM goal_resume_recovery WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def mark_goal_resume_required(self, decision_id: str) -> bool:
+        """Durably announce an unchecked-done resume before touching GoalManager."""
+        now = int(time.time())
+        with self._lock:
+            self._db.execute(
+                "INSERT OR IGNORE INTO goal_resume_recovery(decision_id, phase, updated_at) "
+                "VALUES (?, 'resume_required', ?)",
+                (decision_id, now),
+            )
+            row = self._db.execute(
+                "SELECT phase FROM goal_resume_recovery WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            self._db.commit()
+        return row is not None and str(row[0]) in {"resume_required", "resume_applied"}
+
+    def mark_goal_resume_applied(self, decision_id: str) -> bool:
+        """Record that GoalManager is observably active after the durable resume intent."""
+        now = int(time.time())
+        with self._lock:
+            changed = self._db.execute(
+                "UPDATE goal_resume_recovery SET phase='resume_applied', updated_at=? "
+                "WHERE decision_id=? AND phase IN ('resume_required', 'resume_applied')",
+                (now, decision_id),
+            ).rowcount
+            self._db.commit()
+        return bool(changed)
+
+    def mark_pending_process_wait(self, decision_id: str) -> bool:
+        """Persist a native wait barrier without completing the turn decision."""
+        now = int(time.time())
+        with self._lock:
+            changed = self._db.execute(
+                "UPDATE turn_decisions SET error='native_process_wait', updated_at=? "
+                "WHERE decision_id=? AND outcome='continue' AND dispatch_state='pending' "
+                "AND error IS NULL",
+                (now, decision_id),
+            ).rowcount
+            self._db.commit()
+        return changed == 1
+
+    def list_turn_decisions(self, agent_session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT decision_id, agent_session_id, issue_id, hermes_session_id, "
+                "goal_generation, ordinal, outcome, dispatch_state, error, created_at, "
+                "updated_at, completed_at, source_json FROM turn_decisions WHERE agent_session_id=? "
+                "ORDER BY goal_generation, ordinal",
+                (agent_session_id,),
+            ).fetchall()
+        return [self._turn_decision_dict(row) for row in rows]
+
+    def recoverable_turn_decisions(
+        self, *, limit: int = 50, after: tuple[int, str] | None = None,
+        include_orphan_success: bool = False,
+    ) -> list[dict[str, Any]]:
+        after_created, after_id = after or (-1, "")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT decision_id, agent_session_id, issue_id, hermes_session_id, "
+                "goal_generation, ordinal, outcome, dispatch_state, error, created_at, "
+                "updated_at, completed_at, source_json FROM turn_decisions "
+                "WHERE dispatch_state IN ('pending', 'enqueued') "
+                "AND (outcome='continue' OR (? AND outcome='success' "
+                "AND dispatch_state='pending' AND NOT EXISTS (SELECT 1 FROM outbox "
+                "WHERE id='activity:turn-success:' || turn_decisions.decision_id))) "
+                "AND (created_at > ? OR (created_at = ? AND decision_id > ?)) "
+                "ORDER BY created_at, decision_id LIMIT ?",
+                (include_orphan_success, after_created, after_created, after_id, max(1, min(int(limit), 250))),
+            ).fetchall()
+        return [self._turn_decision_dict(row) for row in rows]
+
+    def running_turn_decisions(
+        self, *, limit: int = 50, after: tuple[int, str] | None = None
+    ) -> list[dict[str, Any]]:
+        after_created, after_id = after or (-1, "")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT decision_id, agent_session_id, issue_id, hermes_session_id, "
+                "goal_generation, ordinal, outcome, dispatch_state, error, created_at, "
+                "updated_at, completed_at, source_json FROM turn_decisions WHERE dispatch_state='running' "
+                "AND (created_at > ? OR (created_at = ? AND decision_id > ?)) "
+                "ORDER BY created_at, decision_id LIMIT ?",
+                (after_created, after_created, after_id, max(1, min(int(limit), 250))),
+            ).fetchall()
+        return [self._turn_decision_dict(row) for row in rows]
+
+    def fence_turn_decisions(
+        self, agent_session_id: str, reason: str, *, now: int | None = None
+    ) -> int:
+        now = int(time.time()) if now is None else int(now)
+        with self._lock:
+            changed = self._db.execute(
+                "UPDATE turn_decisions SET dispatch_state='fenced', outcome='stopped', "
+                "error=?, updated_at=?, completed_at=? WHERE agent_session_id=? "
+                "AND dispatch_state IN ('pending', 'enqueued', 'running')",
+                (reason[:1000], now, now, agent_session_id),
+            ).rowcount
+            self._db.commit()
+        return int(changed)
 
     def close(self) -> None:
         with self._lock:
