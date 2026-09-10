@@ -805,6 +805,101 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
             "fenced",
         )
 
+    async def test_recovery_preserves_running_decision_with_live_local_owner(self):
+        row = self.adapter._ledger.reserve_turn_decision(
+            "linear-session", "issue-164", "hermes-session", 123000000, 2, "continue"
+        )
+        self.adapter._ledger.transition_turn_decision(
+            row["decision_id"], "pending", "enqueued"
+        )
+        self.adapter._ledger.transition_turn_decision(
+            row["decision_id"], "enqueued", "running"
+        )
+        self.adapter._active_turn_events["linear-session"] = turn_event(internal=True)
+
+        await self.adapter._recover_turn_decisions()
+
+        recovered = self.adapter._ledger.get_turn_decision(row["decision_id"])
+        self.assertEqual(recovered["dispatch_state"], "running")
+
+    async def test_staged_send_keeps_owner_alive_until_native_completion(self):
+        FakeGoalManager.existing = True
+        event = turn_event()
+        await self.adapter.on_processing_start(event)
+        decision = self.adapter._ledger.reserve_turn_decision(
+            "linear-session", "issue-164", "hermes-session", 123000000, 2, "continue"
+        )
+        self.adapter._ledger.transition_turn_decision(
+            decision["decision_id"], "pending", "enqueued"
+        )
+        self.adapter._ledger.transition_turn_decision(
+            decision["decision_id"], "enqueued", "running"
+        )
+        event.metadata["linear_continuation_decision_id"] = decision["decision_id"]
+        event._linear_turn_decision_id = decision["decision_id"]
+        self.adapter.record_completed_turn(
+            chat_id="linear-session",
+            hermes_session_id="hermes-session",
+            turn_id="turn-staged-owner",
+            completed=True,
+            failed=False,
+            interrupted=False,
+            turn_exit_reason="completed",
+        )
+
+        result = await self.adapter.send("linear-session", "native judged final")
+
+        self.assertTrue(result.success)
+        self.assertIn("linear-session", self.adapter._pending_turn_deliveries)
+        await self.adapter._recover_turn_decisions()
+        self.assertEqual(
+            self.adapter._ledger.get_turn_decision(decision["decision_id"])["dispatch_state"],
+            "running",
+        )
+
+        await self.adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+        self.assertNotIn("linear-session", self.adapter._pending_turn_deliveries)
+        self.assertNotIn("linear-session", self.adapter._active_turn_events)
+
+        crashed = self.adapter._ledger.reserve_turn_decision(
+            "crashed-session", "issue-164", "crashed-hermes", 123000000, 3, "continue"
+        )
+        self.adapter._ledger.transition_turn_decision(
+            crashed["decision_id"], "pending", "enqueued"
+        )
+        self.adapter._ledger.transition_turn_decision(
+            crashed["decision_id"], "enqueued", "running"
+        )
+        await self.adapter._recover_turn_decisions()
+        self.assertEqual(
+            self.adapter._ledger.get_turn_decision(crashed["decision_id"])["dispatch_state"],
+            "fenced",
+        )
+
+    async def test_internal_wake_allows_active_native_goal_to_collect_evidence(self):
+        self.adapter._ledger.bind_issue_session("issue-164", "linear-session")
+        FakeGoalManager.existing = True
+        FakeGoalManager.existing_status = "active"
+        self.adapter._linear = FakeLinear(
+            description="## Acceptance\n- [x] tests pass\n- [X] restart is safe"
+        )
+        decision = self.adapter._ledger.reserve_turn_decision(
+            "linear-session", "issue-164", "hermes-session", 123000000, 2, "continue"
+        )
+        self.adapter._ledger.transition_turn_decision(
+            decision["decision_id"], "pending", "enqueued"
+        )
+        event = self.adapter._continuation_event(
+            source=source(),
+            prompt="collect durable evidence",
+            decision=decision,
+        )
+
+        vetoed = await self.adapter._prepare_bound_linear_ingress(event)
+
+        self.assertFalse(vetoed)
+
+
     async def test_internal_execution_hook_rechecks_metadata_light_native_wake(self):
         FakeGoalManager.existing = True
         self.adapter._ledger.bind_issue_session("issue-164", "linear-session")
@@ -1005,6 +1100,38 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.adapter._acceptance_is_fully_checked(accepted))
         self.assertFalse(self.adapter._acceptance_is_fully_checked(unrelated_only))
         self.assertFalse(self.adapter._acceptance_is_fully_checked(malformed))
+
+    def test_quoted_heading_does_not_hide_unchecked_acceptance(self):
+        issue = {"description": "## Acceptance\n- [x] completed\n\n> ## Notes\n\n- [ ] required but unfinished\n"}
+        self.assertEqual(len(self.adapter._acceptance_checkbox_matches(issue)), 2)
+        self.assertFalse(self.adapter._acceptance_is_fully_checked(issue))
+
+    def test_acceptance_nested_fenced_source_brief_uses_only_live_criteria(self):
+        description = """## Previous description
+````markdown
+## Kabul kriterleri
+- [ ] old fenced criterion one
+- [ ] old fenced criterion two
+
+```text
+## Kabul kriterleri
+- [ ] inner fenced criterion
+```
+````
+
+## Kabul kriterleri
+- [X] current criterion one
+- [x] current criterion two
+- [X] current criterion three
+- [x] current criterion four
+- [X] current criterion five
+- [x] current criterion six
+- [X] current criterion seven
+"""
+        issue = {"description": description}
+
+        self.assertEqual(len(self.adapter._acceptance_checkbox_matches(issue)), 7)
+        self.assertTrue(self.adapter._acceptance_is_fully_checked(issue))
 
     async def test_disabled_restart_recovery_and_fencing_are_inert(self):
         row = self.adapter._ledger.reserve_turn_decision(
@@ -1481,6 +1608,38 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         row = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
         self.assertEqual(row["dispatch_state"], "fenced")
         self.assertNotEqual(row["outcome"], "success")
+
+    async def test_delayed_success_revalidation_read_failure_retains_retry(self):
+        FakeGoalManager.existing = True
+        FakeGoalManager.existing_status = "done"
+        checked = await FakeLinear(
+            description="## Acceptance\n- [x] tests pass\n- [X] restart is safe"
+        ).get_agent_turn_context("linear-session")
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(
+            side_effect=[checked, checked]
+        )
+        self.adapter._linear.create_activity = mock.AsyncMock(return_value="activity")
+        event = turn_event()
+        event._gateway_turn_result = MappingProxyType(
+            {**dict(event._gateway_turn_result), "completed": True}
+        )
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "accepted evidence", event._gateway_turn_result
+        )
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(
+            side_effect=LinearAPIError("temporary timeout", retryable=True)
+        )
+
+        self.assertTrue(await LinearPlatformAdapter._drain_outbox_once(self.adapter))
+
+        item = self.adapter._ledger.get_outbox_item(
+            f"activity:turn-success:{event._linear_turn_decision_id}"
+        )
+        self.assertIsNotNone(item)
+        self.assertEqual(item["state"], "pending")
+        row = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+        self.assertEqual(row["outcome"], "success")
+        self.assertEqual(row["dispatch_state"], "completed")
 
     async def test_delayed_success_rechecks_matching_authoritative_hermes_session(self):
         FakeGoalManager.existing = True

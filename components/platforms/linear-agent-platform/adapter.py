@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from aiohttp import web
+from markdown_it import MarkdownIt
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -82,8 +83,10 @@ _TURN_ADMISSION_MAX_ATTEMPTS = 3
 _STAGED_DELIVERY_MAX_ATTEMPTS = 3
 _DEFAULT_GOAL_BUDGET_ROLLOVERS = 3
 _ACCEPTANCE_CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX])\]\s*(.+?)\s*$")
-_H2_RE = re.compile(r"^##(?!#)\s+(.+?)\s*#*\s*$")
 _ACCEPTANCE_H2_NAMES = {"acceptance", "acceptance criteria", "kabul kriterleri"}
+_COMMONMARK = MarkdownIt("commonmark")
+
+
 def _read_env_file(path: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -3139,6 +3142,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     return False
                 outcome = live_outcome if live_outcome in {"blocked", "stopped"} else "blocked"
                 error = f"Delayed Linear success was fenced by live gate: {live_outcome}"
+            except LinearAPIError as exc:
+                if exc.retryable:
+                    # The response has already been claimed by the outbox. A
+                    # transient authoritative read must leave that claim
+                    # retryable; fencing it would lose an unsent success.
+                    raise
+                error = f"Delayed Linear success revalidation failed: {exc}"
             except Exception as exc:
                 error = f"Delayed Linear success revalidation failed: {exc}"
         error_key = f"turn-success-fenced:{decision_id or item.id}"
@@ -3226,7 +3236,26 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return False
             turn_success_item = item.id.startswith("activity:turn-success:")
             if turn_success_item:
-                if not await self._revalidate_turn_success_item(item):
+                try:
+                    valid = await self._revalidate_turn_success_item(item)
+                except LinearAPIError as exc:
+                    if not exc.retryable:
+                        raise
+                    exponent = min(max(item.attempts - 1, 0), 16)
+                    delay = min(
+                        self._outbox_max_delay,
+                        self._outbox_base_delay * (2**exponent),
+                    )
+                    self._ledger.reschedule_outbox(item.id, str(exc), delay)
+                    logger.warning(
+                        "[linear] Success revalidation retry id=%s attempts=%d delay=%.1fs: %s",
+                        item.id,
+                        item.attempts,
+                        delay,
+                        exc,
+                    )
+                    return True
+                if not valid:
                     return True
             if self._closure_reconciliation_enabled and item.operation == "issue.state.update":
                 self._ledger.mark_outbox_delivered(item.id)
@@ -3508,25 +3537,45 @@ class LinearPlatformAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _acceptance_checkbox_matches(issue: dict[str, Any]) -> list[re.Match[str]]:
-        sections: list[list[str]] = []
-        current: list[str] | None = None
-        for line in str(issue.get("description") or "").splitlines():
-            heading = _H2_RE.fullmatch(line)
-            if heading is not None:
-                name = " ".join(heading.group(1).casefold().split())
-                current = [] if name in _ACCEPTANCE_H2_NAMES else None
-                if current is not None:
-                    sections.append(current)
+        description = str(issue.get("description") or "")
+        lines = description.splitlines()
+        tokens = _COMMONMARK.parse(description)
+        acceptance_positions: list[int] = []
+        h2_positions: list[int] = []
+        for index, token in enumerate(tokens):
+            if (
+                token.type != "heading_open"
+                or token.tag != "h2"
+                or token.level != 0
+                or not token.map
+            ):
                 continue
-            if current is not None:
-                current.append(line)
-        if len(sections) != 1:
+            h2_positions.append(int(token.map[0]))
+            inline = tokens[index + 1] if index + 1 < len(tokens) else None
+            heading = str(getattr(inline, "content", "") or "")
+            name = " ".join(heading.casefold().split())
+            if name in _ACCEPTANCE_H2_NAMES:
+                acceptance_positions.append(int(token.map[0]))
+        if len(acceptance_positions) != 1:
             return []
-        return [
-            match
-            for line in sections[0]
-            if (match := _ACCEPTANCE_CHECKBOX_RE.fullmatch(line)) is not None
-        ]
+        section_start = acceptance_positions[0]
+        section_end = next(
+            (position for position in h2_positions if position > section_start),
+            len(lines),
+        )
+        matches: list[re.Match[str]] = []
+        seen_lines: set[int] = set()
+        for token in tokens:
+            if token.type != "list_item_open" or not token.map:
+                continue
+            line_number = int(token.map[0])
+            if not section_start < line_number < section_end or line_number in seen_lines:
+                continue
+            seen_lines.add(line_number)
+            match = _ACCEPTANCE_CHECKBOX_RE.fullmatch(lines[line_number])
+            if match is not None:
+                matches.append(match)
+        return matches
 
     @classmethod
     def _acceptance_is_fully_checked(cls, issue: dict[str, Any]) -> bool:
@@ -3749,8 +3798,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         }
         outcome = self._classify_turn_outcome(event, probe, context)
         issue = context.get("issue")
-        if event.internal and isinstance(issue, dict) and self._acceptance_is_fully_checked(issue):
-            outcome = "stopped"
         state = await self._goal_state_for_source(event.source, hermes_session_id)
         if event.internal:
             if state is None or str(state.status) != "active":
@@ -4232,6 +4279,29 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._outbox_wakeup.set()
             return None
 
+    def _locally_owned_turn_event(
+        self, session_id: str, decision_id: str
+    ) -> MessageEvent | None:
+        """Find the live worker event, including its native-judge handoff."""
+        active_event = self._active_turn_events.get(session_id)
+        if active_event is not None:
+            active_decision_id = str(
+                active_event.metadata.get("linear_continuation_decision_id") or ""
+            )
+            if not active_decision_id or active_decision_id == decision_id:
+                return active_event
+
+        pending_delivery = self._pending_turn_deliveries.get(session_id)
+        if pending_delivery is None:
+            return None
+        staged_event = pending_delivery[0]
+        staged_decision_id = str(
+            getattr(staged_event, "_linear_turn_decision_id", "")
+            or staged_event.metadata.get("linear_continuation_decision_id")
+            or ""
+        )
+        return staged_event if staged_decision_id == decision_id else None
+
     async def _recover_turn_decisions(self) -> None:
         """Recover only pre-start decisions and never replay an interrupted running row."""
         if (
@@ -4248,6 +4318,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 limit=_TURN_DECISION_BATCH_SIZE, after=cursor
             )
             for row in rows:
+                if self._locally_owned_turn_event(
+                    row["agent_session_id"], row["decision_id"]
+                ) is not None:
+                    # Recovery can run after a transient admission/delivery
+                    # failure while the local worker still owns this turn.
+                    # Only startup recovery, where no owner is present, may
+                    # treat a running row as proven-crashed.
+                    continue
                 message = (
                     "A previously running continuation was interrupted by restart "
                     "and was not replayed. Human review is required."
