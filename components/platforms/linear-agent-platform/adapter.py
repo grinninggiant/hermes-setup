@@ -76,6 +76,19 @@ _LINEAR_LONG_RUNNING_HEARTBEAT_RE = re.compile(
 _LINEAR_CORE_BUDGET_NOTICE_RE = re.compile(
     r"^⚠️ Iteration budget exhausted \([0-9]+/[0-9]+\) — asking model to summarise$"
 )
+_LINEAR_GATEWAY_RESTART_NOTICE = (
+    "⏳ Gateway is restarting and is not accepting new work right now."
+)
+_LINEAR_RECOVERED_GATEWAY_RESTART_NOTICE = (
+    "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+    + _LINEAR_GATEWAY_RESTART_NOTICE
+)
+_LINEAR_EPHEMERAL_NOTICES = frozenset(
+    {
+        _LINEAR_GATEWAY_RESTART_NOTICE,
+        _LINEAR_RECOVERED_GATEWAY_RESTART_NOTICE,
+    }
+)
 _OPEN_AGENT_SESSION_STATUSES = frozenset({"pending", "active", "awaitingInput"})
 # These are the only native slash commands that may answer a core-owned model
 # execution wait.  They still go through the normal core command/auth seam; the
@@ -4964,11 +4977,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             or _LINEAR_LONG_RUNNING_HEARTBEAT_RE.fullmatch(content)
             or _LINEAR_CORE_BUDGET_NOTICE_RE.fullmatch(content)
         )
+        trusted_ephemeral_notice = content in _LINEAR_EPHEMERAL_NOTICES
         active_event = (
             self._active_turn_events.get(chat_id)
             if self._native_goal_continuation_enabled else None
         )
-        if active_event is not None and not (transient_progress or long_running_heartbeat):
+        if active_event is not None and not (
+            transient_progress or long_running_heartbeat or trusted_ephemeral_notice
+        ):
             turn_result = self._completed_turn_results.pop(chat_id, None)
             if turn_result is None:
                 return SendResult(
@@ -4998,7 +5014,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
         try:
             await self._validate_activity_target(chat_id)
-            if long_running_heartbeat and not self._progress_chat_is_allowed(chat_id):
+            if (
+                (long_running_heartbeat or trusted_ephemeral_notice)
+                and not self._progress_chat_is_allowed(chat_id)
+            ):
                 digest = hashlib.sha256(content.encode()).hexdigest()[:24]
                 return SendResult(
                     success=True,
@@ -5006,7 +5025,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         f"suppressed:terminal-heartbeat:{chat_id}:{digest}"
                     ),
                 )
-            nonterminal_progress = transient_progress or long_running_heartbeat
+            nonterminal_progress = (
+                transient_progress or long_running_heartbeat or trusted_ephemeral_notice
+            )
             transient_progress_key = ""
             if transient_progress:
                 transient_progress_key = str(
