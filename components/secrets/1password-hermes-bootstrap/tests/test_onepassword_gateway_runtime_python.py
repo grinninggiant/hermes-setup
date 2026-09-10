@@ -63,7 +63,7 @@ class CandidateInstallerContractTests(unittest.TestCase):
         self.assertIn('if [[ "$profile" == "general" ]]; then', source)
         self.assertIn(
             'hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/'
-            'hermes-agent-293daf98684321b628c29adbd3eef064b1d3fdc9/venv/bin/hermes"',
+            'hermes-agent-b208667b53acff437e38a339c7d70d618ce7f90e/venv/bin/hermes"',
             source,
         )
         self.assertNotIn("$2", source)
@@ -90,7 +90,7 @@ class CandidateInstallerContractTests(unittest.TestCase):
 
             candidate = (
                 "/Users/mutlupolatcan/.hermes/runtime/releases/"
-                "hermes-agent-293daf98684321b628c29adbd3eef064b1d3fdc9/venv/bin/hermes"
+                "hermes-agent-b208667b53acff437e38a339c7d70d618ce7f90e/venv/bin/hermes"
             )
             for profile, expected in (
                 [("general", candidate)]
