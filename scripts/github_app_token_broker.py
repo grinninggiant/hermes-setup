@@ -31,6 +31,7 @@ EXPECTED_INSTALLATION_ID = 160545271
 EXPECTED_OWNER = "grinninggiant"
 EXPECTED_PERMISSIONS = {
     "actions": "read",
+    "administration": "write",
     "contents": "write",
     "metadata": "read",
     "pull_requests": "write",
@@ -216,6 +217,7 @@ def mint_installation_token(
         {
             "permissions": {
                 "actions": "read",
+                "administration": "write",
                 "contents": "write",
                 "pull_requests": "write",
             },
