@@ -36,7 +36,7 @@ from gateway.platforms.base import (
 from gateway.session import SessionSource, build_session_key  # type: ignore[import-not-found]
 from hermes_cli.goals import GoalContract
 
-from .ledger import DeliveryLedger
+from .ledger import DeliveryLedger, OutboxItem
 from .linear_client import LinearAPIError, LinearClient
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,11 @@ _LINEAR_CORE_BUDGET_NOTICE_RE = re.compile(
     r"^⚠️ Iteration budget exhausted \([0-9]+/[0-9]+\) — asking model to summarise$"
 )
 _OPEN_AGENT_SESSION_STATUSES = frozenset({"pending", "active", "awaitingInput"})
+# These are the only native slash commands that may answer a core-owned model
+# execution wait.  They still go through the normal core command/auth seam; the
+# adapter merely prevents its own turn-state fence from treating the command as
+# another model turn.
+_NATIVE_APPROVAL_COMMANDS = frozenset({"approve", "deny"})
 _CHANNEL_ROUTE_BATCH_SIZE = 10
 _CHANNEL_ROUTE_MAX_ATTEMPTS = 5
 _CHANNEL_ROUTE_POLL_SECONDS = 1.0
@@ -88,6 +93,41 @@ _DEFAULT_GOAL_BUDGET_ROLLOVERS = 3
 _ACCEPTANCE_CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX])\]\s*(.+?)\s*$")
 _ACCEPTANCE_H2_NAMES = {"acceptance", "acceptance criteria", "kabul kriterleri"}
 _COMMONMARK = MarkdownIt("commonmark")
+
+_CONTINUATION_REASON_CODES = frozenset(
+    {
+        "approval",
+        "awaiting_input",
+        "blocked",
+        "decision_mismatch",
+        "hermes_decision_mismatch",
+        "hermes_session_mismatch",
+        "hermes_session_unavailable",
+        "issue_binding_missing",
+        "issue_mismatch",
+        "issue_missing",
+        "session_mismatch",
+        "stopped",
+        "strict_session_mismatch",
+        "restart_orphan_success",
+        "turn_failed",
+        "session_error",
+        "error_exit_reason",
+        "turn_result_invalid",
+        "session_context_mismatch",
+        "actor_mismatch",
+        "issue_state_invalid",
+        "open_blockers",
+        "status_invalid",
+        "incomplete_exit_reason",
+        "unverified",
+    }
+)
+
+
+def _normalize_terminal_reason_code(value: Any) -> str:
+    code = str(value or "").strip()
+    return code if code in _CONTINUATION_REASON_CODES else "unverified"
 
 
 def _read_env_file(path: str) -> dict[str, str]:
@@ -154,7 +194,9 @@ def _actor(payload: dict[str, Any]) -> tuple[str, str]:
         actor = payload.get("user")
     if not isinstance(actor, dict):
         actor = {}
-    actor_id = str(actor.get("id") or "linear-user")
+    # Missing webhook provenance is not an identity. Do not collapse it into
+    # a shared placeholder that can equal another missing identity.
+    actor_id = str(actor.get("id") or "")
     actor_name = str(actor.get("name") or actor.get("displayName") or "Linear user")
     return actor_id, actor_name
 
@@ -167,6 +209,7 @@ def _activity_signal(payload: dict[str, Any]) -> str:
 
 
 def _activity_body(payload: dict[str, Any]) -> str:
+    """Read the structured Linear activity used to form the native prompt."""
     activity = payload.get("agentActivity")
     if not isinstance(activity, dict):
         return ""
@@ -176,6 +219,17 @@ def _activity_body(payload: dict[str, Any]) -> str:
         if isinstance(content, dict):
             body = content.get("body")
     return str(body or "")
+
+
+def _native_approval_command(event: MessageEvent) -> bool:
+    """Return true only for the exact native approval command names."""
+    if not bool(getattr(event, "allow_gateway_control", False)):
+        return False
+    text = str(getattr(event, "text", "") or "").lstrip()
+    if not text.startswith("/"):
+        return False
+    command = text[1:].split(None, 1)[0].split("@", 1)[0].casefold()
+    return command in _NATIVE_APPROVAL_COMMANDS
 
 
 def _delivery_key(payload: dict[str, Any], raw: bytes) -> str:
@@ -1078,6 +1132,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     self._ledger.cancel_wait(agent_session_id)
                     self._ledger.cancel_activation_for_session(agent_session_id)
                     self._ledger.cancel_direct_activation_for_session(agent_session_id)
+            if action == "prompted" and not is_stop:
+                clarify_status = await self._resolve_clarify_input(
+                    agent_session_id, issue_id, payload
+                )
+                if clarify_status is not None:
+                    self._ledger.mark_done(delivery_key)
+                    return web.json_response(
+                        {"status": clarify_status}, status=200
+                    )
             if (
                 action == "created"
                 and self._planned_activation_enabled
@@ -1193,12 +1256,25 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             dispatch_lock = self._session_lock(agent_session_id)
             await dispatch_lock.acquire()
             dispatch_lock_held = True
-            human_preemption = action == "prompted" and not is_stop
+            native_command = (
+                action == "prompted"
+                and _activity_body(payload).lstrip().startswith("/")
+            )
+            human_preemption = (
+                action == "prompted"
+                and not is_stop
+                and not native_command
+            )
             if (
                 is_stop
                 or human_preemption
-                or agent_session_status == "awaitingInput"
-                or signal in {"awaitinginput", "awaiting_input", "approval", "blocked"}
+                or (
+                    not native_command
+                    and (
+                        agent_session_status == "awaitingInput"
+                        or signal in {"awaitinginput", "awaiting_input", "approval", "blocked"}
+                    )
+                )
             ):
                 if self._native_goal_continuation_enabled:
                     self._ledger.fence_turn_decisions(
@@ -1226,7 +1302,17 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 delivery_key,
                 webhook_id,
                 activation_resume=planned_intake_created or direct_activation_created,
+                direct_activation=direct_activation_created,
             )
+            if native_command and not self._trusted_native_command_requester(event):
+                # Never let the webhook adapter's synthetic source (or the core
+                # webhook platform exemption) authorize a control command.
+                # Without an exact active human binding, the safe capability is
+                # no command dispatch.
+                self._ledger.mark_done(delivery_key)
+                return web.json_response(
+                    {"status": "native_command_requester_unavailable"}, status=200
+                )
             if not is_stop:
                 self._schedule_thought(
                     agent_session_id,
@@ -1526,6 +1612,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         *,
         dependency_resume: bool = False,
         activation_resume: bool = False,
+        direct_activation: bool = False,
     ) -> MessageEvent:
         action = str(payload.get("action") or "")
         agent_session = payload.get("agentSession")
@@ -1536,19 +1623,23 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         issue_id = str(issue.get("id") or "") if isinstance(issue, dict) else ""
         signal = _activity_signal(payload)
         is_stop = action == "prompted" and signal == "stop"
+        body = _activity_body(payload)
+        is_command = action == "prompted" and body.lstrip().startswith("/")
         actor_id, actor_name = _actor(payload)
         identifier, title, _ = _issue_label(agent_session)
         return MessageEvent(
             text=(
                 "/stop"
                 if is_stop
+                else body
+                if is_command
                 else build_agent_prompt(
                     payload,
                     dependency_resume=dependency_resume,
                     activation_resume=activation_resume,
                 )
             ),
-            message_type=MessageType.COMMAND if is_stop else MessageType.TEXT,
+            message_type=MessageType.COMMAND if (is_stop or is_command) else MessageType.TEXT,
             source=self.build_source(
                 chat_id=agent_session_id,
                 chat_name=f"{identifier} — {title}",
@@ -1556,7 +1647,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 user_id=actor_id,
                 user_name=actor_name,
                 message_id=delivery_key,
-                role_authorized=True,
+                # Preserve baseline authorization for ordinary webhook input.
+                # Native control commands remain fail-closed and are gated
+                # against the active human turn immediately before dispatch.
+                role_authorized=not is_command and not is_stop,
             ),
             raw_message=payload,
             message_id=delivery_key,
@@ -1569,6 +1663,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 "linear_signal": signal,
                 "linear_dependency_resume": dependency_resume,
                 "linear_activation_resume": activation_resume,
+                "linear_direct_activation": direct_activation,
             },
         )
 
@@ -2919,6 +3014,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         *,
         item_key: str | None = None,
         ephemeral: bool = False,
+        metadata: Mapping[str, Any] | None = None,
     ) -> str:
         if self._ledger is None:
             raise RuntimeError("Linear outbox is unavailable")
@@ -2954,6 +3050,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     payload["terminal_progress_key"] = turn_key
             if ephemeral:
                 payload["ephemeral"] = True
+            if metadata:
+                payload.update(dict(metadata))
             self._ledger.enqueue_outbox(
                 f"activity:{item_key}",
                 agent_session_id,
@@ -3300,6 +3398,21 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         await self._validate_activity_target(
                             item.payload["agent_session_id"]
                         )
+                    # Recheck after the final awaited target validation and
+                    # immediately before vendor create: the waiter or turn
+                    # may disappear while that validation is in flight.
+                    if (
+                        str(item.payload.get("activity_type") or "") == "elicitation"
+                        and item.payload.get("clarify_id")
+                        and not self._clarify_outbox_is_live(item)
+                    ):
+                        self._suppress_clarify_outbox(item, "waiter_unavailable")
+                        logger.info(
+                            "[linear] suppressed orphan clarify item=%s session=%s",
+                            item.id,
+                            item.aggregate_key,
+                        )
+                        return True
                     await self._linear.create_activity(
                         item.payload["agent_session_id"],
                         item.payload["activity_type"],
@@ -3458,77 +3571,93 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             "next_goal_continuation_prompt_for_source"
         )(source, session_id=hermes_session_id)
 
-    def _classify_turn_outcome(
+    def _classify_turn_outcome_with_reason(
         self,
         event: MessageEvent,
         turn_result: Any,
         context: dict[str, Any],
-    ) -> str:
+    ) -> tuple[str, str]:
         """Classify live and structured evidence; every ambiguity is blocked."""
+        def blocked(reason: str) -> tuple[str, str]:
+            return "blocked", reason
+
         if self._ledger is None or self._linear is None:
-            return "blocked"
+            return blocked("unverified")
         session_id = str(event.metadata.get("linear_agent_session_id") or "")
         issue_id = str(event.metadata.get("linear_issue_id") or "")
         if not session_id or not issue_id or not isinstance(turn_result, Mapping):
-            return "blocked"
+            return blocked("turn_result_invalid")
         required = {"completed", "failed", "interrupted", "turn_exit_reason", "session_id"}
         if not required.issubset(turn_result):
-            return "blocked"
+            return blocked("turn_result_invalid")
         if any(type(turn_result[key]) is not bool for key in ("completed", "failed", "interrupted")):
-            return "blocked"
+            return blocked("turn_result_invalid")
         if self._ledger.has_session_closure(session_id):
-            return "stopped"
+            return "stopped", "stopped"
         if str(event.metadata.get("linear_signal") or "").casefold() == "stop":
-            return "stopped"
+            return "stopped", "stopped"
         if str(context.get("id") or "") != session_id:
-            return "blocked"
+            return blocked("session_context_mismatch")
         if not self._linear.actor_id or not hmac.compare_digest(
             str(context.get("app_user_id") or ""), self._linear.actor_id
         ):
-            return "stopped"
+            return "stopped", "actor_mismatch"
         issue = context.get("issue")
         if not isinstance(issue, dict) or str(issue.get("id") or "") != issue_id:
-            return "blocked"
+            return blocked("issue_mismatch")
         delegate = issue.get("delegate")
         if not isinstance(delegate, dict) or not self._linear.actor_id or not hmac.compare_digest(
             str(delegate.get("id") or ""), self._linear.actor_id
         ):
-            return "stopped"
+            return "stopped", "actor_mismatch"
         state = issue.get("state")
         if not isinstance(state, dict):
-            return "blocked"
+            return blocked("issue_state_invalid")
         state_type = str(state.get("type") or "").casefold()
         status = str(context.get("status") or "")
         reason = str(turn_result.get("turn_exit_reason") or "").casefold()
         if state_type == "canceled":
-            return "stopped"
+            return "stopped", "stopped"
         if state_type == "completed":
-            return "stopped"
+            return "stopped", "stopped"
         if state_type not in {"unstarted", "started"}:
-            return "blocked"
-        if context.get("open_blockers"):
-            return "blocked"
+            return blocked("issue_state_invalid")
         if turn_result["interrupted"] or reason in {"stopped", "stop", "cancelled", "canceled"}:
-            return "stopped"
-        if turn_result["failed"] or status == "error" or reason in {"failed", "error", "blocked"}:
-            return "blocked"
+            return "stopped", "stopped"
+        if turn_result["failed"]:
+            return blocked("turn_failed")
+        if status == "error":
+            return blocked("session_error")
+        if reason in {"failed", "error", "blocked"}:
+            return blocked("error_exit_reason")
+        # A typed human wait is an elicitation even when another live field is
+        # also conservative (for example, an open dependency is present).
+        # Do not turn the question into a generic safety error at ingress.
         if reason in {"approval", "awaiting_approval", "requires_approval"}:
-            return "approval"
+            return "approval", "approval"
         if status == "awaitingInput" or reason in {"awaiting_input", "awaitinginput", "elicitation"}:
-            return "awaiting_input"
+            return "awaiting_input", "awaiting_input"
+        if context.get("open_blockers"):
+            return blocked("open_blockers")
         if status == "stale":
-            return "stopped"
+            return "stopped", "stopped"
         if status == "complete":
-            return "blocked"
+            return blocked("status_invalid")
         if status not in {"pending", "active"}:
-            return "blocked"
+            return blocked("status_invalid")
         if turn_result["completed"] and self._acceptance_is_fully_checked(issue):
-            return "success"
+            return "success", "success"
         if not turn_result["completed"] and not reason.startswith(
             "max_iterations_reached("
         ):
-            return "blocked"
-        return "continue"
+            return blocked("incomplete_exit_reason")
+        return "continue", "continue"
+
+    def _classify_turn_outcome(
+        self, event: MessageEvent, turn_result: Any, context: dict[str, Any]
+    ) -> str:
+        """Compatibility wrapper retaining the historical outcome-only API."""
+        return self._classify_turn_outcome_with_reason(event, turn_result, context)[0]
 
     @staticmethod
     def _decision_generation_and_ordinal(state: Any) -> tuple[int, int]:
@@ -3735,7 +3864,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         session_id = str(event.source.chat_id or "")
         supplied_session = str(event.metadata.get("linear_agent_session_id") or "")
         if supplied_session and supplied_session != session_id:
-            return await self._visible_ingress_veto(event, "strict Linear session mismatch")
+            return await self._visible_ingress_veto(event, "strict_session_mismatch")
         decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
         decision = self._ledger.get_turn_decision(decision_id) if decision_id else None
         issue_id = self._ledger.get_session_issue(session_id)
@@ -3745,16 +3874,16 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if issue_id is None:
             # Unrelated internal wakes must retain ordinary Hermes behavior.
             return False if event.internal and not supplied_session else await self._visible_ingress_veto(
-                event, "Linear AgentSession has no unique durable issue binding"
+                event, "issue_binding_missing"
             )
         if supplied_issue and supplied_issue != issue_id:
-            return await self._visible_ingress_veto(event, "strict Linear issue mismatch")
+            return await self._visible_ingress_veto(event, "issue_mismatch")
         if decision_id and (
             decision is None
             or decision["agent_session_id"] != session_id
             or decision["issue_id"] != issue_id
         ):
-            return await self._visible_ingress_veto(event, "strict Linear decision mismatch")
+            return await self._visible_ingress_veto(event, "decision_mismatch")
 
         extra = getattr(self.config, "extra", None) or {}
         session_key = build_session_key(
@@ -3765,7 +3894,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         )
         store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
         if store is None:
-            return await self._visible_ingress_veto(event, "Linear Hermes session source unavailable")
+            return await self._visible_ingress_veto(event, "hermes_session_unavailable")
         entry = (
             await store.lookup_by_session_key(session_key)
             if event.internal
@@ -3774,13 +3903,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
         )
         if entry is None or str(getattr(entry, "session_key", "")) != session_key:
-            return await self._visible_ingress_veto(event, "strict Hermes session mismatch")
+            return await self._visible_ingress_veto(event, "strict_session_mismatch")
         hermes_session_id = str(getattr(entry, "session_id", "") or "")
         supplied_hermes = str(event.metadata.get("gateway_session_id") or "")
         if not hermes_session_id or (supplied_hermes and supplied_hermes != hermes_session_id):
-            return await self._visible_ingress_veto(event, "strict Hermes session mismatch")
+            return await self._visible_ingress_veto(event, "strict_session_mismatch")
         if decision is not None and decision["hermes_session_id"] != hermes_session_id:
-            return await self._visible_ingress_veto(event, "strict Hermes decision mismatch")
+            return await self._visible_ingress_veto(event, "hermes_decision_mismatch")
 
         event.metadata.update(
             {
@@ -3800,6 +3929,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             "session_id": hermes_session_id,
         }
         outcome = self._classify_turn_outcome(event, probe, context)
+        # Core owns approval waiter lookup and resolution.  When the native
+        # session is waiting for model execution, let only /approve and /deny
+        # reach that non-model command path.  All lifecycle, issue, delegate,
+        # requester, and session checks above remain mandatory; every other
+        # slash command keeps the existing guarded path.
+        if _native_approval_command(event) and outcome in {"approval", "awaiting_input"}:
+            return False
         issue = context.get("issue")
         state = await self._goal_state_for_source(event.source, hermes_session_id)
         if event.internal:
@@ -3807,15 +3943,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 outcome = "stopped"
             if outcome != "continue":
                 return await self._visible_ingress_veto(
-                    event, f"Linear pre-execution gate vetoed native wake: {outcome}"
+                    event, outcome
                 )
         elif outcome not in {"continue", "success"}:
             return await self._visible_ingress_veto(
-                event, f"Linear pre-execution gate vetoed initial turn: {outcome}"
+                event, outcome
             )
         elif state is None:
             if not isinstance(issue, dict):
-                return await self._visible_ingress_veto(event, "authoritative Linear issue missing")
+                return await self._visible_ingress_veto(event, "issue_missing")
             goal, contract = self._bounded_goal_contract(issue)
             await self._ensure_goal_for_source(
                 event.source, hermes_session_id, goal, contract
@@ -3828,19 +3964,26 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if decision is not None and decision["dispatch_state"] in {"pending", "enqueued", "running"}:
             self._enqueue_turn_terminal_activity(
                 decision,
-                "blocked",
+                reason if reason in {"approval", "awaiting_input"} else "blocked",
                 reason,
                 expected_state=decision["dispatch_state"],
                 final_state="fenced",
+                reason_code=reason,
             )
         elif self._ledger is not None and event.source is not None:
             digest = hashlib.sha256(
-                f"{event.source.chat_id}\0{event.message_id or event.text}\0{reason}".encode()
+                f"{event.source.chat_id}\0{event.message_id or event.text}".encode()
             ).hexdigest()[:24]
+            activity_type = (
+                "elicitation" if reason in {"approval", "awaiting_input"} else "error"
+            )
             self._enqueue_activity(
                 str(event.source.chat_id),
-                "error",
-                reason,
+                activity_type,
+                self._continuation_blocker_notice(
+                    reason,
+                    step="giriş",
+                )[:4000],
                 item_key=f"ingress-veto:{digest}",
             )
             self._outbox_wakeup.set()
@@ -3920,23 +4063,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         expected_state: str | None = None,
         final_state: str | None = None,
         orphan_success: bool = False,
+        reason_code: str | None = None,
     ) -> bool:
         if self._ledger is None:
             raise RuntimeError("Linear outbox is unavailable")
-        if outcome in {"awaiting_input", "approval"}:
-            activity_type = "elicitation"
-            fallback = (
-                "Hermes is waiting for explicit approval before continuing."
-                if outcome == "approval"
-                else "Hermes is waiting for required human input before continuing."
-            )
-        else:
-            activity_type = "error"
-            fallback = (
-                "Hermes stopped this continuation because the session or issue was closed."
-                if outcome == "stopped"
-                else "Hermes blocked automatic continuation because a live safety gate did not pass."
-            )
+        normalized_reason = _normalize_terminal_reason_code(reason_code or outcome)
+        activity_type = "elicitation" if outcome in {"awaiting_input", "approval"} else "error"
         session_id = str(decision["agent_session_id"])
         item_key = f"turn-decision:{decision['decision_id']}"
         activity_id = self._activity_uuid(item_key)
@@ -3949,7 +4081,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             "activity_id": activity_id,
             "agent_session_id": session_id,
             "activity_type": activity_type,
-            "body": (message or fallback)[:4000],
+            "body": self._continuation_blocker_notice(
+                normalized_reason,
+                step="devam teslimi",
+            )[:4000],
         }
         if orphan_success:
             payload["orphan_success_decision_id"] = str(decision["decision_id"])
@@ -3967,7 +4102,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             session_id,
             payload,
             outcome=outcome if decision["outcome"] in {"continue", "success"} else None,
-            error=message or outcome,
+            error=normalized_reason,
         )
         if changed:
             self._outbox_wakeup.set()
@@ -3975,6 +4110,88 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 session_id, expected_turn_key=turn_key
             )
         return changed
+
+    def _continuation_blocker_notice(
+        self, reason_code: str, *, step: str
+    ) -> str:
+        """Render only verified continuation codes into a safe Turkish notice."""
+        responsible_agent = str(getattr(self._linear, "actor_name", "") or "").strip()
+        if not responsible_agent:
+            responsible_agent = "sorumlu ajan"
+        context_label = (
+            f"Etkilenen adım: {step}. Sorumlu ajan: {responsible_agent}."
+        )
+        verified = reason_code in _CONTINUATION_REASON_CODES
+        if not verified or reason_code in {"blocked", "unverified"}:
+            return (
+                f"{context_label} Devam durduruldu; ayrıntılı neden doğrulanamadı. "
+                "Gerekli işlem: sorumlu teknik ajan doğrulanmış durumu yeniden okumalı "
+                "ve devam kararını vermelidir."
+            )
+        if reason_code == "stopped":
+            return (
+                f"{context_label} Devam durduruldu; kesin terminal nedeni doğrulanamadı. "
+                "Gerekli işlem: sorumlu teknik ajan oturum ve yürütme durumunu doğrulamalıdır."
+            )
+        if reason_code == "approval":
+            return (
+                f"{context_label} Devam beklemede; açık onay gerekiyor. "
+                "Gerekli işlem: teknik sorumlu ajan yapılandırılmış onay isteğini doğrulamalı; "
+                "yetkili insan onay vermelidir."
+            )
+        if reason_code == "awaiting_input":
+            return (
+                f"{context_label} Devam beklemede; gerekli insan girdisi bekleniyor. "
+                "Gerekli işlem: teknik sorumlu ajan gerekli girdiyi istemeli; "
+                "yetkili insan yanıt vermelidir."
+            )
+        if reason_code == "strict_session_mismatch":
+            return (
+                f"{context_label} Devam durduruldu; strict_session_mismatch: oturum "
+                "eşleşmesi doğrulanamadı. Gerekli işlem: sorumlu teknik ajan oturum "
+                "kimliğini doğrulamalıdır."
+            )
+        if reason_code == "restart_orphan_success":
+            return (
+                f"{context_label} Yeniden başlatma (restart) sonrası kurtarma: "
+                "önceki başarılı yanıt kalıcı teslimattan önce kayboldu; "
+                "otomatik kurtarma yapılmayacak. Gerekli işlem: sorumlu teknik ajan "
+                "teslimat kaydını incelemelidir."
+            )
+        if reason_code in {"turn_failed", "session_error", "error_exit_reason",
+                           "turn_result_invalid", "session_context_mismatch",
+                           "actor_mismatch", "issue_state_invalid", "open_blockers",
+                           "status_invalid", "incomplete_exit_reason"}:
+            reason = {
+                "turn_failed": "turn_failed",
+                "session_error": "session_error",
+                "error_exit_reason": "error_exit_reason",
+                "turn_result_invalid": "turn sonucu doğrulanamadı",
+                "session_context_mismatch": "oturum bağlamı doğrulanamadı",
+                "actor_mismatch": "ajan kimliği doğrulanamadı",
+                "issue_state_invalid": "issue durumu doğrulanamadı",
+                "open_blockers": "açık engeller doğrulandı",
+                "status_invalid": "oturum durumu doğrulanamadı",
+                "incomplete_exit_reason": "tamamlanmamış turn nedeni doğrulanamadı",
+            }[reason_code]
+            return (
+                f"{context_label} Devam durduruldu; {reason}. "
+                "Gerekli işlem: sorumlu teknik ajan ilgili yapılandırılmış durumu doğrulamalıdır."
+            )
+        reason = {
+            "decision_mismatch": "karar eşleşmesi doğrulanamadı",
+            "hermes_decision_mismatch": "Hermes karar eşleşmesi doğrulanamadı",
+            "hermes_session_mismatch": "Hermes oturum eşleşmesi doğrulanamadı",
+            "hermes_session_unavailable": "Hermes oturum kaynağı kullanılamıyor",
+            "issue_binding_missing": "issue eşlemesi bulunamadı",
+            "issue_mismatch": "issue eşleşmesi doğrulanamadı",
+            "issue_missing": "authoritative issue bulunamadı",
+            "session_mismatch": "oturum eşleşmesi doğrulanamadı",
+        }[reason_code]
+        return (
+            f"{context_label} Devam durduruldu; {reason}. "
+            "Gerekli işlem: sorumlu teknik ajan ilgili kimlik ve durumu doğrulamalıdır."
+        )
 
     def _complete_turn_thought(
         self, decision: dict[str, Any], response: str
@@ -4018,6 +4235,21 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return response
         if self._ledger is None or self._linear is None or event.source is None:
             return None
+        # Core clarify timeout removes the registry entry before returning the
+        # timeout sentinel. Fence that already-delivered question at the staged
+        # delivery boundary, before outcome classification can enqueue a generic
+        # replacement elicitation.
+        failed_or_interrupted = isinstance(turn_result, Mapping) and (
+            bool(turn_result.get("failed"))
+            or bool(turn_result.get("interrupted"))
+            or turn_result.get("completed") is False
+        )
+        if not failed_or_interrupted and self._native_clarify_timeout_fenced(event):
+            logger.info(
+                "[linear] staged delivery fenced: clarify timeout session=%s",
+                event.source.chat_id,
+            )
+            return None
         prior_id = str(getattr(event, "_linear_turn_decision_id", "") or "")
         session_id = str(event.metadata.get("linear_agent_session_id") or "")
         issue_id = str(event.metadata.get("linear_issue_id") or "")
@@ -4035,7 +4267,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         async with self._session_lock(session_id):
             try:
                 context = await self._linear.get_agent_turn_context(session_id)
-                live_outcome = self._classify_turn_outcome(event, turn_result, context)
+                live_outcome, live_reason = self._classify_turn_outcome_with_reason(
+                    event, turn_result, context
+                )
             except Exception as exc:
                 if isinstance(exc, LinearAPIError) and exc.retryable:
                     raise
@@ -4046,6 +4280,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 )
                 context = {"issue": {"id": issue_id}}
                 live_outcome = "blocked"
+                live_reason = "unverified"
 
             try:
                 state = await self._goal_state_for_source(
@@ -4061,6 +4296,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 )
                 state = None
                 live_outcome = "blocked"
+                live_reason = "unverified"
             if state is None:
                 if live_outcome in {"continue", "success"}:
                     live_outcome = "blocked"
@@ -4094,12 +4330,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 exceptional = "native_budget_rollover"
             elif native_status == "paused":
                 outcome = "blocked"
+                live_reason = "unverified"
             elif native_status == "active":
                 # Active includes native process/delegation waits. Hermes owns both the
                 # continuation FIFO and the session-scoped wait wakeup.
                 outcome = "continue"
             else:
                 outcome = "blocked"
+                live_reason = "unverified"
 
             decision = prior_decision or self._ledger.reserve_turn_decision(
                 session_id,
@@ -4137,7 +4375,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 # Acceptance and every lifecycle gate are read once more immediately
                 # before the durable response is admitted to the outbox.
                 fresh = await self._linear.get_agent_turn_context(session_id)
-                fresh_outcome = self._classify_turn_outcome(event, turn_result, fresh)
+                fresh_outcome, fresh_reason = self._classify_turn_outcome_with_reason(
+                    event, turn_result, fresh
+                )
                 if fresh_outcome == "success":
                     if await self._turn_success_session_matches(decision, turn_result):
                         self._enqueue_turn_success(
@@ -4157,11 +4397,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 ):
                     changed = self._ledger.get_turn_decision(decision["decision_id"])
                     if changed is not None:
-                        self._enqueue_turn_terminal_activity(changed, fresh_outcome)
+                        self._enqueue_turn_terminal_activity(
+                            changed, fresh_outcome, reason_code=fresh_reason
+                        )
                 return None
 
             if outcome != "continue":
-                self._enqueue_turn_terminal_activity(decision, outcome)
+                self._enqueue_turn_terminal_activity(
+                    decision, outcome, reason_code=live_reason
+                )
                 return None
 
             if not exceptional:
@@ -4590,7 +4834,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if owned_open:
                 self._enqueue_turn_terminal_activity(
                     row, "blocked", message, expected_state="pending", final_state="fenced",
-                    orphan_success=True,
+                    orphan_success=True, reason_code="restart_orphan_success",
                 )
             else:
                 self._ledger.fence_turn_success_without_activity(decision_id, message)
@@ -4827,6 +5071,383 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         except Exception as exc:
             return SendResult(success=False, error=str(exc), retryable=False)
 
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: list[str] | None,
+        clarify_id: str,
+        session_key: str,
+        metadata: Any = None,
+    ) -> SendResult:
+        """Deliver a registered clarify as a native, typed Linear elicitation.
+
+        This deliberately does not call ``send``: native clarify is an
+        interaction boundary, not a completed-turn response.  The core
+        clarify registry remains the sole authority for resolving replies.
+        """
+        if not self._native_goal_continuation_enabled:
+            return await super().send_clarify(
+                chat_id, question, choices, clarify_id, session_key, metadata
+            )
+        if self._ledger is None or self._linear is None:
+            return SendResult(success=False, error="Linear outbox is unavailable", retryable=True)
+        try:
+            from tools import clarify_gateway as clarify_gateway
+
+            entry = clarify_gateway.get_pending_for_session(
+                str(session_key), include_choice_prompts=True
+            )
+            supplied_choices = list(choices) if choices else None
+            if (
+                entry is None
+                or entry.event.is_set()
+                or str(entry.clarify_id) != str(clarify_id)
+                or str(entry.session_key) != str(session_key)
+                or str(entry.question) != str(question)
+                or (list(entry.choices) if entry.choices else None) != supplied_choices
+            ):
+                raise LinearAPIError("Linear clarify registration is missing or mismatched", retryable=False)
+
+            event = self._active_turn_events.get(str(chat_id))
+            if event is None or event.source is None or str(event.source.chat_id) != str(chat_id):
+                raise LinearAPIError("Linear clarify has no live owned turn", retryable=False)
+            if str(event.metadata.get("gateway_session_key") or "") != str(session_key):
+                raise LinearAPIError("Linear clarify session key mismatch", retryable=False)
+            if str(event.metadata.get("linear_agent_session_id") or "") != str(chat_id):
+                raise LinearAPIError("Linear clarify target mismatch", retryable=False)
+            await self._validate_activity_target(str(chat_id))
+            context = await self._linear.get_agent_turn_context(str(chat_id))
+            issue = context.get("issue") if isinstance(context, Mapping) else None
+            actor_id = str(getattr(self._linear, "actor_id", "") or "")
+            if (
+                not isinstance(context, Mapping)
+                or str(context.get("id") or "") != str(chat_id)
+                or str(context.get("status") or "") not in {"pending", "active", "awaitingInput"}
+                or not isinstance(issue, dict)
+                or str(issue.get("id") or "") != str(event.metadata.get("linear_issue_id") or "")
+                or not actor_id
+                or not hmac.compare_digest(str(issue.get("delegate", {}).get("id") or ""), actor_id)
+                or str((issue.get("state") or {}).get("type") or "").casefold()
+                in {"completed", "canceled", "cancelled"}
+            ):
+                raise LinearAPIError("Linear clarify live issue ownership check failed", retryable=False)
+            if self._ledger.has_session_closure(str(chat_id)) or str(chat_id) in self._completed_turn_results:
+                raise LinearAPIError("Linear clarify is fenced by terminal turn state", retryable=False)
+
+            item_id = f"activity:clarify:{clarify_id}"
+            # Preemption takes this same lock. Keep the network reads outside
+            # it, then revalidate the exact event and waiter immediately before
+            # the durable enqueue; do not acquire this lock around the drain.
+            async with self._session_lock(str(chat_id)):
+                current_event = self._active_turn_events.get(str(chat_id))
+                current_entry = clarify_gateway.get_pending_for_session(
+                    str(session_key), include_choice_prompts=True
+                )
+                if (
+                    current_event is not event
+                    or current_entry is None
+                    or current_entry.event.is_set()
+                    or str(current_entry.clarify_id) != str(clarify_id)
+                    or str(current_entry.question) != str(question)
+                ):
+                    raise LinearAPIError(
+                        "Linear clarify turn was replaced before enqueue", retryable=False
+                    )
+                # Correlate before the vendor call; a fast webhook may resolve
+                # the question while activity creation is still awaiting its ack.
+                event.metadata["linear_clarify_id"] = str(clarify_id)
+                event.metadata["linear_clarify_resolved"] = False
+                activity_id = self._enqueue_activity(
+                    str(chat_id),
+                    "elicitation",
+                    self._render_clarify_body(
+                        str(question), supplied_choices, bool(current_entry.multi_select)
+                    ),
+                    item_key=f"clarify:{clarify_id}",
+                    metadata={
+                        "clarify_id": str(clarify_id),
+                        "clarify_session_key": str(session_key),
+                        "clarify_question": str(question),
+                        "clarify_turn_key": str(event.metadata.get("linear_delivery_key") or event.message_id or ""),
+                    },
+                )
+            await self._drain_outbox_once()
+            item = self._ledger.get_outbox_item(item_id)
+            if item is None:
+                raise LinearAPIError("Linear clarify delivery was not durably recorded", retryable=True)
+            if bool(event.metadata.get("linear_clarify_resolved")):
+                # The answer may win while the activity is still pending. Keep
+                # that monotonic resolution in the already-created outbox row.
+                self._ledger.update_outbox_payload_metadata(
+                    item_id,
+                    {"clarify_resolved": True, "clarify_id": str(clarify_id)},
+                )
+            item_payload = item.get("payload")
+            if isinstance(item_payload, Mapping) and bool(
+                item_payload.get("clarify_suppressed")
+            ):
+                return SendResult(
+                    success=False,
+                    error="Linear clarify prompt was suppressed",
+                    retryable=False,
+                )
+            if item["state"] == "dead":
+                raise LinearAPIError("Linear clarify delivery is dead-lettered", retryable=False)
+            if item["state"] != "delivered":
+                raise LinearAPIError("Linear clarify delivery is pending", retryable=True)
+            if supplied_choices:
+                from tools.clarify_gateway import mark_awaiting_text
+
+                mark_awaiting_text(clarify_id)
+            return SendResult(success=True, message_id=activity_id)
+        except LinearAPIError as exc:
+            return SendResult(
+                success=False,
+                error=str(exc),
+                retryable=exc.retryable,
+                raw_response=(
+                    {"ambiguous": True, "error": str(exc)} if exc.retryable else None
+                ),
+            )
+        except Exception as exc:
+            return SendResult(success=False, error=str(exc), retryable=False)
+
+    @staticmethod
+    def _render_clarify_body(
+        question: str, choices: list[str] | None, multi_select: bool
+    ) -> str:
+        """Render core clarify data into Linear's documented activity body."""
+        if not choices:
+            return f"❓ {question}"
+        numbered = [f"  {i}. {choice}" for i, choice in enumerate(choices, start=1)]
+        if multi_select:
+            hint = (
+                'Multiple selections allowed — reply with the numbers separated by commas '
+                'or spaces (e.g. "1, 3"), the option text, or your own answer.'
+            )
+        else:
+            hint = "Reply with the number, the option text, or your own answer."
+        return "\n".join([f"❓ {question}", "", *numbered, "", hint])
+
+    async def _resolve_clarify_input(
+        self, agent_session_id: str, issue_id: str, payload: Mapping[str, Any]
+    ) -> str | None:
+        """Resolve a Linear reply through the core registry after local binding checks."""
+        if not self._native_goal_continuation_enabled:
+            return None
+        active = self._active_turn_events.get(str(agent_session_id))
+        if active is None or active.source is None:
+            return None
+        if (
+            str(active.metadata.get("linear_agent_session_id") or "")
+            != str(agent_session_id)
+            or str(active.metadata.get("linear_issue_id") or "") != str(issue_id)
+        ):
+            return None
+        body = _activity_body(dict(payload))
+        # Slash commands belong to the normal native command path. The clarify
+        # interceptor must not consume any slash command.
+        if body.lstrip().startswith("/"):
+            return None
+        extra = getattr(self.config, "extra", None) or {}
+        session_key = build_session_key(
+            active.source,
+            group_sessions_per_user=extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+            profile=self._session_key_profile(active.source),
+        )
+        from tools import clarify_gateway
+
+        # A normal prompted activity must not be classified as a clarify reply
+        # until the core registry proves that this session has a live question.
+        # This keeps actor/context failures on ordinary prompts in the native
+        # command path instead of swallowing them as clarify diagnostics.
+        pending = clarify_gateway.get_pending_for_session(
+            session_key, include_choice_prompts=True
+        )
+        if pending is None or pending.event.is_set():
+            return None
+        captured_clarify_id = str(pending.clarify_id)
+        captured_active = active
+        incoming_actor_id, _ = _actor(dict(payload))
+        registered_user_id = str(getattr(active.source, "user_id", "") or "")
+        if bool(active.metadata.get("linear_direct_activation")):
+            return "clarify_requester_binding_unavailable"
+        if not registered_user_id or not hmac.compare_digest(
+            incoming_actor_id, registered_user_id
+        ):
+            return "clarify_actor_mismatch"
+        if self._ledger is not None and self._ledger.has_session_closure(str(agent_session_id)):
+            return "clarify_fenced"
+        if self._linear is None:
+            return "clarify_unavailable"
+        async with self._session_lock(str(agent_session_id)):
+            context = await self._linear.get_agent_turn_context(str(agent_session_id))
+            current = self._active_turn_events.get(str(agent_session_id))
+            current_pending = clarify_gateway.get_pending_for_session(
+                session_key, include_choice_prompts=True
+            )
+            if (
+                current is not captured_active
+                or current_pending is None
+                or str(current_pending.clarify_id) != captured_clarify_id
+            ):
+                return "clarify_fenced"
+        issue = context.get("issue") if isinstance(context, Mapping) else None
+        actor_id = str(getattr(self._linear, "actor_id", "") or "")
+        if (
+            not isinstance(context, Mapping)
+            or str(context.get("id") or "") != str(agent_session_id)
+            or str(context.get("status") or "") not in _OPEN_AGENT_SESSION_STATUSES
+            or not isinstance(issue, dict)
+            or str(issue.get("id") or "") != str(issue_id)
+            or not actor_id
+            or not hmac.compare_digest(str(issue.get("delegate", {}).get("id") or ""), actor_id)
+            or str((issue.get("state") or {}).get("type") or "").casefold()
+            in {"completed", "canceled", "cancelled"}
+        ):
+            return "clarify_fenced"
+        coerced, rejection = clarify_gateway._coerce_text_response_detailed(
+            current_pending, body
+        )
+        if coerced is not None and clarify_gateway.resolve_gateway_clarify(
+            captured_clarify_id, coerced
+        ):
+            active.metadata["linear_clarify_resolved"] = True
+            self._ledger.update_outbox_payload_metadata(
+                f"activity:clarify:{captured_clarify_id}",
+                {"clarify_resolved": True, "clarify_id": captured_clarify_id},
+            )
+            return "clarify_resolved"
+        if rejection == "invalid_selection":
+            return "clarify_rejected"
+        return None
+
+    def _trusted_native_command_requester(self, event: MessageEvent) -> bool:
+        """Require an exact active human source before any native slash dispatch."""
+        source = event.source
+        if source is None or bool(event.metadata.get("linear_direct_activation")):
+            return False
+        session_id = str(event.metadata.get("linear_agent_session_id") or source.chat_id or "")
+        active = self._active_turn_events.get(session_id)
+        if (
+            active is None
+            or active.source is None
+            or bool(active.metadata.get("linear_direct_activation"))
+        ):
+            return False
+        active_id = str(active.source.user_id or "")
+        incoming_id = str(source.user_id or "")
+        if not active_id or not incoming_id:
+            return False
+        return (
+            hmac.compare_digest(active_id, incoming_id)
+            and str(active.metadata.get("linear_agent_session_id") or "") == session_id
+            and str(active.metadata.get("linear_issue_id") or "")
+            == str(event.metadata.get("linear_issue_id") or "")
+        )
+
+    def _suppress_clarify_outbox(self, item: OutboxItem, reason: str) -> None:
+        """Durably record bounded suppression without presenting it as delivery."""
+        if self._ledger is None:
+            return
+        self._ledger.update_outbox_payload_metadata(
+            item.id,
+            {
+                "clarify_suppressed": True,
+                "clarify_suppression_reason": str(reason)[:48],
+            },
+        )
+        self._ledger.mark_outbox_delivered(item.id)
+
+    def _has_delivered_native_clarify(self, event: MessageEvent) -> bool:
+        """Keep a delivered unresolved question as the active turn fence."""
+        if self._ledger is None or event.source is None:
+            return False
+        if bool(event.metadata.get("linear_clarify_resolved")):
+            return False
+        extra = getattr(self.config, "extra", None) or {}
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+            profile=self._session_key_profile(event.source),
+        )
+        from tools import clarify_gateway
+
+        pending = clarify_gateway.get_pending_for_session(
+            session_key, include_choice_prompts=True
+        )
+        clarify_id = (
+            str(pending.clarify_id)
+            if pending is not None and not pending.event.is_set()
+            else str(event.metadata.get("linear_clarify_id") or "")
+        )
+        if not clarify_id:
+            return False
+        item = self._ledger.get_outbox_item(f"activity:clarify:{clarify_id}")
+        if item is None or item["state"] != "delivered":
+            return False
+        payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+        if bool(payload.get("clarify_resolved")) or bool(payload.get("clarify_suppressed")):
+            return False
+        if str(payload.get("activity_type") or "") != "elicitation":
+            return False
+        return bool(item is not None and item["state"] == "delivered")
+
+    def _native_clarify_timeout_fenced(self, event: MessageEvent) -> bool:
+        if self._ledger is None or event.source is None:
+            return False
+        clarify_id = str(event.metadata.get("linear_clarify_id") or "")
+        if not clarify_id or bool(event.metadata.get("linear_clarify_resolved")):
+            return False
+        extra = getattr(self.config, "extra", None) or {}
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+            profile=self._session_key_profile(event.source),
+        )
+        from tools import clarify_gateway
+
+        pending = clarify_gateway.get_pending_for_session(
+            session_key, include_choice_prompts=True
+        )
+        item = self._ledger.get_outbox_item(f"activity:clarify:{clarify_id}")
+        payload = item.get("payload") if item and isinstance(item.get("payload"), Mapping) else {}
+        return bool(
+            pending is None
+            and item is not None
+            and item.get("state") in {"pending", "in_flight", "delivered"}
+            and str(payload.get("activity_type") or "") == "elicitation"
+            and not bool(payload.get("clarify_suppressed"))
+            and not bool(payload.get("clarify_resolved"))
+        )
+
+    def _clarify_outbox_is_live(self, item: OutboxItem) -> bool:
+        """Allow clarification delivery only with its exact live waiter/turn."""
+        payload = item.payload
+        clarify_id = str(payload.get("clarify_id") or "")
+        session_key = str(payload.get("clarify_session_key") or "")
+        turn_key = str(payload.get("clarify_turn_key") or "")
+        if not clarify_id or not session_key or not turn_key:
+            return False
+        from tools import clarify_gateway
+
+        pending = clarify_gateway.get_pending_for_session(
+            session_key, include_choice_prompts=True
+        )
+        active = self._active_turn_events.get(str(item.aggregate_key))
+        return bool(
+            pending is not None
+            and not pending.event.is_set()
+            and str(pending.clarify_id) == clarify_id
+            and str(pending.question) == str(payload.get("clarify_question") or "")
+            and active is not None
+            and str(active.metadata.get("linear_delivery_key") or active.message_id or "") == turn_key
+        )
+
     def _notify_terminal_progress_fence(
         self, chat_id: str, *, expected_turn_key: str
     ) -> None:
@@ -4932,6 +5553,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._remove_owned_staged_delivery(event.source.chat_id, pending_delivery)
         else:
             pending_delivery = None
+        if outcome == ProcessingOutcome.SUCCESS and self._has_delivered_native_clarify(event):
+            logger.info(
+                "[linear] preserved delivered unresolved clarify session=%s",
+                event.source.chat_id,
+            )
+            return
         await self._wait_for_thought(event.source.chat_id)
         if self._ledger.has_session_closure(event.source.chat_id):
             logger.info(

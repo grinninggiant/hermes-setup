@@ -1354,13 +1354,41 @@ class DeliveryLedger:
                 "WHERE agent_session_id=? AND dispatch_state IN ('pending', 'enqueued')",
                 (now, now, session_id),
             )
-            self._db.execute(
-                "UPDATE outbox SET state = 'delivered', "
-                "last_error = 'Suppressed by authoritative human closure', "
-                "updated_at = ?, delivered_at = ? "
+            suppressed_rows = self._db.execute(
+                "SELECT id, payload_json FROM outbox "
                 "WHERE aggregate_key = ? AND state IN ('pending', 'in_flight', 'dead')",
-                (now, now, session_id),
-            )
+                (session_id,),
+            ).fetchall()
+            for row in suppressed_rows:
+                payload = json.loads(row[1])
+                if not isinstance(payload, dict):
+                    payload = {}
+                if (
+                    str(payload.get("activity_type") or "") == "elicitation"
+                    and payload.get("clarify_id")
+                ):
+                    payload.update(
+                        {
+                            "clarify_suppressed": True,
+                            "clarify_suppression_reason": "authoritative_human_closure",
+                        }
+                    )
+                self._db.execute(
+                    "UPDATE outbox SET state = 'delivered', payload_json = ?, "
+                    "last_error = 'Suppressed by authoritative human closure', "
+                    "updated_at = ?, delivered_at = ? WHERE id = ?",
+                    (
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        now,
+                        now,
+                        row[0],
+                    ),
+                )
             if indicator_payload_json is not None:
                 self._db.execute(
                     "INSERT INTO outbox("
@@ -1661,6 +1689,33 @@ class DeliveryLedger:
             "next_attempt_at": float(row[7]),
             "last_error": row[8],
         }
+
+    def update_outbox_payload_metadata(
+        self, item_id: str, metadata: dict[str, Any]
+    ) -> bool:
+        """Merge correlation metadata into an existing outbox payload."""
+        if not isinstance(metadata, dict):
+            return False
+        with self._lock:
+            row = self._db.execute(
+                "SELECT payload_json FROM outbox WHERE id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            payload = json.loads(row[0])
+            if not isinstance(payload, dict):
+                return False
+            payload.update(metadata)
+            self._db.execute(
+                "UPDATE outbox SET payload_json = ?, updated_at = ? WHERE id = ?",
+                (
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                    int(time.time()),
+                    item_id,
+                ),
+            )
+            self._db.commit()
+            return True
 
     def latest_activity_progress_state(self, aggregate_key: str) -> dict[str, str]:
         """Return durable terminal-fence metadata from the newest session activity."""
