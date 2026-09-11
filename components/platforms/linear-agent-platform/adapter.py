@@ -865,7 +865,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.30",
+                "version": "0.8.31",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -5443,6 +5443,16 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._ledger.update_outbox_payload_metadata(
                 f"activity:clarify:{captured_clarify_id}",
                 {"clarify_resolved": True, "clarify_id": captured_clarify_id},
+            )
+            # This event is a verified resolution, not model-authored progress.
+            # One fixed, ephemeral receipt per question; no answer content or
+            # reopening of terminal/progress fences. The outbox owns delivery.
+            self._enqueue_activity(
+                str(agent_session_id),
+                "thought",
+                "Yanıt alındı — aynı oturumda çalışmaya devam ediliyor.",
+                item_key=f"clarify-resolved:{captured_clarify_id}",
+                ephemeral=True,
             )
             return "clarify_resolved"
         if rejection == "invalid_selection":

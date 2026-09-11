@@ -113,6 +113,47 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._signing_secrets = ("secret-221",)
         return await self.adapter._handle_webhook(Request())
 
+    async def test_verified_answer_enqueues_one_ephemeral_receipt(self):
+        clarify_gateway.register("receipt", self.key, "Target?", ["yes"])
+        sent = await self.adapter.send_clarify(
+            "linear-session-221", "Target?", ["yes"], "receipt", self.key
+        )
+        self.assertTrue(sent.success)
+        payload = self.payload(body="1")
+        resolved = await self.adapter._resolve_clarify_input(
+            "linear-session-221", "issue-221", payload
+        )
+        self.assertEqual(resolved, "clarify_resolved")
+        row = self.adapter._ledger.get_outbox_item("activity:clarify-resolved:receipt")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["operation"], "activity.transient.create")
+        self.assertEqual(row["payload"]["activity_type"], "thought")
+        self.assertTrue(row["payload"]["ephemeral"])
+        self.assertIn("Yanıt alındı", row["payload"]["body"])
+        self.assertNotIn("Target?", row["payload"]["body"])
+        await self.adapter._resolve_clarify_input("linear-session-221", "issue-221", payload)
+        await self.adapter._drain_outbox_once()
+        receipts = [a for a in self.transport.activities if a[1] == "thought"]
+        self.assertEqual(len(receipts), 1)
+
+    async def test_rejected_or_closed_reply_never_enqueues_receipt(self):
+        clarify_gateway.register("rejected", self.key, "Target?", ["yes"])
+        for payload, expected in (
+            (self.payload(actor="other"), "clarify_actor_mismatch"),
+            (self.payload(body="7"), "clarify_rejected"),
+        ):
+            self.assertEqual(
+                await self.adapter._resolve_clarify_input("linear-session-221", "issue-221", payload),
+                expected,
+            )
+            self.assertIsNone(self.adapter._ledger.get_outbox_item("activity:clarify-resolved:rejected"))
+        self.adapter._linear.status = "complete"
+        self.assertEqual(
+            await self.adapter._resolve_clarify_input("linear-session-221", "issue-221", self.payload(body="1")),
+            "clarify_fenced",
+        )
+        self.assertIsNone(self.adapter._ledger.get_outbox_item("activity:clarify-resolved:rejected"))
+
     async def test_signed_actor_replay_and_wrong_actor(self):
         clarify_gateway.register("normal", self.key, "Target?", ["staging", "prod"])
         first = await self.webhook(self.payload())
