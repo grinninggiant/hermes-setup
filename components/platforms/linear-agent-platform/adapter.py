@@ -862,7 +862,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.24",
+                "version": "0.8.25",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -5293,12 +5293,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         captured_active = active
         incoming_actor_id, _ = _actor(dict(payload))
         registered_user_id = str(getattr(active.source, "user_id", "") or "")
-        if bool(active.metadata.get("linear_direct_activation")):
-            return "clarify_requester_binding_unavailable"
-        if not registered_user_id or not hmac.compare_digest(
-            incoming_actor_id, registered_user_id
-        ):
-            return "clarify_actor_mismatch"
+        # An absent requester can be resolved only for this normal question,
+        # from the live human issue owner below. Never persist it into source:
+        # that would also grant native slash-command requester authority.
+        if registered_user_id:
+            if bool(active.metadata.get("linear_direct_activation")):
+                return "clarify_requester_binding_unavailable"
+            if not hmac.compare_digest(incoming_actor_id, registered_user_id):
+                return "clarify_actor_mismatch"
         if self._ledger is not None and self._ledger.has_session_closure(str(agent_session_id)):
             return "clarify_fenced"
         if self._linear is None:
@@ -5329,6 +5331,19 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             in {"completed", "canceled", "cancelled"}
         ):
             return "clarify_fenced"
+        if not registered_user_id:
+            owner = issue.get("assignee")
+            if (
+                not isinstance(owner, dict)
+                or owner.get("app") is not False
+                or not isinstance(owner.get("id"), str)
+                or not owner["id"]
+                or not incoming_actor_id
+                or not hmac.compare_digest(owner["id"], incoming_actor_id)
+                or not hmac.compare_digest(str(context.get("app_user_id") or ""), actor_id)
+                or hmac.compare_digest(incoming_actor_id, actor_id)
+            ):
+                return "clarify_requester_binding_unavailable"
         coerced, rejection = clarify_gateway._coerce_text_response_detailed(
             current_pending, body
         )
