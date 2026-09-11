@@ -1690,6 +1690,16 @@ class DeliveryLedger:
             "last_error": row[8],
         }
 
+    def latest_clarify_timeout(self, session_id: str) -> dict[str, Any] | None:
+        """Read the newest normal-question timeout marker; no ledger schema change."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id FROM outbox WHERE aggregate_key = ? "
+                "AND json_type(payload_json, '$.clarify_timeout_goal') = 'object' "
+                "ORDER BY sequence DESC LIMIT 1", (session_id,),
+            ).fetchone()
+        return self.get_outbox_item(row[0]) if row else None
+
     def update_outbox_payload_metadata(
         self, item_id: str, metadata: dict[str, Any]
     ) -> bool:

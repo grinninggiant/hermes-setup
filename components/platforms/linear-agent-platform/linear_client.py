@@ -636,6 +636,83 @@ query LinearChannelRoutingContext($id: String!, $after: String) {
             after = cursor
         raise LinearAPIError("Channel routing pagination exceeded the policy limit")
 
+    async def verify_late_clarify_reply(
+        self, session_id: str, question_id: str, answer_id: str, owner_id: str, body: str
+    ) -> bool:
+        """Verify exact question/answer and no intervening control or newer prompt."""
+        from datetime import datetime
+        if not all((session_id, question_id, answer_id, owner_id, body)) or question_id == answer_id:
+            return False
+        query = """
+query LinearLateClarifyEvidence($id: String!, $after: String) {
+  agentSession(id: $id) {
+    id
+    activities(first: 50, after: $after) {
+      nodes { id createdAt signal user { id app }
+        content { __typename ... on AgentActivityPromptContent { body } }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+        rows: dict[str, tuple[Any, dict[str, Any]]] = {}
+        after = None
+        seen: set[str] = set()
+        for _ in range(MAX_AGENT_ACTIVITY_PAGES):
+            data = await self.graphql(query, {"id": session_id, "after": after})
+            session = data.get("agentSession")
+            if not isinstance(session, dict) or session.get("id") != session_id:
+                return False
+            connection = session.get("activities") or {}
+            nodes, page = connection.get("nodes"), connection.get("pageInfo")
+            if not isinstance(nodes, list) or not isinstance(page, dict):
+                return False
+            for row in nodes:
+                if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"] or row["id"] in rows:
+                    return False
+                try:
+                    stamp = datetime.fromisoformat(row["createdAt"])
+                except (ValueError, TypeError, KeyError):
+                    return False
+                if stamp.tzinfo is None or not isinstance(row.get("content"), dict) or "signal" not in row:
+                    return False
+                rows[row["id"]] = (stamp, row)
+            more, cursor = page.get("hasNextPage"), page.get("endCursor")
+            if type(more) is not bool:
+                return False
+            if not more:
+                break
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                return False
+            seen.add(cursor)
+            after = cursor
+        else:
+            return False
+        if question_id not in rows or answer_id not in rows:
+            return False
+        qt, question = rows[question_id]
+        at, answer = rows[answer_id]
+        if (
+            qt >= at or question.get("signal") or answer.get("signal")
+            or question["content"].get("__typename") != "AgentActivityElicitationContent"
+            or (question.get("user") or {}).get("id") != self.actor_id
+            or answer["content"].get("__typename") != "AgentActivityPromptContent"
+            or answer["content"].get("body") != body
+            or (answer.get("user") or {}).get("id") != owner_id
+            or (answer.get("user") or {}).get("app") is not False
+            or body.lstrip().startswith("/")
+        ):
+            return False
+        for row_id, (stamp, row) in rows.items():
+            if stamp < qt or row_id in {question_id, answer_id}:
+                continue
+            # A later question/answer, Stop, approval elicitation, error or final
+            # invalidates this narrow rearm. Unknown activity types fail closed.
+            if row.get("signal") or row["content"].get("__typename") != "AgentActivityThoughtContent":
+                return False
+        return True
+
     async def get_agent_session_terminal_response_count(self, session_id: str) -> int:
         """Count non-empty terminal responses for one authoritative Agent Session."""
         query = """

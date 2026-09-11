@@ -134,6 +134,9 @@ _CONTINUATION_REASON_CODES = frozenset(
         "status_invalid",
         "incomplete_exit_reason",
         "unverified",
+        "native_goal_not_rejudged",
+        "native_goal_paused",
+        "late_clarify_unverified",
     }
 )
 
@@ -862,7 +865,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.27",
+                "version": "0.8.28",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -1317,6 +1320,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 activation_resume=planned_intake_created or direct_activation_created,
                 direct_activation=direct_activation_created,
             )
+            # Private provenance, never a field copied from webhook metadata.
+            event._linear_verified_normal_prompt = human_preemption
             if native_command and not self._trusted_native_command_requester(event):
                 # Never let the webhook adapter's synthetic source (or the core
                 # webhook platform exemption) authorize a control command.
@@ -3969,6 +3974,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             await self._ensure_goal_for_source(
                 event.source, hermes_session_id, goal, contract
             )
+        elif (
+            str(state.status) == "paused"
+            and getattr(event, "_linear_verified_normal_prompt", False)
+        ):
+            if not await self._resume_late_clarify_goal(event, hermes_session_id, state):
+                return await self._visible_ingress_veto(event, "late_clarify_unverified")
         return False
 
     async def _visible_ingress_veto(self, event: MessageEvent, reason: str) -> bool:
@@ -4135,6 +4146,17 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             f"Etkilenen adım: {step}. Sorumlu ajan: {responsible_agent}."
         )
         verified = reason_code in _CONTINUATION_REASON_CODES
+        pause_details = {
+            "native_goal_not_rejudged": "Yeni yanıt turu için goal değerlendirmesi yapılmadı; önceki turun paused kararı kaldı.",
+            "native_goal_paused": "Native goal paused durumda; bu tur otomatik devam kararı üretmedi.",
+            "late_clarify_unverified": "Geç yanıtın aynı timeout sorusuna ve mevcut insan sahibine güvenli bağı doğrulanamadı; goal yeniden açılmadı.",
+        }
+        if reason_code in pause_details:
+            return (
+                f"{context_label} Devam durduruldu; {reason_code}: {pause_details[reason_code]} "
+                "Teknik onarım sorumlu ajandadır; soru/yanıt ve goal revision kayıtları eşleştirilmelidir. "
+                "Bu mesaj kullanıcıdan eski cevabı tekrar istemez; başarı teslimi değildir."
+            )
         if not verified or reason_code in {"blocked", "unverified"}:
             return (
                 f"{context_label} Devam durduruldu; ayrıntılı neden doğrulanamadı. "
@@ -4258,6 +4280,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             or turn_result.get("completed") is False
         )
         if not failed_or_interrupted and self._native_clarify_timeout_fenced(event):
+            await self._record_clarify_timeout_goal(event, turn_result)
             logger.info(
                 "[linear] staged delivery fenced: clarify timeout session=%s",
                 event.source.chat_id,
@@ -4343,7 +4366,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 exceptional = "native_budget_rollover"
             elif native_status == "paused":
                 outcome = "blocked"
-                live_reason = "unverified"
+                started = getattr(event, "_linear_processing_started_at", 0)
+                last_turn = getattr(state, "last_turn_at", None)
+                live_reason = (
+                    "native_goal_not_rejudged"
+                    if started and isinstance(last_turn, (int, float)) and last_turn < started
+                    else "native_goal_paused"
+                )
             elif native_status == "active":
                 # Active includes native process/delegation waits. Hermes owns both the
                 # continuation FIFO and the session-scoped wait wakeup.
@@ -5452,6 +5481,109 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return False
         return bool(item is not None and item["state"] == "delivered")
 
+    @staticmethod
+    def _clarify_goal_token(state: Any) -> dict[str, Any]:
+        """Exact native revision, without storing or interpreting judge prose."""
+        return {
+            "created_at": getattr(state, "created_at", None),
+            "turns_used": getattr(state, "turns_used", None),
+            "last_turn_at": getattr(state, "last_turn_at", None),
+            "status": getattr(state, "status", None),
+            "last_verdict": getattr(state, "last_verdict", None),
+            "pause_hash": hashlib.sha256(str(getattr(state, "paused_reason", "")).encode()).hexdigest(),
+        }
+
+    async def _record_clarify_timeout_goal(self, event: MessageEvent, result: Mapping) -> None:
+        """Bind only this turn's fresh blocked judge to its timed-out question."""
+        if self._ledger is None or event.source is None or self.gateway_runner is None:
+            return
+        sid = str(result.get("session_id") or "")
+        started = getattr(event, "_linear_processing_started_at", 0)
+        if not sid or not started:
+            return
+        state = await self._goal_state_for_source(event.source, sid)
+        if (
+            state is None or str(state.status) != "paused"
+            or getattr(state, "last_verdict", "") != "blocked"
+            or not isinstance(getattr(state, "last_turn_at", None), (float, int))
+            or state.last_turn_at < started
+        ):
+            return
+        self._ledger.update_outbox_payload_metadata(
+            f"activity:clarify:{event.metadata['linear_clarify_id']}",
+            {"clarify_timeout_goal": self._clarify_goal_token(state),
+             "clarify_timeout_hermes_session": sid},
+        )
+
+    async def _resume_late_clarify_goal(self, event: MessageEvent, sid: str, state: Any) -> bool:
+        """Approved normal late-answer gate; never resume an arbitrary paused goal."""
+        if (
+            self._ledger is None or self._linear is None or event.source is None
+            or event.internal or not getattr(event, "_linear_verified_normal_prompt", False)
+        ):
+            return False
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        activity = raw.get("agentActivity") or {}
+        if not isinstance(activity, dict):
+            return False
+        session_id = str(event.source.chat_id)
+        answer_id = activity.get("id")
+        author = activity.get("userId")
+        user = activity.get("user") or {}
+        content = activity.get("content") or {}
+        if (
+            not isinstance(answer_id, str) or not answer_id
+            or not isinstance(author, str) or not author
+            or not isinstance(user, dict) or user.get("id") != author
+            or activity.get("agentSessionId") != session_id
+            or not isinstance(content, dict) or content.get("type") != "prompt"
+            or activity.get("signal") or event.metadata.get("linear_signal")
+            or not isinstance(content.get("body"), str)
+            or not content["body"].strip() or content["body"].lstrip().startswith("/")
+        ):
+            return False
+        item = self._ledger.latest_clarify_timeout(session_id)
+        payload = item.get("payload", {}) if item else {}
+        token = self._clarify_goal_token(state)
+        if (
+            not item or item["state"] != "delivered"
+            or payload.get("clarify_timeout_goal") != token
+            or payload.get("clarify_timeout_hermes_session") != sid
+            or payload.get("clarify_suppressed") or payload.get("clarify_resolved")
+            or payload.get("late_reply_id") not in (None, answer_id)
+            or state.status != "paused" or token["last_verdict"] != "blocked"
+            or state.turns_used >= state.max_turns
+        ):
+            return False
+        if not await self._linear.verify_late_clarify_reply(
+            session_id, str(payload.get("activity_id") or ""), answer_id, author,
+            content["body"],
+        ):
+            return False
+        context = await self._linear.get_agent_turn_context(session_id)
+        owner = (context.get("issue") or {}).get("assignee") or {}
+        probe = {"completed": False, "failed": False, "interrupted": False,
+                 "turn_exit_reason": "max_iterations_reached(late_clarify)", "session_id": sid}
+        if (
+            self._classify_turn_outcome(event, probe, context) != "continue"
+            or owner.get("id") != author or owner.get("app") is not False
+            or author == self._linear.actor_id
+        ):
+            return False
+        # Re-read after vendor I/O; a Stop or newer native turn cannot inherit
+        # the old timeout's rearm authorization. Caller holds the session lock.
+        fresh = await self._goal_state_for_source(event.source, sid)
+        if fresh is None or self._clarify_goal_token(fresh) != token:
+            return False
+        if not self._ledger.update_outbox_payload_metadata(item["id"], {"late_reply_id": answer_id}):
+            return False
+        resumed, _ = await self._resume_goal_for_source(event.source, sid, reset_budget=False)
+        if resumed is None or resumed.status != "active" or resumed.turns_used != state.turns_used:
+            return False
+        self._ledger.update_outbox_payload_metadata(item["id"], {"late_reply_rearmed": True})
+        logger.info("[linear] late clarify goal rearmed session=%s question=%s answer=%s", session_id, payload.get("activity_id"), answer_id)
+        return True
+
     def _native_clarify_timeout_fenced(self, event: MessageEvent) -> bool:
         if self._ledger is None or event.source is None:
             return False
@@ -5527,6 +5659,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             logger.warning("[linear] Terminal progress fence callback failed", exc_info=True)
 
     async def on_processing_start(self, event: MessageEvent) -> bool | None:
+        event._linear_processing_started_at = time.time()
         if (
             self._native_goal_continuation_enabled
             and event.source is not None
