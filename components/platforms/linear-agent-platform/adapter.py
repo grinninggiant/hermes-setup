@@ -871,7 +871,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.33",
+                "version": "0.8.34",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -4137,6 +4137,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         final_state: str | None = None,
         orphan_success: bool = False,
         reason_code: str | None = None,
+        diagnostic_response: str = "",
     ) -> bool:
         if self._ledger is None:
             raise RuntimeError("Linear outbox is unavailable")
@@ -4159,6 +4160,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 step="devam teslimi",
             )[:4000],
         }
+        # Only the staged model answer is eligible here, never ``message`` or
+        # raw judge prose. Keep one atomic error activity, not a success response
+        # or an ephemeral thought that the error would replace.
+        if diagnostic_response and outcome == "blocked" and normalized_reason == "native_goal_paused":
+            payload["body"] += (
+                "\n\nKısmi çalışma açıklaması — nihai kabul değildir:\n"
+                + diagnostic_response[:3000]
+            )
         if orphan_success:
             payload["orphan_success_decision_id"] = str(decision["decision_id"])
         if turn_key:
@@ -4494,8 +4503,27 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return None
 
             if outcome != "continue":
+                diagnostic_response = ""
+                started = getattr(event, "_linear_processing_started_at", 0)
+                last_turn = getattr(state, "last_turn_at", None)
+                if (
+                    outcome == "blocked"
+                    and live_outcome in {"continue", "success"}
+                    and live_reason == "native_goal_paused"
+                    and isinstance(turn_result, Mapping)
+                    and turn_result.get("completed") is True
+                    and not failed_or_interrupted
+                    and isinstance(response, str)
+                    and started
+                    and isinstance(last_turn, (int, float))
+                    and last_turn >= started
+                    and str(getattr(state, "last_verdict", "")) == "blocked"
+                    and await self._turn_success_session_matches(decision, turn_result)
+                ):
+                    diagnostic_response = response.strip()
                 self._enqueue_turn_terminal_activity(
-                    decision, outcome, reason_code=live_reason
+                    decision, outcome, reason_code=live_reason,
+                    diagnostic_response=diagnostic_response,
                 )
                 return None
 
