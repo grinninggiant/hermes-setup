@@ -735,6 +735,7 @@ query LinearAgentTurnContext($id: String!) {
       id identifier title description
       state { id name type }
       delegate { id name }
+      assignee { id app }
     }
   }
 }
@@ -770,6 +771,7 @@ query LinearAgentTurnContext($id: String!) {
                 "description": str(issue.get("description") or ""),
                 "state": dict(issue["state"]),
                 "delegate": dict(issue["delegate"]),
+                "assignee": dict(issue["assignee"]) if isinstance(issue.get("assignee"), dict) else None,
             },
             "open_blockers": await self.get_open_blockers(issue_id),
         }
