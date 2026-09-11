@@ -762,6 +762,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     self._progress_turns.pop(next(iter(self._progress_turns)))
 
     def _progress_is_allowed(self, chat_id: str, turn_key: str) -> bool:
+        event = self._active_turn_events.get(chat_id)
+        if event is not None and self._has_delivered_native_clarify(event, include_pending=True):
+            return False
         with self._progress_state_lock:
             current = self._progress_turns.get(chat_id)
             if current is not None:
@@ -771,6 +774,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
 
     def _progress_chat_is_allowed(self, chat_id: str) -> bool:
         """Allow unkeyed heartbeat only before this chat's current turn is fenced."""
+        event = self._active_turn_events.get(chat_id)
+        if event is not None and self._has_delivered_native_clarify(event, include_pending=True):
+            return False
         with self._progress_state_lock:
             current = self._progress_turns.get(chat_id)
             if current is not None:
@@ -865,7 +871,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.31",
+                "version": "0.8.32",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -3045,9 +3051,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 item_key,
             )
             return activity_id
-        terminal_activity = activity_type in {"response", "error", "elicitation"}
+        # A native question pauses visibility only while unresolved; it does
+        # not finish the processing turn. Non-native elicitation stays sealed.
+        native_question = activity_type == "elicitation" and bool((metadata or {}).get("clarify_id"))
+        terminal_activity = activity_type in {"response", "error", "elicitation"} and not native_question
         transition_locked = False
-        if terminal_activity:
+        if terminal_activity or native_question:
             self._progress_transition_lock.acquire()
             transition_locked = True
         payload: dict[str, Any] = {
@@ -5496,7 +5505,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         )
         self._ledger.mark_outbox_delivered(item.id)
 
-    def _has_delivered_native_clarify(self, event: MessageEvent) -> bool:
+    def _has_delivered_native_clarify(self, event: MessageEvent, *, include_pending: bool = False) -> bool:
         """Keep a delivered unresolved question as the active turn fence."""
         if self._ledger is None or event.source is None:
             return False
@@ -5522,14 +5531,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if not clarify_id:
             return False
         item = self._ledger.get_outbox_item(f"activity:clarify:{clarify_id}")
-        if item is None or item["state"] != "delivered":
+        allowed_states = {"pending", "in_flight", "delivered"} if include_pending else {"delivered"}
+        if item is None or item["state"] not in allowed_states:
             return False
         payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
         if bool(payload.get("clarify_resolved")) or bool(payload.get("clarify_suppressed")):
             return False
         if str(payload.get("activity_type") or "") != "elicitation":
             return False
-        return bool(item is not None and item["state"] == "delivered")
+        return True
 
     @staticmethod
     def _clarify_goal_token(state: Any) -> dict[str, Any]:
