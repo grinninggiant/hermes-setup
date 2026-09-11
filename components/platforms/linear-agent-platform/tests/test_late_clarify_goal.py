@@ -133,6 +133,7 @@ class LateClarifyGoalTests(base.NativeContinuationTests):
 
     async def test_schema_shaped_signed_late_answer_reaches_rearm_once(self):
         reply = await self.timeout_fixture()
+        reply.raw_message["agentActivity"]["content"]["body"] = "![image](https://example.invalid/image.png)"
         self.adapter._signing_secrets = ("s" * 32,)
         self.adapter._cancel_linear_session_processing = mock.AsyncMock()
         self.adapter._schedule_thought = mock.Mock()
@@ -189,7 +190,17 @@ class LateClarifyGoalTests(base.NativeContinuationTests):
                         self.state.paused_reason = "user-paused"
                         return True
                     self.adapter._linear.verify_late_clarify_reply.side_effect = change_during_read
-                self.assertFalse(await self.adapter._resume_late_clarify_goal(reply, "hermes-session", deepcopy(self.state)))
+                expected = {
+                    "internal": "prompt_provenance_unverified", "unsigned": "prompt_provenance_unverified",
+                    "stop": "control_signal", "slash": "command_body", "wrong_author": "author_envelope_mismatch",
+                    "wrong_session": "session_envelope_mismatch", "budget": "goal_budget_exhausted",
+                    "pause_revision": "timeout_goal_revision_mismatch", "goal_revision": "timeout_goal_revision_mismatch",
+                    "missing_marker": "timeout_goal_revision_mismatch", "consumed": "different_reply_consumed",
+                    "vendor_race": "goal_changed_during_vendor_read",
+                }
+                with self.assertLogs(base.adapter_mod.logger.name, level="INFO") as logs:
+                    self.assertFalse(await self.adapter._resume_late_clarify_goal(reply, "hermes-session", deepcopy(self.state)))
+                self.assertIn("reason=" + expected[case], "\n".join(logs.output))
                 self.adapter.gateway_runner.resume_goal_for_source.assert_not_awaited()
 
     async def test_old_paused_goal_reports_stale_judge_instead_of_unverified(self):
@@ -202,6 +213,53 @@ class LateClarifyGoalTests(base.NativeContinuationTests):
         notice = self.adapter._continuation_blocker_notice(row["error"], step="test")
         self.assertIn("native_goal_not_rejudged", notice)
         self.assertNotIn("awaiting human answer", notice)
+
+    async def test_late_reply_rejection_reports_exact_safe_boundary(self):
+        reply = await self.timeout_fixture()
+        reply.raw_message["agentActivity"]["userId"] = None
+        reply.raw_message["agentActivity"]["content"]["body"] = "![image](https://example.invalid/private?signature=DO_NOT_LOG)"
+        with self.assertLogs(base.adapter_mod.logger.name, level="INFO") as logs:
+            self.assertTrue(await self.adapter._prepare_bound_linear_ingress(reply))
+        output = "\n".join(logs.output)
+        self.assertIn("reason=author_missing", output)
+        self.assertNotIn("DO_NOT_LOG", output)
+        self.assertNotIn("example.invalid", output)
+        self.adapter._linear.verify_late_clarify_reply.assert_not_awaited()
+        self.adapter.gateway_runner.resume_goal_for_source.assert_not_awaited()
+
+    async def test_timeout_revision_and_vendor_rejections_are_distinguishable(self):
+        reply = await self.timeout_fixture()
+        self.state.created_at += 1
+        with self.assertLogs(base.adapter_mod.logger.name, level="INFO") as logs:
+            self.assertFalse(await self.adapter._resume_late_clarify_goal(reply, "hermes-session", deepcopy(self.state)))
+        self.assertIn("reason=timeout_goal_revision_mismatch", "\n".join(logs.output))
+        self.state.created_at -= 1
+        self.adapter._linear.verify_late_clarify_reply.return_value = False
+        with self.assertLogs(base.adapter_mod.logger.name, level="INFO") as logs:
+            self.assertFalse(await self.adapter._resume_late_clarify_goal(reply, "hermes-session", deepcopy(self.state)))
+        self.assertIn("reason=vendor_evidence_unverified", "\n".join(logs.output))
+        self.adapter.gateway_runner.resume_goal_for_source.assert_not_awaited()
+
+    async def test_owner_delegate_and_approval_rejections_remain_closed(self):
+        reply = await self.timeout_fixture()
+        original = self.adapter._linear.get_agent_turn_context
+        for case in ("owner", "delegate", "approval"):
+            with self.subTest(case=case):
+                async def context(sid):
+                    value = await original(sid)
+                    if case == "owner":
+                        value["issue"]["assignee"]["id"] = "different-human"
+                    elif case == "delegate":
+                        value["issue"]["delegate"]["id"] = "different-agent"
+                    else:
+                        value["status"] = "awaitingInput"
+                    return value
+                self.adapter._linear.get_agent_turn_context = context
+                with self.assertLogs(base.adapter_mod.logger.name, level="INFO") as logs:
+                    self.assertFalse(await self.adapter._resume_late_clarify_goal(reply, "hermes-session", deepcopy(self.state)))
+                expected = "owner_mismatch" if case == "owner" else "live_lifecycle_denied"
+                self.assertIn("reason=" + expected, "\n".join(logs.output))
+                self.adapter.gateway_runner.resume_goal_for_source.assert_not_awaited()
 
     async def test_unverified_late_reply_never_rearms_pause(self):
         reply = await self.timeout_fixture()

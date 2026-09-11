@@ -871,7 +871,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.32",
+                "version": "0.8.33",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -5577,64 +5577,77 @@ class LinearPlatformAdapter(BasePlatformAdapter):
 
     async def _resume_late_clarify_goal(self, event: MessageEvent, sid: str, state: Any) -> bool:
         """Approved normal late-answer gate; never resume an arbitrary paused goal."""
+        # Fixed codes only; never log image URLs, body, author, or judge prose.
+        def reject(reason: str) -> bool:
+            session_ref = hashlib.sha256(str(getattr(event.source, "chat_id", "")).encode()).hexdigest()[:16]
+            logger.info("[linear] late clarify rejected session_ref=%s reason=%s", session_ref, reason)
+            return False
+
         if (
             self._ledger is None or self._linear is None or event.source is None
             or event.internal or not getattr(event, "_linear_verified_normal_prompt", False)
         ):
-            return False
+            return reject("prompt_provenance_unverified")
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         activity = raw.get("agentActivity") or {}
         if not isinstance(activity, dict):
-            return False
+            return reject("activity_envelope_invalid")
         session_id = str(event.source.chat_id)
         answer_id = activity.get("id")
         author = activity.get("userId")
         user = activity.get("user") or {}
         content = activity.get("content") or {}
-        if (
-            not isinstance(answer_id, str) or not answer_id
-            or not isinstance(author, str) or not author
-            or not isinstance(user, dict) or user.get("id") != author
-            or activity.get("agentSessionId") != session_id
-            or not isinstance(content, dict) or content.get("type") != "prompt"
-            or activity.get("signal") or event.metadata.get("linear_signal")
-            or not isinstance(content.get("body"), str)
-            or not content["body"].strip() or content["body"].lstrip().startswith("/")
-        ):
-            return False
+        if not isinstance(answer_id, str) or not answer_id:
+            return reject("answer_id_missing")
+        if not isinstance(author, str) or not author:
+            return reject("author_missing")
+        if not isinstance(user, dict) or user.get("id") != author:
+            return reject("author_envelope_mismatch")
+        if activity.get("agentSessionId") != session_id:
+            return reject("session_envelope_mismatch")
+        if not isinstance(content, dict) or content.get("type") != "prompt":
+            return reject("content_type_mismatch")
+        if activity.get("signal") or event.metadata.get("linear_signal"):
+            return reject("control_signal")
+        if not isinstance(content.get("body"), str) or not content["body"].strip():
+            return reject("body_missing")
+        if content["body"].lstrip().startswith("/"):
+            return reject("command_body")
         item = self._ledger.latest_clarify_timeout(session_id)
         payload = item.get("payload", {}) if item else {}
         token = self._clarify_goal_token(state)
-        if (
-            not item or item["state"] != "delivered"
-            or payload.get("clarify_timeout_goal") != token
-            or payload.get("clarify_timeout_hermes_session") != sid
-            or payload.get("clarify_suppressed") or payload.get("clarify_resolved")
-            or payload.get("late_reply_id") not in (None, answer_id)
-            or state.status != "paused" or token["last_verdict"] != "blocked"
-            or state.turns_used >= state.max_turns
-        ):
-            return False
+        if not item or item["state"] != "delivered":
+            return reject("timeout_question_not_delivered")
+        if payload.get("clarify_timeout_goal") != token:
+            return reject("timeout_goal_revision_mismatch")
+        if payload.get("clarify_timeout_hermes_session") != sid:
+            return reject("timeout_session_mismatch")
+        if payload.get("clarify_suppressed") or payload.get("clarify_resolved"):
+            return reject("question_already_closed")
+        if payload.get("late_reply_id") not in (None, answer_id):
+            return reject("different_reply_consumed")
+        if state.status != "paused" or token["last_verdict"] != "blocked":
+            return reject("goal_not_timeout_paused")
+        if state.turns_used >= state.max_turns:
+            return reject("goal_budget_exhausted")
         if not await self._linear.verify_late_clarify_reply(
             session_id, str(payload.get("activity_id") or ""), answer_id, author,
             content["body"],
         ):
-            return False
+            return reject("vendor_evidence_unverified")
         context = await self._linear.get_agent_turn_context(session_id)
         owner = (context.get("issue") or {}).get("assignee") or {}
         probe = {"completed": False, "failed": False, "interrupted": False,
                  "turn_exit_reason": "max_iterations_reached(late_clarify)", "session_id": sid}
-        if (
-            self._classify_turn_outcome(event, probe, context) != "continue"
-            or owner.get("id") != author or owner.get("app") is not False
-            or author == self._linear.actor_id
-        ):
-            return False
+        if self._classify_turn_outcome(event, probe, context) != "continue":
+            return reject("live_lifecycle_denied")
+        if owner.get("id") != author or owner.get("app") is not False or author == self._linear.actor_id:
+            return reject("owner_mismatch")
         # Re-read after vendor I/O; a Stop or newer native turn cannot inherit
         # the old timeout's rearm authorization. Caller holds the session lock.
         fresh = await self._goal_state_for_source(event.source, sid)
         if fresh is None or self._clarify_goal_token(fresh) != token:
-            return False
+            return reject("goal_changed_during_vendor_read")
         if not self._ledger.update_outbox_payload_metadata(item["id"], {"late_reply_id": answer_id}):
             return False
         resumed, _ = await self._resume_goal_for_source(event.source, sid, reset_budget=False)
