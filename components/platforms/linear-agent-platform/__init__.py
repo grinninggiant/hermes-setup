@@ -548,6 +548,9 @@ def _on_interim_message(
 
 def _pre_tool_progress(**kwargs: Any) -> None:
     """Publish one secret-safe ephemeral thought when a Linear tool starts."""
+    # Cache-parity forks share session identity, not foreground progress ownership.
+    if kwargs.get("execution_context", "foreground") != "foreground":
+        return None
     try:
         from gateway.session_context import get_session_env
 
