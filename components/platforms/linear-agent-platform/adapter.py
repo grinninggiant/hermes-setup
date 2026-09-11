@@ -5293,6 +5293,26 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         captured_active = active
         incoming_actor_id, _ = _actor(dict(payload))
         registered_user_id = str(getattr(active.source, "user_id", "") or "")
+        # AgentSessionEvent has no top-level actor in the vendor schema. Its
+        # signed prompt author lives on agentActivity. Resolve that identity
+        # only for the approved missing-requester normal-question path; never
+        # grant source identity or change slash/Stop/global actor semantics.
+        if not registered_user_id and not incoming_actor_id:
+            activity = payload.get("agentActivity")
+            activity = activity if isinstance(activity, dict) else {}
+            user = activity.get("user")
+            user = user if isinstance(user, dict) else {}
+            content = activity.get("content")
+            content = content if isinstance(content, dict) else {}
+            author_id = activity.get("userId")
+            if (
+                isinstance(author_id, str) and author_id
+                and user.get("id") == author_id
+                and activity.get("agentSessionId") == str(agent_session_id)
+                and content.get("type") == "prompt"
+                and not activity.get("signal")
+            ):
+                incoming_actor_id = author_id
         # An absent requester can be resolved only for this normal question,
         # from the live human issue owner below. Never persist it into source:
         # that would also grant native slash-command requester authority.
