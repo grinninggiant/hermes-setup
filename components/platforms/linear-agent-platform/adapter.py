@@ -865,7 +865,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.29",
+                "version": "0.8.30",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -3900,7 +3900,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         """Re-run authoritative gates at the core's last pre-handler boundary."""
         if not self._native_goal_continuation_enabled:
             return True
-        return not await self._prepare_bound_linear_ingress(event)
+        if await self._prepare_bound_linear_ingress(event):
+            return False
+        # Native FIFO wakes bypass handle_message and arrive metadata-light:
+        # core processing-start precedes this admission callback. Only now has
+        # the exact live session binding passed every authoritative gate.
+        if event.source is not None and self._active_turn_events.get(event.source.chat_id) is not event:
+            self._bind_active_turn(event)
+        return True
 
     async def prepare_goal_status_notice(
         self, source: SessionSource, notice: GoalStatusNotice
@@ -5691,19 +5698,21 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         except Exception:
             logger.warning("[linear] Terminal progress fence callback failed", exc_info=True)
 
-    async def on_processing_start(self, event: MessageEvent) -> bool | None:
-        event._linear_processing_started_at = time.time()
+    def _bind_active_turn(self, event: MessageEvent) -> None:
+        """Bind an admitted event without repeating decision admission or ownership."""
         if (
             self._native_goal_continuation_enabled
             and event.source is not None
             and event.metadata.get("linear_agent_session_id")
         ):
-            # Core restart resumes have no vendor delivery/message ID. Bind
-            # their questions to this processing start without inventing a
-            # webhook identity or weakening the live waiter/turn checks.
+            # Local processing identity, never a synthetic vendor delivery ID.
             if not (event.metadata.get("linear_delivery_key") or event.message_id):
                 event.metadata["linear_clarify_turn_key"] = str(uuid.uuid4())
             self._active_turn_events[event.source.chat_id] = event
+
+    async def on_processing_start(self, event: MessageEvent) -> bool | None:
+        event._linear_processing_started_at = time.time()
+        self._bind_active_turn(event)
         decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
         if (
             self._native_goal_continuation_enabled
