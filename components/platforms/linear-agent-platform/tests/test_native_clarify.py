@@ -345,6 +345,52 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("replaced", result.error or "")
         self.assertIsNone(self.adapter._ledger.get_outbox_item("activity:clarify:q1"))
 
+    async def test_restart_resumed_turn_without_delivery_key_can_clarify(self):
+        event = self.adapter._active_turn_events["linear-session-221"]
+        event.metadata.pop("linear_delivery_key")
+        event.message_id = None
+        await self.adapter.on_processing_start(event)
+        clarify_gateway.register("restart-live", self.key, "Restart question", ["yes"])
+        result = await self.adapter.send_clarify(
+            "linear-session-221", "Restart question", ["yes"], "restart-live", self.key
+        )
+        self.assertTrue(result.success, result.error)
+        item = self.adapter._ledger.get_outbox_item("activity:clarify:restart-live")
+        self.assertTrue(item["payload"]["clarify_turn_key"])
+        self.assertNotIn("linear_delivery_key", event.metadata)
+        self.assertEqual(len(self.transport.activities), 1)
+        response = await self.webhook(self.payload(body="1"))
+        self.assertEqual(json.loads(response.text)["status"], "clarify_resolved")
+        self.assertEqual(clarify_gateway.wait_for_response("restart-live", .01), "yes")
+
+    async def test_restart_replacement_cannot_deliver_previous_turn_question(self):
+        event = self.adapter._active_turn_events["linear-session-221"]
+        event.metadata.pop("linear_delivery_key")
+        event.message_id = None
+        await self.adapter.on_processing_start(event)
+        self.transport.fail = True
+        self.transport.retryable = True
+        clarify_gateway.register("restart-old", self.key, "Old question", None)
+        result = await self.adapter.send_clarify(
+            "linear-session-221", "Old question", None, "restart-old", self.key
+        )
+        self.assertFalse(result.success)
+        old_key = event.metadata["linear_clarify_turn_key"]
+        replacement = MessageEvent(
+            text="resume", message_type=MessageType.TEXT, source=source(),
+            metadata=dict(event.metadata),
+        )
+        await self.adapter.on_processing_start(replacement)
+        self.assertNotEqual(replacement.metadata["linear_clarify_turn_key"], old_key)
+        self.transport.fail = False
+        self.adapter._ledger.reschedule_outbox(
+            "activity:clarify:restart-old", "test", 0, now=time.time() - 1
+        )
+        await self.adapter._drain_outbox_once()
+        item = self.adapter._ledger.get_outbox_item("activity:clarify:restart-old")
+        self.assertTrue(item["payload"]["clarify_suppressed"])
+        self.assertEqual(self.transport.activities, [])
+
     async def test_pending_question_is_suppressed_after_waiter_and_turn_restart_loss(self):
         self.transport.fail = True
         self.transport.retryable = True
