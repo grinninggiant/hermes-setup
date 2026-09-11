@@ -103,6 +103,16 @@ class FakeLinear:
         self.state_type = state_type
         self.description = description
 
+    async def verify_response_receipt(self, activity_id, session_id, body):
+        # This fixture's vendor create is an AsyncMock installed by each test;
+        # strict vendor shape/ownership validation has its own client tests.
+        create = getattr(self, "create_activity", None)
+        return any(
+            call.args == (session_id, "response", body)
+            and call.kwargs.get("activity_id") == activity_id
+            for call in getattr(create, "await_args_list", ())
+        )
+
     async def get_agent_turn_context(self, session_id: str) -> dict:
         return {
             "id": session_id,

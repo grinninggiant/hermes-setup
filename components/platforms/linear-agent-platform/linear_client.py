@@ -990,6 +990,46 @@ mutation LinearNativeAgentActivity($input: AgentActivityCreateInput!) {
             raise LinearAPIError("agentActivityCreate did not report success")
         return str(activity["id"])
 
+    async def verify_response_receipt(
+        self, activity_id: str, agent_session_id: str, body: str
+    ) -> bool:
+        """Read the exact response after delivery; never infer receipt from create ACK."""
+        data = await self.graphql(
+            """query LinearResponseReceipt($id: String!) {
+  agentActivity(id: $id) {
+    id user { id }
+    agentSession { id status appUser { id } }
+    content { __typename ... on AgentActivityResponseContent { body } }
+  }
+}""",
+            {"id": activity_id},
+        )
+        activity = data.get("agentActivity")
+        if activity is None:
+            return False
+        if not isinstance(activity, dict):
+            raise LinearAPIError("Response receipt malformed", retryable=False)
+        session = activity.get("agentSession")
+        content = activity.get("content")
+        user = activity.get("user")
+        if not isinstance(session, dict) or not isinstance(content, dict) or not isinstance(user, dict):
+            raise LinearAPIError("Response receipt incomplete", retryable=False)
+        owner = session.get("appUser")
+        if (
+            not self.actor_id
+            or activity.get("id") != activity_id
+            or session.get("id") != agent_session_id
+            or not isinstance(owner, dict)
+            or owner.get("id") != self.actor_id
+            or user.get("id") != self.actor_id
+            or content.get("__typename") != "AgentActivityResponseContent"
+            or content.get("body") != body
+        ):
+            raise LinearAPIError("Response receipt identity or content mismatch", retryable=False)
+        if session.get("status") != "complete":
+            raise LinearAPIError("Response session completion not confirmed", retryable=True)
+        return True
+
     async def activity_exists(self, activity_id: str) -> bool:
         query = """
 query LinearNativeAgentActivityById($id: String!) {

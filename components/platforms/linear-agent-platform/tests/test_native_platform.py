@@ -79,6 +79,7 @@ class FakeLinear:
         self.created_agent_sessions: list[str] = []
         self.issue_agent_sessions: dict[str, list[dict[str, str]]] = {}
         self.delivery_contexts: dict[str, dict] = {}
+        self.response_receipts = {}
 
     async def assign_issue_delegate(self, issue_id, delegate_id):
         self.delegate_assignments.append((issue_id, delegate_id))
@@ -99,7 +100,12 @@ class FakeLinear:
     ) -> str:
         self.calls.append((session_id, activity_type, body))
         self.activity_ephemeral.append(ephemeral)
+        if activity_type == "response":
+            self.response_receipts[activity_id] = (session_id, body)
         return activity_id
+
+    async def verify_response_receipt(self, activity_id, session_id, body):
+        return self.response_receipts.get(activity_id) == (session_id, body)
 
     async def update_issue_state(self, issue_id, state_name, state_rank, state_ranks):
         self.calls.append((issue_id, "state", state_name))
