@@ -862,7 +862,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.25",
+                "version": "0.8.26",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -5190,7 +5190,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         "clarify_id": str(clarify_id),
                         "clarify_session_key": str(session_key),
                         "clarify_question": str(question),
-                        "clarify_turn_key": str(event.metadata.get("linear_delivery_key") or event.message_id or ""),
+                        "clarify_turn_key": str(event.metadata.get("linear_delivery_key") or event.message_id or event.metadata.get("linear_clarify_turn_key") or ""),
                     },
                 )
             await self._drain_outbox_once()
@@ -5481,7 +5481,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and str(pending.clarify_id) == clarify_id
             and str(pending.question) == str(payload.get("clarify_question") or "")
             and active is not None
-            and str(active.metadata.get("linear_delivery_key") or active.message_id or "") == turn_key
+            and str(active.metadata.get("linear_delivery_key") or active.message_id or active.metadata.get("linear_clarify_turn_key") or "") == turn_key
         )
 
     def _notify_terminal_progress_fence(
@@ -5512,6 +5512,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and event.source is not None
             and event.metadata.get("linear_agent_session_id")
         ):
+            # Core restart resumes have no vendor delivery/message ID. Bind
+            # their questions to this processing start without inventing a
+            # webhook identity or weakening the live waiter/turn checks.
+            if not (event.metadata.get("linear_delivery_key") or event.message_id):
+                event.metadata["linear_clarify_turn_key"] = str(uuid.uuid4())
             self._active_turn_events[event.source.chat_id] = event
         decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
         if (
