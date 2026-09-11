@@ -865,7 +865,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.28",
+                "version": "0.8.29",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -3354,6 +3354,27 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if item is None:
                 return False
             turn_success_item = item.id.startswith("activity:turn-success:")
+            if item.payload.get("activity_type") == "response" and item.attempts > 1:
+                # A prior create may already have completed the vendor session.
+                # Reconcile only that immutable response; never replay the work
+                # or require its now-terminal session to admit new execution.
+                try:
+                    verified = await self._linear.verify_response_receipt(
+                        item.payload["activity_id"], item.aggregate_key, item.payload["body"]
+                    )
+                    if not verified and item.payload.get("response_create_acknowledged") is True:
+                        raise LinearAPIError("Acknowledged response receipt not visible yet", retryable=True)
+                except LinearAPIError as exc:
+                    if exc.retryable and item.attempts < 8:
+                        delay = min(self._outbox_max_delay,
+                                    self._outbox_base_delay * 2 ** min(item.attempts - 1, 16))
+                        self._ledger.reschedule_outbox(item.id, str(exc), delay)
+                    else:
+                        self._ledger.dead_letter_outbox(item.id, str(exc))
+                    return True
+                if verified:
+                    self._ledger.mark_outbox_delivered(item.id)
+                    return True
             if turn_success_item:
                 try:
                     valid = await self._revalidate_turn_success_item(item)
@@ -3438,6 +3459,18 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         activity_id=item.payload["activity_id"],
                         ephemeral=bool(item.payload.get("ephemeral", False)),
                     )
+                    if item.payload["activity_type"] == "response":
+                        if not self._ledger.update_outbox_payload_metadata(
+                            item.id, {"response_create_acknowledged": True}
+                        ):
+                            raise LinearAPIError("Response acknowledgment persistence failed", retryable=True)
+                        verified = await self._linear.verify_response_receipt(
+                            item.payload["activity_id"],
+                            item.payload["agent_session_id"],
+                            item.payload["body"],
+                        )
+                        if not verified:
+                            raise LinearAPIError("Response receipt not visible yet", retryable=True)
                 elif item.operation == "issue.state.update":
                     await self._linear.update_issue_state(
                         item.payload["issue_id"],
