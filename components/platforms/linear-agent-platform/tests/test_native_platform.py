@@ -1438,6 +1438,53 @@ class ToolProgressHookTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         package._reset_progress_state_for_tests()
 
+    async def test_cached_continuation_binds_progress_via_real_gateway_context(self):
+        """Pair the core executor context with real plugin hooks; no env-reader mock."""
+        from enum import Enum
+        from gateway.run import GatewayRunner
+        from gateway.session import SessionContext, SessionSource
+        from gateway.session_context import get_session_env
+
+        class FixturePlatform(Enum):
+            LINEAR = "linear"
+
+        runner = object.__new__(GatewayRunner)
+        adapter = mock.Mock()
+        context = SessionContext(
+            source=SessionSource(
+                platform=FixturePlatform.LINEAR, chat_id="agent-session-1", profile="general",
+            ),
+            connected_platforms=[], home_channels={},
+            session_key="linear-route", session_id="hermes-session-1",
+        )
+        try:
+            with mock.patch.object(package, "_progress_adapter", return_value=adapter), \
+                 mock.patch.dict(os.environ, {"HERMES_SESSION_ID": "stale-unrelated-owner"}):
+                for turn in ("initial-turn", "native-continuation-turn"):
+                    tokens = runner._set_session_env(context)
+                    try:
+                        package._on_interim_message(
+                            text="İzole test sürüyor", session_id="hermes-session-1", turn_id=turn,
+                        )
+                        await runner._run_in_executor_with_context(
+                            lambda: package._pre_tool_progress(
+                                tool_name="read_file", session_id="hermes-session-1", turn_id=turn,
+                            )
+                        )
+                    finally:
+                        runner._clear_session_env(tokens)
+                    self.assertEqual(get_session_env("HERMES_SESSION_ID"), "")
+                self.assertEqual(os.environ["HERMES_SESSION_ID"], "stale-unrelated-owner")
+        finally:
+            runner._shutdown_executor()
+        calls = adapter.schedule_tool_progress.call_args_list
+        self.assertEqual(len(calls), 4)
+        for turn in ("initial-turn", "native-continuation-turn"):
+            own = [call for call in calls if call.kwargs.get("turn_key") == turn]
+            self.assertEqual(len(own), 2)
+            self.assertEqual(sum(call.kwargs.get("progress_kind") == "semantic" for call in own), 1)
+            self.assertTrue(all(call.args[0] == "agent-session-1" for call in own))
+
     async def test_tool_start_schedules_secret_safe_ephemeral_linear_thought(self):
         adapter = mock.Mock()
         adapter.schedule_tool_progress = mock.Mock()
