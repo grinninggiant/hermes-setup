@@ -7286,6 +7286,79 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_background_review_pre_tool_cannot_reopen_terminal_progress(self):
+        """A cache-parity fork shares session identity, not foreground ownership."""
+        from agent.inline_tool_executors import tool_hook_ids
+        from types import SimpleNamespace
+
+        package._reset_progress_state_for_tests()
+        chat_id = "session-review-terminal"
+        session_id = "hermes-review-parent"
+        self.adapter.open_progress_turn(chat_id, "foreground-turn")
+        self.adapter._enqueue_activity(
+            chat_id, "error", "Bounded repair is blocked", item_key="review-regression-terminal",
+        )
+        await self.adapter._post_thought(chat_id)
+        calls_before = list(self.adapter._linear.calls)
+        self.assertEqual(calls_before, [(chat_id, "error", "Bounded repair is blocked")])
+        self.assertFalse(self.adapter._ledger.progress_is_allowed(chat_id))
+        fork = SimpleNamespace(
+            session_id=session_id, _current_turn_id="background-review-turn",
+            _current_api_request_id="review-request", _memory_write_context="background_review",
+            _memory_write_origin="background_review", _persist_disabled=True,
+        )
+        values = {
+            "HERMES_SESSION_PLATFORM": "linear", "HERMES_SESSION_PROFILE": "general",
+            "HERMES_SESSION_CHAT_ID": chat_id, "HERMES_SESSION_ID": session_id,
+        }
+        try:
+            with mock.patch.object(package, "_progress_adapter", return_value=self.adapter), mock.patch(
+                "gateway.session_context.get_session_env",
+                side_effect=lambda name, default="": values.get(name, default),
+            ):
+                package._pre_tool_progress(
+                    tool_name="read_file", **tool_hook_ids(fork, "review-task", "review-call"),
+                )
+                tasks = list(self.adapter._tool_progress_tasks)
+                if tasks:
+                    await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+            self.assertEqual(self.adapter._linear.calls, calls_before)
+            self.assertFalse(self.adapter._ledger.progress_is_allowed(chat_id))
+        finally:
+            package._reset_progress_state_for_tests()
+
+    async def test_new_foreground_turn_can_open_progress_after_terminal(self):
+        """An admitted foreground follow-up is distinct from background maintenance."""
+        from agent.inline_tool_executors import tool_hook_ids
+        from types import SimpleNamespace
+
+        package._reset_progress_state_for_tests()
+        chat_id, session_id = "session-followup", "hermes-followup"
+        self.adapter.open_progress_turn(chat_id, "old-turn")
+        self.adapter._enqueue_activity(chat_id, "error", "Old turn blocked", item_key="old-error")
+        await self.adapter._post_thought(chat_id)
+        values = {
+            "HERMES_SESSION_PLATFORM": "linear", "HERMES_SESSION_PROFILE": "general",
+            "HERMES_SESSION_CHAT_ID": chat_id, "HERMES_SESSION_ID": session_id,
+        }
+        foreground = SimpleNamespace(session_id=session_id, _current_turn_id="new-admitted-turn")
+        try:
+            with mock.patch.object(package, "_progress_adapter", return_value=self.adapter), mock.patch(
+                "gateway.session_context.get_session_env",
+                side_effect=lambda name, default="": values.get(name, default),
+            ):
+                package._pre_tool_progress(
+                    tool_name="read_file", **tool_hook_ids(foreground, "foreground-task", "call"),
+                )
+                await asyncio.wait_for(asyncio.gather(*list(self.adapter._tool_progress_tasks)), 5)
+            self.assertEqual(self.adapter._linear.calls, [
+                (chat_id, "error", "Old turn blocked"),
+                (chat_id, "thought", "Kaynaklar inceleniyor"),
+            ])
+            self.assertTrue(self.adapter._ledger.progress_is_allowed(chat_id, "new-admitted-turn"))
+        finally:
+            package._reset_progress_state_for_tests()
+
     async def test_transient_progress_requires_trusted_turn_key(self):
         result = await self.adapter.send(
             "session-progress",
