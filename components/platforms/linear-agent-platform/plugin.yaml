@@ -1,5 +1,5 @@
 name: linear
-version: 0.8.26
+version: 0.8.27
 description: Native Linear Agent Sessions with durable Persistent Goal continuation, bounded budget rollover, evidence-gated acceptance, and policy-gated MCP tools
 kind: platform
 author: Polatcan Studio

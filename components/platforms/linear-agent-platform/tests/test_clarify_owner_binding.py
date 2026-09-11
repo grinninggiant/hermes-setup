@@ -7,6 +7,67 @@ from tools import clarify_gateway
 
 
 class OwnerBindingTests(NativeClarifyTests):
+    async def test_vendor_activity_author_resolves_only_normal_owner_question(self):
+        active = self.adapter._active_turn_events['linear-session-221']
+        active.source.user_id = None
+        active.metadata['linear_direct_activation'] = True
+        context = await self.adapter._linear.get_agent_turn_context('linear-session-221')
+        context['issue']['assignee'] = {'id': 'user-221', 'app': False}
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=context)
+        payload = self.payload(body='1', webhook='vendor-shape')
+        payload.pop('actor')
+        payload['agentActivity'].update({
+            'agentSessionId': 'linear-session-221',
+            'userId': 'user-221', 'user': {'id': 'user-221'},
+            'content': {'type': 'prompt', 'body': '1'},
+        })
+        payload['agentActivity'].pop('body')
+        clarify_gateway.register('vendor-shape', self.key, 'Target?', ['yes'])
+        response = await self.webhook(payload)
+        self.assertEqual(json.loads(response.text)['status'], 'clarify_resolved')
+        self.assertEqual(clarify_gateway.wait_for_response('vendor-shape', .01), 'yes')
+        self.assertIsNone(active.source.user_id)
+        payload['agentActivity']['id'] = 'command-vendor-shape'
+        payload['agentActivity']['content']['body'] = '/approve'
+        self.adapter.handle_message = mock.AsyncMock()
+        command = await self.webhook(payload)
+        self.assertEqual(json.loads(command.text)['status'], 'native_command_requester_unavailable')
+        self.adapter.handle_message.assert_not_awaited()
+
+    async def test_vendor_author_invalid_bindings_leave_question_unresolved(self):
+        import copy
+        active = self.adapter._active_turn_events['linear-session-221']
+        active.source.user_id = None
+        context = await self.adapter._linear.get_agent_turn_context('linear-session-221')
+        context['issue']['assignee'] = {'id': 'user-221', 'app': False}
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=context)
+        base = self.payload(body='1')
+        base.pop('actor')
+        base['agentActivity'].update({
+            'agentSessionId': 'linear-session-221',
+            'userId': 'user-221', 'user': {'id': 'user-221'},
+            'content': {'type': 'prompt', 'body': '1'},
+        })
+        base['agentActivity'].pop('body')
+        cases = [
+            ('foreign', {'userId': 'other', 'user': {'id': 'other'}}),
+            ('missing', {'userId': None}),
+            ('mismatch', {'user': {'id': 'other'}}),
+            ('wrong-session', {'agentSessionId': 'other-session'}),
+            ('wrong-type', {'content': {'type': 'response', 'body': '1'}}),
+            ('signal', {'signal': 'approval'}),
+        ]
+        for name, changes in cases:
+            with self.subTest(name=name):
+                payload = copy.deepcopy(base)
+                payload['agentActivity'].update(changes, id=name)
+                clarify_gateway.register(name, self.key, 'Target?', ['yes'])
+                response = await self.webhook(payload)
+                self.assertNotEqual(json.loads(response.text)['status'], 'clarify_resolved')
+                self.assertFalse(clarify_gateway.get_pending_for_session(self.key, include_choice_prompts=True).event.is_set())
+                self.assertIsNone(active.source.user_id)
+                clarify_gateway.clear_session(self.key)
+
     async def test_missing_requester_owner_reply_resolves_without_granting_commands(self):
         active = self.adapter._active_turn_events['linear-session-221']
         active.source.user_id = None
