@@ -113,6 +113,40 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._signing_secrets = ("secret-221",)
         return await self.adapter._handle_webhook(Request())
 
+    async def test_native_question_pauses_but_does_not_terminally_seal_progress(self):
+        sid, turn = "linear-session-221", "progress-turn"
+        self.adapter.open_progress_turn(sid, turn)
+        clarify_gateway.register("progress", self.key, "Target?", ["yes"])
+        self.assertTrue((await self.adapter.send_clarify(sid, "Target?", ["yes"], "progress", self.key)).success)
+        self.assertFalse(self.adapter._progress_is_allowed(sid, turn))
+        self.assertFalse(self.adapter._progress_chat_is_allowed(sid))
+        progress = {"transient_progress": True, "transient_progress_key": turn, "transient_progress_kind": "semantic"}
+        await self.adapter.send(sid, "hidden-while-waiting", metadata=progress)
+        await self.adapter._drain_outbox_once()
+        self.assertNotIn("hidden-while-waiting", [a[2] for a in self.transport.activities])
+        self.assertEqual(await self.adapter._resolve_clarify_input(sid, "issue-221", self.payload(body="1")), "clarify_resolved")
+        self.assertTrue(self.adapter._progress_is_allowed(sid, turn))
+        self.assertTrue(self.adapter._progress_chat_is_allowed(sid))
+        await self.adapter.send(sid, "review-running", metadata=progress)
+        await self.adapter._drain_outbox_once()
+        self.assertIn("review-running", [a[2] for a in self.transport.activities])
+        self.adapter._enqueue_activity(sid, "error", "real failure", item_key="real-error")
+        self.assertFalse(self.adapter._progress_is_allowed(sid, turn))
+        self.assertFalse(self.adapter._progress_chat_is_allowed(sid))
+
+    async def test_pending_question_suppresses_progress_without_becoming_terminal(self):
+        sid, turn = "linear-session-221", "pending-turn"
+        self.adapter.open_progress_turn(sid, turn)
+        self.transport.fail = self.transport.retryable = True
+        clarify_gateway.register("pending", self.key, "Target?", ["yes"])
+        self.assertFalse((await self.adapter.send_clarify(sid, "Target?", ["yes"], "pending", self.key)).success)
+        self.assertEqual(self.adapter._ledger.get_outbox_item("activity:clarify:pending")["state"], "pending")
+        self.assertFalse(self.adapter._progress_is_allowed(sid, turn))
+        self.assertFalse(self.adapter._progress_chat_is_allowed(sid))
+        self.assertTrue(self.adapter._ledger.progress_is_allowed(sid, turn))
+        self.adapter._enqueue_activity(sid, "elicitation", "Non-native human decision", item_key="non-native")
+        self.assertFalse(self.adapter._ledger.progress_is_allowed(sid, turn))
+
     async def test_verified_answer_enqueues_one_ephemeral_receipt(self):
         clarify_gateway.register("receipt", self.key, "Target?", ["yes"])
         sent = await self.adapter.send_clarify(
