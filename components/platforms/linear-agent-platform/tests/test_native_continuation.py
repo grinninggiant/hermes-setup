@@ -666,6 +666,65 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(".evaluate_after_turn(", source_text)
         self.assertNotIn("GoalManager", source_text)
 
+    async def test_metadata_light_native_wake_has_owned_turn_inside_handler(self):
+        from gateway.platforms.base import BasePlatformAdapter
+
+        FakeGoalManager.existing = True
+        self.adapter._ledger.bind_issue_session("issue-164", "linear-session")
+        event = MessageEvent(
+            text="native continuation", message_type=MessageType.TEXT,
+            source=turn_event().source, internal=True,
+        )
+        from tools import clarify_gateway
+
+        observed = []
+        sent = []
+        key = "agent:main:webhook:dm:linear-session"
+        self.drain_patch.stop()
+        self.adapter._linear.get_agent_session_delivery_context = mock.AsyncMock(
+            return_value={"id": "linear-session", "app_user_id": "app-user"}
+        )
+
+        async def create_activity(session_id, activity_type, body, *, activity_id, ephemeral=False):
+            sent.append((session_id, activity_type))
+            return activity_id
+
+        self.adapter._linear.create_activity = create_activity
+
+        async def handler(received):
+            clarify_gateway.register("native-wake-question", key, "Fixture question", None)
+            observed.append(await self.adapter.send_clarify(
+                "linear-session", "Fixture question", None, "native-wake-question", key
+            ))
+            return None
+
+        self.adapter.set_message_handler(handler)
+        try:
+            await BasePlatformAdapter._process_message_background(self.adapter, event, key)
+            self.assertEqual(len(observed), 1)
+            self.assertTrue(observed[0].success, observed[0].error)
+            self.assertEqual(sent, [("linear-session", "elicitation")])
+        finally:
+            clarify_gateway.clear_session(key)
+
+    async def test_metadata_light_veto_does_not_bind_or_execute(self):
+        from gateway.platforms.base import BasePlatformAdapter
+
+        FakeGoalManager.existing = True
+        self.adapter._ledger.bind_issue_session("issue-164", "linear-session")
+        self.adapter._linear.state_type = "completed"
+        event = MessageEvent(
+            text="native continuation", message_type=MessageType.TEXT,
+            source=turn_event().source, internal=True,
+        )
+        handler = mock.AsyncMock(return_value=None)
+        self.adapter.set_message_handler(handler)
+        await BasePlatformAdapter._process_message_background(
+            self.adapter, event, "agent:main:webhook:dm:linear-session"
+        )
+        handler.assert_not_awaited()
+        self.assertNotIn("linear-session", self.adapter._active_turn_events)
+
     async def test_initial_goal_uses_source_scoped_gateway_goal_api(self):
         self.adapter._ledger.bind_issue_session("issue-164", "linear-session")
         store = FakeSessionStore()
