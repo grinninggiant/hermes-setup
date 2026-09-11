@@ -4137,6 +4137,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         final_state: str | None = None,
         orphan_success: bool = False,
         reason_code: str | None = None,
+        user_facing_response: str = "",
     ) -> bool:
         if self._ledger is None:
             raise RuntimeError("Linear outbox is unavailable")
@@ -4159,6 +4160,17 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 step="devam teslimi",
             )[:4000],
         }
+        # Preserve the main turn's intended user answer, never the private judge
+        # reason. This remains an error receipt: no acceptance, resume, or final
+        # response is authorized by retaining the explanation.
+        if normalized_reason == "native_goal_paused" and user_facing_response:
+            from agent.redact import redact_sensitive_text
+
+            explanation = redact_sensitive_text(
+                user_facing_response,
+                redact_url_credentials=True,
+            )[:3000]
+            payload["body"] += "\n\n### Tur açıklaması — nihai teslim değildir\n\n" + explanation
         if orphan_success:
             payload["orphan_success_decision_id"] = str(decision["decision_id"])
         if turn_key:
@@ -4494,8 +4506,18 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return None
 
             if outcome != "continue":
+                explanation = (
+                    response
+                    if live_outcome == "continue"
+                    and live_reason == "native_goal_paused"
+                    and turn_result.get("completed") is True
+                    and not event.internal
+                    and isinstance(response, str)
+                    else ""
+                )
                 self._enqueue_turn_terminal_activity(
-                    decision, outcome, reason_code=live_reason
+                    decision, outcome, reason_code=live_reason,
+                    user_facing_response=explanation,
                 )
                 return None
 

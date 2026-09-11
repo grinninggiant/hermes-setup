@@ -2057,6 +2057,67 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(FakeGoalManager.resume_reset_budget, [False])
         self.assertEqual(len(self.admitted), 1)
 
+    async def test_paused_judge_keeps_completed_human_answer_without_authorizing_success(self):
+        FakeGoalManager.existing = True
+        FakeGoalManager.existing_status = "paused"
+        FakeGoalManager.existing_paused_reason = "judged unachievable: PRIVATE JUDGE REASON"
+        event = turn_event()
+        event.text = "How do I send that control?"
+        result = {
+            **dict(event._gateway_turn_result),
+            "completed": True,
+            "turn_exit_reason": "completed",
+        }
+        answer = "The control has not been verified on your screen; no Stop was received."
+
+        await self.adapter._prepare_native_owned_turn_delivery(event, answer, result)
+        await self.adapter._prepare_native_owned_turn_delivery(event, answer, result)
+
+        row = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+        item = self.adapter._ledger.get_outbox_item(
+            f"activity:turn-decision:{row['decision_id']}"
+        )
+        self.assertEqual(row["outcome"], "blocked")
+        self.assertEqual(item["payload"]["activity_type"], "error")
+        self.assertIn(answer, item["payload"]["body"])
+        self.assertIn("native_goal_paused", item["payload"]["body"])
+        self.assertNotIn("PRIVATE JUDGE REASON", item["payload"]["body"])
+        self.assertEqual(FakeGoalManager.resume_calls, 0)
+        self.assertEqual(self.admitted, [])
+        self.assertEqual(len(self.adapter._ledger.list_turn_decisions("linear-session")), 1)
+
+    async def test_paused_answer_is_not_forwarded_across_safety_or_execution_gates(self):
+        for gate in ("stop", "failed", "interrupted", "internal", "incomplete", "closed", "input"):
+            with self.subTest(gate=gate):
+                FakeGoalManager.existing = True
+                FakeGoalManager.existing_status = "paused"
+                event = turn_event(internal=gate == "internal")
+                event.source.chat_id = f"session-{gate}"
+                event.metadata["linear_agent_session_id"] = event.source.chat_id
+                self.adapter._linear = FakeLinear(
+                    status="complete" if gate == "closed" else "awaitingInput" if gate == "input" else "active"
+                )
+                if gate == "stop":
+                    event.metadata["linear_signal"] = "stop"
+                result = {
+                    **dict(event._gateway_turn_result),
+                    "completed": gate != "incomplete",
+                    "failed": gate == "failed",
+                    "interrupted": gate == "interrupted",
+                    "turn_exit_reason": "completed",
+                }
+                await self.adapter._prepare_native_owned_turn_delivery(
+                    event, "MUST NOT FORWARD", result
+                )
+                row = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+                item = self.adapter._ledger.get_outbox_item(
+                    f"activity:turn-decision:{row['decision_id']}"
+                )
+                self.assertNotIn("MUST NOT FORWARD", item["payload"]["body"])
+                self.assertNotEqual(item["payload"]["activity_type"], "response")
+        self.assertEqual(FakeGoalManager.resume_calls, 0)
+        self.assertEqual(self.admitted, [])
+
     async def test_native_done_block_reason_never_succeeds_with_checked_acceptance(self):
         FakeGoalManager.existing = True
         FakeGoalManager.existing_status = "paused"
