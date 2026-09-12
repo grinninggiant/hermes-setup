@@ -515,6 +515,18 @@ class RetentionInventoryReader:
     def __init__(self, client: LinearClient) -> None:
         self.client = client
 
+    async def _read_graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        # Inventory reads are idempotent. Retry only transport timeouts; identity,
+        # pagination, authorization and evidence-revalidation failures stay fatal.
+        for attempt in range(3):
+            try:
+                return await self.client.graphql(query, variables)
+            except LinearAPIError as exc:
+                if str(exc) != "Linear GraphQL request timed out" or attempt == 2:
+                    raise
+                await asyncio.sleep(0.5 * (2 ** attempt))
+        raise AssertionError("unreachable")
+
     async def read_team(self, team_id: str, expected_team_key: str) -> list[dict[str, Any]]:
         issue_refs = await self._read_issue_refs(team_id, expected_team_key)
         inventory = []
@@ -549,7 +561,7 @@ query LinearRetentionInventory($teamId: String!, $after: String) {
 }
 """
         for _ in range(MAX_PAGES):
-            data = await self.client.graphql(query, {"teamId": team_id, "after": after})
+            data = await self._read_graphql(query, {"teamId": team_id, "after": after})
             team = data.get("team")
             if (
                 not isinstance(team, dict)
@@ -600,7 +612,7 @@ query LinearRetentionIssueEvidence($id: String!) {
   }
 }
 """
-        data = await self.client.graphql(detail_query, {"id": issue_id})
+        data = await self._read_graphql(detail_query, {"id": issue_id})
         current = data.get("issue")
         if (
             not isinstance(current, dict)
@@ -677,7 +689,7 @@ query LinearRetentionComments($id: String!, $after: String) {
         after: str | None = None
         seen: set[str] = set()
         for _ in range(MAX_PAGES):
-            data = await self.client.graphql(query, {"id": issue_id, "after": after})
+            data = await self._read_graphql(query, {"id": issue_id, "after": after})
             current = data.get("issue")
             if not isinstance(current, dict) or current.get("id") != issue_id:
                 raise LinearAPIError("Retention comment issue identity changed")
