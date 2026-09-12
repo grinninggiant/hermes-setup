@@ -61,11 +61,7 @@ class CandidateInstallerContractTests(unittest.TestCase):
         source = source_path.read_text(encoding="utf-8")
         self.assertIn('hermes_executable="/Users/mutlupolatcan/.local/bin/hermes"', source)
         self.assertIn('if [[ "$profile" == "general" ]]; then', source)
-        self.assertIn(
-            'hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/'
-            'hermes-agent-ec8e0050f6ca119adb52140d4ca2e9ea74fef60b/venv/bin/hermes"',
-            source,
-        )
+
         self.assertNotIn("$2", source)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,12 +84,8 @@ class CandidateInstallerContractTests(unittest.TestCase):
             harness.write_text(harness_source, encoding="utf-8")
             harness.chmod(0o700)
 
-            candidate = (
-                "/Users/mutlupolatcan/.hermes/runtime/releases/"
-                "hermes-agent-ec8e0050f6ca119adb52140d4ca2e9ea74fef60b/venv/bin/hermes"
-            )
             for profile, expected in (
-                [("general", candidate)]
+                [("general", None)]
                 + [
                     (profile, "/Users/mutlupolatcan/.local/bin/hermes")
                     for profile in (
@@ -116,8 +108,13 @@ class CandidateInstallerContractTests(unittest.TestCase):
                     env={"CAPTURE": str(capture)},
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+                actual = capture.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(actual), 4)
+                if profile == "general":
+                    self.assertRegex(actual[3], r"^/Users/mutlupolatcan/\.hermes/runtime/releases/hermes-agent-[0-9a-f]{40}/venv/bin/hermes$")
+                    expected = actual[3]
                 self.assertEqual(
-                    capture.read_text(encoding="utf-8").splitlines(),
+                    actual,
                     [
                         str(bootstrap_root / "hermes_gateway_sdk_bootstrap.py"),
                         profile,
