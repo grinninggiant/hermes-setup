@@ -30,7 +30,8 @@ def parser() -> argparse.ArgumentParser:
     request = commands.add_parser("request", help="enqueue a validated JSON request")
     request.add_argument("json_file", type=Path)
     commands.add_parser("run", help="run the external coordinator loop").add_argument("--once", action="store_true")
-    commands.add_parser("status", help="show queue integrity and outbox counts")
+    status = commands.add_parser("status", help="show queue or exact task evidence")
+    status.add_argument("--task-id", help="Read one durable request without restarting anything")
     return root
 
 
@@ -66,7 +67,24 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     if args.command == "status":
-        print(json.dumps({"integrity": store.integrity(), "outbox": store.outbox_counts()}, sort_keys=True))
+        result = {
+            "integrity": store.integrity(), "outbox": store.outbox_counts(),
+            "outbox_delivery_sink": "coordinator_stdout_log",
+            "user_channel_delivery_verified": False,
+            "rollback_execution_owner": "reviewed_deployment_helper",
+            "automatic_artifact_rollback": False,
+        }
+        if args.task_id:
+            try:
+                request = store.get(args.task_id)
+            except RequestError as exc:
+                print(json.dumps({"status": "rejected", "reason": str(exc)}, sort_keys=True))
+                return 2
+            result["request"] = {key: request[key] for key in (
+                "id", "task_id", "target_profile", "status", "old_pid", "new_pid",
+                "reason", "readiness_attempts", "updated_at",
+            ) if key in request}
+        print(json.dumps(result, sort_keys=True))
         return 0
 
     lock_path = state_dir / "coordinator.lock"

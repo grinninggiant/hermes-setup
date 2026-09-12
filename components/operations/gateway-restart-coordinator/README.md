@@ -7,7 +7,9 @@ External, launchd-managed serialization plane for Hermes gateway restart request
 - Requesters: only `general` (Derya) and `coder` (Naz). The facade requires both a matching `HERMES_HOME` and a live launchd gateway PID in the caller's process ancestry; no requester argument exists and direct external-shell calls fail closed.
 - Targets: the nine known fleet profiles.
 - Queue: owner-only SQLite/WAL with full synchronous durability, transition ledger, dependency gates, in-flight duplicate coalescing, queued-request supersede, and post-cutover `already_satisfied` suppression when the same serving coordinate is already proven on the live PID.
-- Preflight: immutable artifact and rollback SHA-256, expected live PID, `hermes -p <profile> config check`, loopback-only health URL.
+- Preflight: immutable artifact and rollback SHA-256, expected live PID, `hermes -p <profile> config check`, loopback-only health URL. Explicit `artifact`/`artifact_path` + `sha256` JSON coordinates also verify the referenced regular file; opaque historical coordinates do not prove serving-file parity.
+- Health transport: environment proxies are not used and redirects are rejected, including redirects to another loopback URL.
+- Evidence query: `restartctl.py status --task-id <exact-task-id>` returns metadata-only durable request status. Outbox acknowledgement means `coordinator_stdout_log`, not Telegram delivery or automatic session continuation.
 - Execution: one global service lock, one serial native `SIGUSR1` graceful restart request, bounded wait longer than Hermes' after-turn drain budget, managed-process proof, expected serving version and semantic canary.
 - Recovery: a request committed as `restarting` is never blindly restarted. A changed PID resumes verification; an unchanged PID becomes `operator_required`.
 - Rollback: this service verifies the immutable rollback coordinate but does not mutate artifacts. Failed acceptance stops at `operator_required`; a reviewed deployment helper may perform rollback separately.
