@@ -27,7 +27,9 @@ python3 components/operations/gateway-restart-request/install_gateway_restart_re
 
 The installed-tree fixture registers it through a real `PluginContext` and invokes native `_hm_admit_event`; authorization, session lookup and routing resolution are controlled test doubles. It covers `/stop` and ordinary new-message ingress, not the complete Stop handler, live Telegram or restart. The production plugin does not register it yet.
 
-**Open failure boundary:** an injected fence-write failure is swallowed by native observer dispatch, leaves the intent pending and lets the human event continue. This characterization test passing is evidence of the unresolved gap, NOT safe cancellation acceptance. Before activation, establish durable recovery plus a continuation-side failure gate without blocking the human Stop escape hatch.
+**Failure boundary:** native observer dispatch still suppresses a fence-write exception and lets the human event continue. The helper now trips a sticky, canonical-path-scoped circuit breaker in the loaded store module after an authorized session lookup/fence failure. `submit` and the native ingress guard reject continuation while latched; another handle in that same module cannot clear it. Pending metadata is preserved. There is no reset API.
+
+This is process-local defense, NOT durable recovery. Process replacement or module reload does not retain the latch; another independent process/module instance does not share it. Activation therefore still requires authoritative startup reconciliation and a verified single-owner/module lifetime. Never restart merely to clear the latch or interpret the passing same-process test as restart safety. Human Stop ingress does not depend on a successful plugin write.
 
 ## Durable cancellation generation
 

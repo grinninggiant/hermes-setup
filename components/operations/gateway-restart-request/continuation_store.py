@@ -5,9 +5,23 @@ import os
 import re
 import sqlite3
 import uuid
+import threading
+
+
+# Process-local circuit breaker only; never represents durable restart recovery.
+_UNSAFE_PATHS = set()
+_UNSAFE_PATHS_LOCK = threading.Lock()
 
 
 class ContinuationStore:
+    def block_dispatch(self):
+        with _UNSAFE_PATHS_LOCK:
+            _UNSAFE_PATHS.add(self.path.resolve())
+
+    def dispatch_safe(self):
+        with _UNSAFE_PATHS_LOCK:
+            return self.path.resolve() not in _UNSAFE_PATHS
+
     def __init__(self, path: Path):
         self.path = Path(path).absolute()
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -99,6 +113,8 @@ class ContinuationStore:
         Even a process death or post-ACK commit failure leaves a non-replayable
         dispatching record. A scheduling ACK is only submitted, never completed.
         """
+        if not self.dispatch_safe():
+            return False
         with self._connection(write=True) as db:
             changed = db.execute("""UPDATE intents SET state = 'dispatching'
                 WHERE operation_id = ? AND owner_id = ? AND state = 'claimed'""",
@@ -108,7 +124,7 @@ class ContinuationStore:
         with self._connection(write=True) as db:
             row = db.execute("""SELECT state FROM intents
                 WHERE operation_id = ? AND owner_id = ?""", (operation_id, owner_id)).fetchone()
-            if row is None or row["state"] != "dispatching":
+            if row is None or row["state"] != "dispatching" or not self.dispatch_safe():
                 return False
             try:
                 accepted = inject() is True

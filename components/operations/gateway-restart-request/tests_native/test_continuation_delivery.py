@@ -133,6 +133,7 @@ async def test_native_inbound_fence_authority(tmp_path, monkeypatch, installed_c
     with patch('hermes_cli.plugins.get_plugin_manager', return_value=manager):
         admitted = await runner._hm_admit_event(event)
     assert store.generation('session-42') == expected
+    assert store.dispatch_safe() is (not write_failure)
     assert store.get('op-1')['state'] == ('cancelled' if expected else 'pending')
     if not internal:
         assert (admitted is not None) is authorized

@@ -31,12 +31,16 @@ def fence_authorized_inbound(store, *, owner_home, event, gateway, session_store
         authorized.close()
     if authorized is not True:
         return None
-    if session_store is not gateway.session_store:
-        raise ValueError("foreign_session_store")
-    key = gateway._session_key_for_source(source)
-    entry = session_store.lookup_by_session_key(key)
-    if entry is not None:
-        store.fence(entry.session_id, authorized=True)
+    try:
+        if session_store is not gateway.session_store:
+            raise ValueError("foreign_session_store")
+        key = gateway._session_key_for_source(source)
+        entry = session_store.lookup_by_session_key(key)
+        if entry is not None:
+            store.fence(entry.session_id, authorized=True)
+    except Exception:
+        store.block_dispatch()
+        raise
     return None
 
 
@@ -56,6 +60,8 @@ def schedule_bound(store, ctx, operation_id, owner_id, session_key, *, authority
         return False
 
     def authority_now():
+        if not store.dispatch_safe():
+            return False
         result = authority_guard()
         if inspect.iscoroutine(result):
             result.close()
