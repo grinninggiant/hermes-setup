@@ -40,6 +40,11 @@ SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["activate_deployment", "restart_current"],
+                "description": "Defaults to activate_deployment. restart_current uses no deployment or rollback coordinates.",
+            },
             "task_id": {"type": "string", "minLength": 1},
             "target_profile": {
                 "type": "string",
@@ -48,6 +53,10 @@ SCHEMA = {
             "artifact_path": {"type": "string", "minLength": 1},
             "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "expected_version": {"type": "string", "minLength": 1},
+            "expected_core_sha": {
+                "type": "string", "pattern": "^[0-9a-f]{40}$",
+                "description": "Optional native loaded-core commit, verified from PID-bound gateway_state.json; distinct from health endpoint version.",
+            },
             "expected_pid": {"oneOf": [{"type": "integer", "minimum": 1}, {"const": "dependency_new_pid"}]},
             "rollback_path": {"type": "string", "minLength": 1},
             "rollback_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -62,10 +71,13 @@ SCHEMA = {
             "barrier": {"type": ["string", "null"]},
         },
         "required": [
-            "task_id", "target_profile", "artifact_path", "artifact_sha256",
-            "expected_version", "expected_pid", "rollback_path", "rollback_sha256",
+            "task_id", "target_profile", "expected_version", "expected_pid",
             "health_url", "semantic_canary",
         ],
+        "if": {"properties": {"operation": {"const": "restart_current"}}, "required": ["operation"]},
+        "then": {"not": {"anyOf": [{"required": [field]} for field in
+                  ("artifact_path", "artifact_sha256", "rollback_path", "rollback_sha256")]}},
+        "else": {"required": ["artifact_path", "artifact_sha256", "rollback_path", "rollback_sha256"]},
     },
 }
 

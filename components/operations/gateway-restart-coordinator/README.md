@@ -14,6 +14,16 @@ External, launchd-managed serialization plane for Hermes gateway restart request
 - Recovery: a request committed as `restarting` is never blindly restarted. A changed PID resumes verification; an unchanged PID becomes `operator_required`.
 - Rollback: this service verifies the immutable rollback coordinate but does not mutate artifacts. Failed acceptance stops at `operator_required`; a reviewed deployment helper may perform rollback separately.
 
+## Operation and provenance boundaries
+
+`operation` defaults to `activate_deployment` for existing callers. This path retains immutable candidate/rollback verification and deployment-convergence suppression.
+
+`operation: restart_current` restarts the current installation without candidate or rollback coordinates; supplying any deployment coordinate with this operation is rejected. PID, requester, dependency, configuration and health/canary gates still apply. A new explicit restart is not deployment convergence. Supersession stays within the same operation type, so restart-current cannot discard queued deployment work. The legacy non-null artifact column is empty for this operation, not a fabricated artifact hash.
+
+Optional `expected_core_sha` checks the native loaded core commit through `gateway_state.json`, bound to the live launchd PID. It is distinct from `expected_version`, which belongs to the configured health endpoint (for example, the Linear adapter). This does not claim plugin loaded-build verification. Old requests without this field retain their existing acceptance contract.
+
+A successful queue result still does not prove user-channel delivery, automatic continuation, or deployment rollback. Do not promote a new producer before the installed coordinator supports its operation schema.
+
 ## Request schema
 
 ```json
