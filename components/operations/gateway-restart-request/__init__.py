@@ -95,7 +95,45 @@ def _command_text(text: str) -> str:
     return re.sub(r"[\[\](),'\"]+", " ", text)
 
 
+_DOC_CANDIDATE_ROOT = Path(
+    "/Users/mutlupolatcan/.hermes/profiles/general/artifacts/"
+    "astra-instruction-revision/general-canary-source"
+)
+
+
+def _is_inert_doc_candidate(tool_name: str, args: Any) -> bool:
+    """Approved OPS-239 staging-only exception; execution tools remain guarded."""
+    if _profile_from_home() != "general" or not isinstance(args, Mapping):
+        return False
+    if tool_name not in {"write_file", "patch"}:
+        return False
+    if tool_name == "patch" and args.get("mode", "replace") != "replace":
+        return False
+    raw = args.get("path")
+    if not isinstance(raw, str):
+        return False
+    target = Path(raw)
+    if not target.is_absolute() or target.suffix != ".md" or ".." in target.parts:
+        return False
+    try:
+        root = _DOC_CANDIDATE_ROOT
+        target.relative_to(root)
+        target.resolve().relative_to(root.resolve())
+        # Inspect every path component; no symlink escape or executable/hardlink target.
+        if any(part.is_symlink() for part in (target, *target.parents)):
+            return False
+        if target.exists():
+            info = target.stat()
+            if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
+                return False
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def _pre_tool_call(tool_name: str = "", args: Any = None, **_: Any):
+    if _is_inert_doc_candidate(tool_name, args):
+        return None
     if tool_name not in _SCANNED_TOOLS:
         return None
     for text in _iter_strings(args):
