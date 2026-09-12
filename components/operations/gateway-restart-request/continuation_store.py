@@ -25,6 +25,10 @@ class ContinuationStore:
                 state TEXT NOT NULL DEFAULT 'pending',
                 owner_id TEXT
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS session_fences (
+                session_id TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL
+            )""")
 
     @contextmanager
     def _connection(self, *, write=False):
@@ -35,7 +39,18 @@ class ContinuationStore:
                     db.execute("BEGIN IMMEDIATE")
                 yield db
 
-    def record(self, operation_id, session_id, route_digest, checkpoint_digest):
+    def generation(self, session_id):
+        """Capture BEFORE authoritative authorization/checkpoint reads, not after them."""
+        if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", session_id):
+            raise ValueError("invalid_binding")
+        with self._connection() as db:
+            row = db.execute("SELECT generation FROM session_fences WHERE session_id = ?",
+                             (session_id,)).fetchone()
+            return row[0] if row is not None else 0
+
+    def record(self, operation_id, session_id, route_digest, checkpoint_digest, *, expected_generation: object = 0):
+        if type(expected_generation) is not int or expected_generation < 0:
+            raise ValueError("invalid_generation")
         for value, pattern in (
             (operation_id, r"[A-Za-z0-9_.:-]{1,128}"),
             (session_id, r"[A-Za-z0-9_.:-]{1,128}"),
@@ -53,6 +68,10 @@ class ContinuationStore:
                 if tuple(existing) != (session_id, route_digest, checkpoint_digest):
                     raise ValueError("binding_conflict")
                 return
+            fenced = db.execute("SELECT generation FROM session_fences WHERE session_id = ?",
+                                (session_id,)).fetchone()
+            if (fenced[0] if fenced is not None else 0) != expected_generation:
+                raise ValueError("stale_generation")
             db.execute("""INSERT INTO intents
                 (operation_id, session_id, route_digest, checkpoint_digest)
                 VALUES (?, ?, ?, ?)""", (operation_id, session_id, route_digest, checkpoint_digest))
@@ -103,7 +122,11 @@ class ContinuationStore:
         """Caller must establish current native source authorization before fencing."""
         if authorized is not True:
             raise PermissionError("unverified_source")
+        if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", session_id):
+            raise ValueError("invalid_binding")
         with self._connection(write=True) as db:
+            db.execute("""INSERT INTO session_fences (session_id, generation) VALUES (?, 1)
+                ON CONFLICT(session_id) DO UPDATE SET generation = generation + 1""", (session_id,))
             db.execute("UPDATE intents SET state = 'cancelled' WHERE session_id = ? AND state IN ('pending', 'claimed', 'dispatching', 'submitted')", (session_id,))
 
     def get(self, operation_id):

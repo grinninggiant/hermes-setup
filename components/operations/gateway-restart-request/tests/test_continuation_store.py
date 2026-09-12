@@ -11,6 +11,67 @@ def _crash_during_submission(path):
 
 
 class ContinuationTests(unittest.TestCase):
+    def test_fence_before_late_record_survives_reopen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'continuations.sqlite3'
+            ContinuationStore(path).fence('session-1', authorized=True)
+            reopened = ContinuationStore(path)
+            with self.assertRaisesRegex(ValueError, 'stale_generation'):
+                reopened.record('late-op', 'session-1', 'a' * 64, 'b' * 64)
+            self.assertIsNone(reopened.get('late-op'))
+
+    def test_fresh_authorization_uses_generation_without_reviving_old_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ContinuationStore(Path(tmp) / 'state.sqlite3')
+            old = ('old-op', 'session-1', 'a' * 64, 'b' * 64)
+            store.record(*old)
+            store.fence('session-1', authorized=True)
+            generation = store.generation('session-1')
+            self.assertEqual(generation, 1)
+            store.record('new-op', 'session-1', 'a' * 64, 'c' * 64,
+                         expected_generation=generation)
+            self.assertEqual(store.get('new-op')['state'], 'pending')
+            store.record(*old, expected_generation=generation)
+            self.assertEqual(store.get('old-op')['state'], 'cancelled')
+            store.fence('session-1', authorized=True)
+            with self.assertRaisesRegex(ValueError, 'stale_generation'):
+                store.record('late-op', 'session-1', 'a' * 64, 'd' * 64,
+                             expected_generation=generation)
+            self.assertEqual(store.generation('session-1'), 2)
+            self.assertEqual(store.generation('other-session'), 0)
+            store.record('other-op', 'other-session', 'a' * 64, 'b' * 64)
+
+    def test_fence_metadata_and_generation_types_are_strict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ContinuationStore(Path(tmp) / 'state.sqlite3')
+            for invalid in ('private conversation body', '', None):
+                with self.assertRaisesRegex(ValueError, 'invalid_binding'):
+                    store.fence(invalid, authorized=True)
+                with self.assertRaisesRegex(ValueError, 'invalid_binding'):
+                    store.generation(invalid)
+            with self.assertRaises(PermissionError):
+                store.fence('session-1', authorized=False)
+            self.assertEqual(store.generation('session-1'), 0)
+            for invalid in (False, True, 0.0, -1, '0', None):
+                with self.assertRaisesRegex(ValueError, 'invalid_generation'):
+                    store.record('op-1', 'session-1', 'a' * 64, 'b' * 64,
+                                 expected_generation=invalid)
+            self.assertIsNone(store.get('op-1'))
+
+    def test_concurrent_fences_do_not_lose_generation_updates(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'state.sqlite3'
+            store = ContinuationStore(path)
+            def fence(_):
+                ContinuationStore(path).fence('session-1', authorized=True)
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(fence, range(8)))
+            self.assertEqual(ContinuationStore(path).generation('session-1'), 8)
+            with self.assertRaisesRegex(ValueError, 'stale_generation'):
+                store.record('late-op', 'session-1', 'a' * 64, 'b' * 64,
+                             expected_generation=7)
+
     def test_metadata_fields_reject_prompt_bodies_and_invalid_digests(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ContinuationStore(Path(tmp) / "state.sqlite3")
