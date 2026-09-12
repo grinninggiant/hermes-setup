@@ -5219,7 +5219,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
         if self._ledger is None or self._linear is None:
             return SendResult(success=False, error="Linear outbox is unavailable", retryable=True)
+        # Preflight reads cannot have delivered a new question. Preserve ambiguity
+        # only when an earlier call already queued this ID, or enqueue is attempted.
+        delivery_may_exist = True
         try:
+            delivery_may_exist = self._ledger.get_outbox_item(
+                f"activity:clarify:{clarify_id}"
+            ) is not None
             from tools import clarify_gateway as clarify_gateway
 
             entry = clarify_gateway.get_pending_for_session(
@@ -5243,8 +5249,16 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 raise LinearAPIError("Linear clarify session key mismatch", retryable=False)
             if str(event.metadata.get("linear_agent_session_id") or "") != str(chat_id):
                 raise LinearAPIError("Linear clarify target mismatch", retryable=False)
-            await self._validate_activity_target(str(chat_id))
-            context = await self._linear.get_agent_turn_context(str(chat_id))
+            context = None
+            for attempt in range(3):
+                try:
+                    await self._validate_activity_target(str(chat_id))
+                    context = await self._linear.get_agent_turn_context(str(chat_id))
+                    break
+                except LinearAPIError as exc:
+                    if not exc.retryable or attempt == 2:
+                        raise
+                    await asyncio.sleep(0.25 * (2 ** attempt))
             issue = context.get("issue") if isinstance(context, Mapping) else None
             actor_id = str(getattr(self._linear, "actor_id", "") or "")
             if (
@@ -5285,6 +5299,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 # the question while activity creation is still awaiting its ack.
                 event.metadata["linear_clarify_id"] = str(clarify_id)
                 event.metadata["linear_clarify_resolved"] = False
+                delivery_may_exist = True
                 activity_id = self._enqueue_activity(
                     str(chat_id),
                     "elicitation",
@@ -5334,7 +5349,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 error=str(exc),
                 retryable=exc.retryable,
                 raw_response=(
-                    {"ambiguous": True, "error": str(exc)} if exc.retryable else None
+                    {"ambiguous": True, "error": str(exc)}
+                    if exc.retryable and delivery_may_exist else None
                 ),
             )
         except Exception as exc:
