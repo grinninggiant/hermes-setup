@@ -23,9 +23,6 @@ class ConfigSafetyPromotionTests(unittest.TestCase):
         self.home = patch.dict(os.environ, HERMES_HOME='/Users/mutlupolatcan/.hermes/profiles/general')
         self.home.start()
         self.addCleanup(self.home.stop)
-        self.targets = patch.object(guard, '_CONFIG_SAFETY_DOC_TARGETS', {str(self.target): {self.digest}}, create=True)
-        self.targets.start()
-        self.addCleanup(self.targets.stop)
 
     def check(self, allowed, tool='write_file', path=None, text=None):
         result = guard._pre_tool_call(tool, {'path': str(path or self.target), 'content': self.text if text is None else text})
@@ -67,8 +64,7 @@ class ConfigSafetyPromotionTests(unittest.TestCase):
         alias = self.root / 'alias'
         alias.symlink_to(real, target_is_directory=True)
         target = alias / 'SKILL.md'
-        with patch.object(guard, '_CONFIG_SAFETY_DOC_TARGETS', {str(target): {self.digest}}):
-            self.check(False, path=target)
+        self.check(False, path=target)
         self.check(False, path=self.root / 'real' / '..' / 'SKILL.md')
 
 if __name__ == '__main__':
