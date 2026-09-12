@@ -1,0 +1,85 @@
+{
+  "files": {
+    "SKILL.md": [
+      "478f469c000ba028976c510cde144de735a2d9b2f76407720712513200a8a929",
+      "62de1f6b36e342500a561035397878b85f8b6377a7a7d17bbe61c64cf0245764"
+    ],
+    "references/router-active-gateway-guard-boundary.md": [
+      "4583d06d4593bac4729e3503032f650fad728c5667fc3e58fc195b1478c4aec4"
+    ],
+    "references/router-adapter-completion-belongs-to-restart-draining.md": [
+      "43364f225f10b89d0e7851b198f7655cfc3005991409bcb3c6267ac953cfdfde"
+    ],
+    "references/router-artifact-deployment-is-not-runtime-activation.md": [
+      "62f6bb1c003b2cd3f479ec92df2db3e8880c80f201b7b2678e32eed1f84e79e4"
+    ],
+    "references/router-autonomy-between-true-gates.md": [
+      "e49248d1c3e55210669ab73a44f3a936ac1fef5b169ad18ff97e7eb2134a8576"
+    ],
+    "references/router-background-review-is-not-foreground-progress-ownership.md": [
+      "5db756c296f9dc925a3cc30ba394efe038f5c4c91527507eb0d3cf8221b98d58"
+    ],
+    "references/router-cloudflare-named-tunnel-rollout-and-rollback-details.md": [
+      "d8980735fd00e7dd40c0676f212321a61b9547730c785d340466bf58163ba775"
+    ],
+    "references/router-core-rule.md": [
+      "57995bb3c89c7fa9ede79744ee6d204fc139e8084ed0640edf294877af0a2fbf"
+    ],
+    "references/router-cross-profile-restart-from-general.md": [
+      "097776ebcc8bae5585833086d0c17813e01771ac8230c086ada863df4a541229"
+    ],
+    "references/router-fresh-restart-evidence-cumulative-launchd-state-is-not-a-restart-attempt-count.md": [
+      "d80700c45b19228ddd5674aa48a32daa436436a0336b386904b4f43a3a4f58a2"
+    ],
+    "references/router-fresh-window-readiness-and-partial-failure.md": [
+      "5d92dc1380a50108b1740bf2f15e69b108e78e22b3334da335e9c9303e0d54eb"
+    ],
+    "references/router-homebrew-upgrade-stale-launchd-definition-and-mixed-runtime.md": [
+      "74d50bf61a81ee2a8aa6c5ec2368bcbb4592d194bdfd0a956e9c65c90e056beb"
+    ],
+    "references/router-macos-keychain-bootstrap-wrappers.md": [
+      "11545fe94b4a382953f9bbc5af920b9e1019e93991efdaa06722865ea99e53f4"
+    ],
+    "references/router-macos-tcc-and-remote-agent-stalls.md": [
+      "9f98a323cb7774b18d56bbf1e0db481b4005845af97cbbe7adb881fdf7bb6c3a"
+    ],
+    "references/router-maintenance-delivery-under-a-custom-secretsource.md": [
+      "ced18c9554122370830c93b099223e9bd9ac1639e257c2b4804875bb0aeb75ec"
+    ],
+    "references/router-metadata-light-native-fifo-and-clarification-ownership.md": [
+      "08fef99184ea612ba6e9165f9c61f0c7ac1bf907c990553b4be05dbae0699ffc"
+    ],
+    "references/router-pitfalls.md": [
+      "6441919dd9cf7e4a03a439edfd5b09eabd9a14cc0673a85aedf4ec9cbc90e4c5"
+    ],
+    "references/router-prefer-the-user-facing-restart-command.md": [
+      "36eb0340c47a2188e209589435640b3f1d4fafa535bffca98c2c91ad518f0755"
+    ],
+    "references/router-report-format.md": [
+      "75c9143c0692e73dfbd634432a56da090ea6009e045eb65c6291dcd45436ee32"
+    ],
+    "references/router-repository-relocation-for-launchd-managed-companions.md": [
+      "82d66723473f5c4011c4facca9c165d9068eecdae8cfadbfcdf69efb9f1464e1"
+    ],
+    "references/router-restart-resumed-clarification-identity.md": [
+      "99376e23f6ce45a4d0ef3576cb8eee53913af28fb5d14c0a4adb1a9a9cf4db4b"
+    ],
+    "references/router-runtime-rollout-completion-and-automation-isolation.md": [
+      "cad91244a975ff3e8641fb1a1ecca449a2b9d484557bbc9180bd05a6002e3b71"
+    ],
+    "references/router-same-session-graceful-restart-drain.md": [
+      "ce49b3188b1299d6b2f144e055ff60b4c0bb894f397c8fb16ec26b72a78ed3eb"
+    ],
+    "references/router-schema-shaped-clarification-author-tests.md": [
+      "e17369ca10d34933083a6fc1b9330c52abcc3852ff3106a32d4437ec113ecc0d"
+    ],
+    "references/router-tailscale-funnel-publication-and-public-dns-acceptance.md": [
+      "6dabdf72ef1b1c122847bea1ca7f083dcab2c9ffcd2506fcfcfe6d9980095920"
+    ],
+    "references/router-verified-clarification-resolution-visibility.md": [
+      "c505d2fa375c906123b9f3e39766ef25b2f730bd54bafb29d82462d54e39bde9"
+    ]
+  },
+  "scope": "general only; exact write_file content digests; no execution or generic live-path exemption",
+  "target_root": "/Users/mutlupolatcan/.hermes/profiles/general/skills/hermes-ops/gateway-lifecycle-ops"
+}

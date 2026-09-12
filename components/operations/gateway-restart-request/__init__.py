@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -131,7 +132,44 @@ def _is_inert_doc_candidate(tool_name: str, args: Any) -> bool:
         return False
 
 
+_PROMOTION_MANIFEST = Path(__file__).with_name("ops239-promotion.json")
+_PROMOTION_MANIFEST_SHA = "519c725723238402b65798e99c75619c14359aabf9517d70447354df6cb29e59"
+
+
+def _is_exact_doc_promotion(tool_name: str, args: Any) -> bool:
+    """Explicitly approved content-and-target pairs, including baseline rollback."""
+    if tool_name != "write_file" or _profile_from_home() != "general":
+        return False
+    if not isinstance(args, Mapping) or not isinstance(args.get("content"), str):
+        return False
+    if not isinstance(args.get("path"), str):
+        return False
+    try:
+        payload = _PROMOTION_MANIFEST.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != _PROMOTION_MANIFEST_SHA:
+            return False
+        manifest = json.loads(payload)
+        target = Path(args["path"])
+        root = Path(manifest["target_root"])
+        if not target.is_absolute() or target.suffix != ".md" or ".." in target.parts:
+            return False
+        relative = target.relative_to(root).as_posix()
+        target.resolve().relative_to(root.resolve())
+        if any(part.is_symlink() for part in (target, *target.parents)):
+            return False
+        if target.exists():
+            info = target.stat()
+            if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
+                return False
+        digest = hashlib.sha256(args["content"].encode("utf-8")).hexdigest()
+        return digest in manifest["files"].get(relative, [])
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return False
+
+
 def _pre_tool_call(tool_name: str = "", args: Any = None, **_: Any):
+    if _is_exact_doc_promotion(tool_name, args):
+        return None
     if _is_inert_doc_candidate(tool_name, args):
         return None
     if tool_name not in _SCANNED_TOOLS:
