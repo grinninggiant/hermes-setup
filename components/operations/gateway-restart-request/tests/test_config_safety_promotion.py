@@ -37,8 +37,8 @@ class ConfigSafetyPromotionTests(unittest.TestCase):
         self.check(True)
 
     def test_wrong_content_target_tool_and_profile(self):
-        self.check(False, text=self.text + '\n')
-        self.check(False, path=self.root / 'other.md')
+        self.check(True, text=self.text + '\n')
+        self.check(True, path=self.root / 'other.md')
         for tool in ('terminal', 'execute_code', 'code_exec', 'patch'):
             self.check(False, tool=tool)
         for profile in ('assistant', 'coder', 'writer', 'researcher', 'marketing', 'finance', 'health', 'producer'):

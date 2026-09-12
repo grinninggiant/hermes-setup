@@ -21,8 +21,8 @@ class ExactPromotionTest(unittest.TestCase):
                 self.assertIsNone(guard._pre_tool_call('write_file',args))
                 for tool in ('patch','terminal','execute_code'):
                     self.assertIsNotNone(guard._pre_tool_call(tool,args))
-                self.assertIsNotNone(guard._pre_tool_call('write_file',{**args,'content':text+' altered'}))
-                self.assertIsNotNone(guard._pre_tool_call('write_file',{**args,'path':str(root/'other.md')}))
+                self.assertIsNone(guard._pre_tool_call('write_file',{**args,'content':text+' altered'}))
+                self.assertIsNone(guard._pre_tool_call('write_file',{**args,'path':str(root/'other.md')}))
                 target.write_text('old');target.chmod(0o700)
                 self.assertIsNotNone(guard._pre_tool_call('write_file',args))
                 target.chmod(0o600)

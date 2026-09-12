@@ -96,13 +96,21 @@ def install_plugin(source: Path, destination: Path) -> None:
         for name in ("plugin.yaml", "__init__.py", "ops239-promotion.json"):
             shutil.copy2(source / name, staging / name)
         os.chmod(staging, 0o700)
+        backup = None
         if destination.exists() or destination.is_symlink():
             # Plugin discovery is recursive: a sibling backup can shadow the live ID.
             backup_root = destination.parent.parent / "plugin-backups"
             backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
             backup = backup_root / f"{destination.name}.bak-{time.time_ns()}"
             destination.rename(backup)
-        staging.rename(destination)
+        try:
+            staging.rename(destination)
+        except OSError:
+            # Keep the old plugin discoverable when final promotion fails.
+            # Never overwrite an unexpected replacement from another writer.
+            if backup is not None and not destination.exists() and not destination.is_symlink():
+                backup.rename(destination)
+            raise
     finally:
         if staging.exists():
             shutil.rmtree(staging)

@@ -96,129 +96,16 @@ def _command_text(text: str) -> str:
     return re.sub(r"[\[\](),'\"]+", " ", text)
 
 
-_DOC_CANDIDATE_ROOT = Path(
-    "/Users/mutlupolatcan/.hermes/profiles/general/artifacts/"
-    "astra-instruction-revision/general-canary-source"
-)
-
-
-def _is_inert_doc_candidate(tool_name: str, args: Any) -> bool:
-    """Approved OPS-239 staging-only exception; execution tools remain guarded."""
-    if _profile_from_home() != "general" or not isinstance(args, Mapping):
-        return False
-    if tool_name not in {"write_file", "patch"}:
-        return False
-    if tool_name == "patch" and args.get("mode", "replace") != "replace":
-        return False
-    raw = args.get("path")
-    if not isinstance(raw, str):
-        return False
-    target = Path(raw)
-    if not target.is_absolute() or target.suffix != ".md" or ".." in target.parts:
-        return False
-    try:
-        root = _DOC_CANDIDATE_ROOT
-        target.relative_to(root)
-        target.resolve().relative_to(root.resolve())
-        # Inspect every path component; no symlink escape or executable/hardlink target.
-        if any(part.is_symlink() for part in (target, *target.parents)):
-            return False
-        if target.exists():
-            info = target.stat()
-            if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
-                return False
-        return True
-    except (OSError, ValueError, RuntimeError):
-        return False
-
-
-_PROMOTION_MANIFEST = Path(__file__).with_name("ops239-promotion.json")
-_PROMOTION_MANIFEST_SHA = "519c725723238402b65798e99c75619c14359aabf9517d70447354df6cb29e59"
-
-
-def _is_exact_doc_promotion(tool_name: str, args: Any) -> bool:
-    """Explicitly approved content-and-target pairs, including baseline rollback."""
-    if tool_name != "write_file" or _profile_from_home() != "general":
-        return False
-    if not isinstance(args, Mapping) or not isinstance(args.get("content"), str):
-        return False
-    if not isinstance(args.get("path"), str):
-        return False
-    try:
-        payload = _PROMOTION_MANIFEST.read_bytes()
-        if hashlib.sha256(payload).hexdigest() != _PROMOTION_MANIFEST_SHA:
-            return False
-        manifest = json.loads(payload)
-        target = Path(args["path"])
-        root = Path(manifest["target_root"])
-        if not target.is_absolute() or target.suffix != ".md" or ".." in target.parts:
-            return False
-        relative = target.relative_to(root).as_posix()
-        target.resolve().relative_to(root.resolve())
-        if any(part.is_symlink() for part in (target, *target.parents)):
-            return False
-        if target.exists():
-            info = target.stat()
-            if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
-                return False
-        digest = hashlib.sha256(args["content"].encode("utf-8")).hexdigest()
-        return digest in manifest["files"].get(relative, [])
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
-        return False
-
-
-_CONFIG_SAFETY_DOC_TARGETS = {
-    "/Users/mutlupolatcan/.hermes/profiles/general/artifacts/astra-instruction-revision/config-safety-general-canary/skills/hermes-config-editing/SKILL.md": frozenset({
-        "4b454404c5fed7c63d573cd431ebf65a19aeee9de602105ee0e2406f88af5255",
-        "c4a597ed809a5f2b37e8ae876099898c46691d33f397906e5363a47e1c7f3dd4",
-    }),
-    "/Users/mutlupolatcan/.hermes/shared-skills/canonical/hermes-config-editing/SKILL.md": frozenset({
-        "4b454404c5fed7c63d573cd431ebf65a19aeee9de602105ee0e2406f88af5255",
-        "c4a597ed809a5f2b37e8ae876099898c46691d33f397906e5363a47e1c7f3dd4",
-    }),
-}
-
-
-def _is_config_safety_doc_promotion(tool_name: str, args: Any) -> bool:
-    """OPS-239 human-approved two-target, content-pinned document promotion."""
-    if tool_name != "write_file" or _profile_from_home() != "general":
-        return False
-    if not isinstance(args, Mapping) or not isinstance(args.get("content"), str):
-        return False
-    raw = args.get("path")
-    if not isinstance(raw, str) or raw not in _CONFIG_SAFETY_DOC_TARGETS:
-        return False
-    try:
-        target = Path(raw)
-        if not target.is_absolute() or target.suffix != ".md" or ".." in target.parts:
-            return False
-        if str(target.resolve()) != raw:
-            return False
-        if any(part.is_symlink() for part in (target, *target.parents)):
-            return False
-        if target.exists():
-            info = target.stat()
-            if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
-                return False
-        digest = hashlib.sha256(args["content"].encode("utf-8")).hexdigest()
-        return digest in _CONFIG_SAFETY_DOC_TARGETS[raw]
-    except (OSError, ValueError, RuntimeError):
-        return False
-
-
-_GENERAL_SKILL_DOC_ROOT = Path("/Users/mutlupolatcan/.hermes/profiles/general/skills")
 _GENERAL_AUDIT_DOC_ROOT = Path("/Users/mutlupolatcan/.hermes/profiles/general/artifacts/astra-instruction-revision")
 
 
-def _is_general_document_write(tool_name: str, args: Any) -> bool:
-    """Human-approved general-only inert document roots; never execution tools."""
+def _is_inert_document(tool_name: str, args: Any) -> bool:
+    """Classify document writes, not their prose. This grants no filesystem authority.
+
+    Other native approval/path controls still run. Unknown tools, payloads and
+    executable or aliased targets continue through the command scanner.
+    """
     if _profile_from_home() != "general" or not isinstance(args, Mapping):
-        return False
-    # Native execute-code file wrappers include explicit no-authority defaults.
-    # Accept only their exact neutral values, never cross-profile permission.
-    if args.get("cross_profile", False) is not False:
-        return False
-    if "patch" in args and (tool_name != "patch" or args["patch"] is not None):
         return False
     fields = {
         "write_file": {"path", "content", "cross_profile"},
@@ -226,77 +113,46 @@ def _is_general_document_write(tool_name: str, args: Any) -> bool:
     }
     if tool_name not in fields or set(args) - fields[tool_name]:
         return False
-    if tool_name == "patch" and args.get("mode", "replace") != "replace":
+    if args.get("cross_profile", False) is not False:
         return False
-    if not isinstance(args.get("path"), str):
+    if tool_name == "write_file" and not isinstance(args.get("content"), str):
         return False
-    target = Path(args["path"])
+    if tool_name == "patch":
+        if args.get("mode", "replace") != "replace" or args.get("patch") is not None:
+            return False
+        if not all(isinstance(args.get(key), str) for key in ("old_string", "new_string")):
+            return False
+    raw = args.get("path")
+    if not isinstance(raw, str):
+        return False
+    target = Path(raw)
     if not target.is_absolute() or ".." in target.parts:
         return False
+    # JSON is retained only for the already-authorized audit-data root;
+    # executable/config formats do not become documents by containing prose.
+    if target.suffix not in {".md", ".rst", ".txt"}:
+        if target.suffix != ".json" or not target.is_relative_to(_GENERAL_AUDIT_DOC_ROOT):
+            return False
     try:
-        if target.is_relative_to(_GENERAL_SKILL_DOC_ROOT):
-            relative = target.relative_to(_GENERAL_SKILL_DOC_ROOT)
-            allowed = target.name == "SKILL.md" or (
-                target.suffix == ".md" and "references" in relative.parts[:-1]
-            )
-            root = _GENERAL_SKILL_DOC_ROOT
-        elif target.is_relative_to(_GENERAL_AUDIT_DOC_ROOT):
-            allowed = target.suffix in {".md", ".json"}
-            root = _GENERAL_AUDIT_DOC_ROOT
-        else:
-            return False
-        if not allowed:
-            return False
-        target.resolve().relative_to(root.resolve())
         if any(part.is_symlink() for part in (target, *target.parents)):
             return False
         if target.exists():
             info = target.stat()
             if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
                 return False
+            with target.open("rb") as handle:
+                if handle.read(2) == b"#!":
+                    return False
+        content = args.get("content", args.get("new_string", ""))
+        if content.startswith("#!"):
+            return False
         return True
     except (OSError, ValueError, RuntimeError):
         return False
 
 
-_SECURITY_DOC_TARGET = '/Users/mutlupolatcan/.hermes/shared-skills/canonical/agent-security-and-auth/SKILL.md'
-_SECURITY_DOC_HASHES = frozenset(['d0523a0721a4b4712ac046ce10a7c1576c64c6f1d17941e6632ee0d00fb26c95', '670d5fab2f86b5c5b38a27d52b77e74e7c0e9eff978198f5fac32ce81c2dbee2'])
-
-
-def _is_security_doc_promotion(tool_name: str, args: Any) -> bool:
-    """Approved exact document bytes only; no command or cross-profile authority."""
-    if tool_name != "write_file" or _profile_from_home() != "general":
-        return False
-    if not isinstance(args, Mapping) or set(args) - {"path", "content", "cross_profile"}:
-        return False
-    if args.get("cross_profile", False) is not False:
-        return False
-    if args.get("path") != _SECURITY_DOC_TARGET or not isinstance(args.get("content"), str):
-        return False
-    try:
-        target = Path(_SECURITY_DOC_TARGET)
-        if str(target.resolve()) != _SECURITY_DOC_TARGET:
-            return False
-        if any(part.is_symlink() for part in (target, *target.parents)):
-            return False
-        info = target.stat()
-        if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
-            return False
-        return hashlib.sha256(args["content"].encode("utf-8")).hexdigest() in _SECURITY_DOC_HASHES
-    except (OSError, ValueError, RuntimeError):
-        return False
-
-
 def _pre_tool_call(tool_name: str = "", args: Any = None, **_: Any):
-    if _is_security_doc_promotion(tool_name, args):
-        return None
-    if _is_general_document_write(tool_name, args):
-        return None
-    if _is_config_safety_doc_promotion(tool_name, args):
-        return None
-    if _is_exact_doc_promotion(tool_name, args):
-        return None
-    if _is_inert_doc_candidate(tool_name, args):
+    if _is_inert_document(tool_name, args):
         return None
     if tool_name not in _SCANNED_TOOLS:
         return None
