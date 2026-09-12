@@ -113,6 +113,49 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._signing_secrets = ("secret-221",)
         return await self.adapter._handle_webhook(Request())
 
+    async def test_preflight_timeout_is_not_an_ambiguous_delivery(self):
+        clarify_gateway.register("preflight-timeout", self.key, "Target?", ["yes"])
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(
+            side_effect=client_mod.LinearAPIError("read timed out", retryable=True)
+        )
+        result = await self.adapter.send_clarify(
+            "linear-session-221", "Target?", ["yes"], "preflight-timeout", self.key
+        )
+        self.assertFalse(result.success)
+        self.assertTrue(result.retryable)
+        self.assertFalse((result.raw_response or {}).get("ambiguous", False))
+        self.assertIsNone(self.adapter._ledger.get_outbox_item("activity:clarify:preflight-timeout"))
+        self.assertEqual(self.transport.activities, [])
+
+    async def test_preflight_recovers_with_one_question_and_rejects_auth_without_retry(self):
+        clarify_gateway.register("retry-read", self.key, "Target?", ["yes"])
+        context = await self.adapter._linear.get_agent_turn_context("linear-session-221")
+        reader = mock.AsyncMock(side_effect=[
+            client_mod.LinearAPIError("read timed out", retryable=True), context
+        ])
+        self.adapter._linear.get_agent_turn_context = reader
+        result = await self.adapter.send_clarify("linear-session-221", "Target?", ["yes"], "retry-read", self.key)
+        self.assertTrue(result.success)
+        self.assertEqual(reader.await_count, 2)
+        self.assertEqual(len(self.transport.activities), 1)
+        reader.side_effect = client_mod.LinearAPIError("unauthorized", retryable=False)
+        reader.reset_mock()
+        result = await self.adapter.send_clarify("linear-session-221", "Target?", ["yes"], "retry-read", self.key)
+        self.assertFalse(result.success)
+        self.assertEqual(reader.await_count, 1)
+        self.assertEqual(len(self.transport.activities), 1)
+
+    async def test_existing_queued_question_retains_ambiguity_on_read_timeout(self):
+        clarify_gateway.register("prior-question", self.key, "Target?", ["yes"])
+        self.transport.fail = self.transport.retryable = True
+        await self.adapter.send_clarify("linear-session-221", "Target?", ["yes"], "prior-question", self.key)
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(
+            side_effect=client_mod.LinearAPIError("read timed out", retryable=True)
+        )
+        result = await self.adapter.send_clarify("linear-session-221", "Target?", ["yes"], "prior-question", self.key)
+        self.assertTrue(result.raw_response["ambiguous"])
+        self.assertIsNotNone(self.adapter._ledger.get_outbox_item("activity:clarify:prior-question"))
+
     async def test_native_question_pauses_but_does_not_terminally_seal_progress(self):
         sid, turn = "linear-session-221", "progress-turn"
         self.adapter.open_progress_turn(sid, turn)
