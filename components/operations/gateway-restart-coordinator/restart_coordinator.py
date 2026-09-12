@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import marshal
+import sys
 import json
 import os
 import re
@@ -22,6 +24,8 @@ ALLOWED_TARGETS = frozenset(
     {"general", "assistant", "coder", "finance", "health", "marketing", "producer", "researcher", "writer"}
 )
 ACTIVE_STATES = ("queued", "preflight", "restarting", "verifying")
+
+LOADED_CODE_SHA256 = hashlib.sha256(marshal.dumps(sys._getframe().f_code, 0)).hexdigest()
 
 
 class RequestError(ValueError):

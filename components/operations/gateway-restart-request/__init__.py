@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import marshal
 import os
 import re
 import subprocess
@@ -10,6 +12,10 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+# Hash the module code actually executing, not a later read of its source file.
+# This identity is bound to the interpreter and compiled filename.
+LOADED_CODE_SHA256 = hashlib.sha256(marshal.dumps(sys._getframe().f_code, 0)).hexdigest()
 
 RESTARTCTL = Path("/Users/mutlupolatcan/.hermes/services/gateway-restart-coordinator/restartctl.py")
 AUTHORIZED_HOMES = frozenset({"general", "coder"})
@@ -217,7 +223,13 @@ def _request_gateway_restart(payload: dict[str, Any]) -> str:
 
 
 def _handler(args: dict[str, Any], **_: Any) -> str:
-    return _request_gateway_restart(dict(args))
+    result = json.loads(_request_gateway_restart(dict(args)))
+    result["request_plugin"] = {
+        "loaded_code_sha256": LOADED_CODE_SHA256,
+        "python_cache_tag": sys.implementation.cache_tag,
+        "python_optimization": sys.flags.optimize,
+    }
+    return json.dumps(result, sort_keys=True)
 
 
 def register(ctx) -> None:
