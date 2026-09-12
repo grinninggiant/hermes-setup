@@ -16,7 +16,7 @@ class InstallRecoveryTests(unittest.TestCase):
             root = Path(directory)
             source = root/'source'
             source.mkdir()
-            for name in ('plugin.yaml','__init__.py'):
+            for name in ('plugin.yaml','__init__.py','continuation_store.py','continuation_delivery.py'):
                 (source/name).write_text('candidate')
             destination = root/'profiles/general/plugins/gateway-restart-request'
             destination.mkdir(parents=True)

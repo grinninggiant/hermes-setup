@@ -8,17 +8,47 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
 import yaml
-from continuation_store import ContinuationStore
-from continuation_delivery import schedule_bound
+import importlib.util
+import subprocess
+import sys
+from pathlib import Path
 from gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionEntry, SessionSource
 from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
 
 
+@pytest.fixture
+def installed_continuation(tmp_path):
+    """Exercise packaged modules through the real scoped installer, not source imports."""
+    component = Path(__file__).resolve().parents[1]
+    home = tmp_path / 'installed-home'
+    profile = home / 'profiles/general'
+    profile.mkdir(parents=True)
+    config = profile / 'config.yaml'
+    original = 'plugins:\n  enabled: []\n'
+    config.write_text(original)
+    subprocess.run([sys.executable, str(component / 'install_gateway_restart_request.py'),
+        '--apply', '--hermes-home', str(home), '--profile', 'general', '--plugin-only'],
+        check=True, capture_output=True, text=True, timeout=20)
+    assert config.read_text() == original
+    installed = profile / 'plugins/gateway-restart-request'
+    modules = []
+    for name in ('continuation_store', 'continuation_delivery'):
+        spec = importlib.util.spec_from_file_location('installed_' + name, installed / (name + '.py'))
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.__file__ is not None
+        assert Path(module.__file__).parent == installed
+        modules.append(module)
+    return modules[0].ContinuationStore, modules[1].schedule_bound
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
-async def test_sqlite_to_native_ingress(tmp_path, monkeypatch, cancel):
+async def test_sqlite_to_native_ingress(tmp_path, monkeypatch, cancel, installed_continuation):
+    ContinuationStore, schedule_bound = installed_continuation
     home = tmp_path / "home"
     home.mkdir()
     (home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"entries": {
