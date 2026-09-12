@@ -167,7 +167,48 @@ def _is_exact_doc_promotion(tool_name: str, args: Any) -> bool:
         return False
 
 
+_CONFIG_SAFETY_DOC_TARGETS = {
+    "/Users/mutlupolatcan/.hermes/profiles/general/artifacts/astra-instruction-revision/config-safety-general-canary/skills/hermes-config-editing/SKILL.md": frozenset({
+        "4b454404c5fed7c63d573cd431ebf65a19aeee9de602105ee0e2406f88af5255",
+        "c4a597ed809a5f2b37e8ae876099898c46691d33f397906e5363a47e1c7f3dd4",
+    }),
+    "/Users/mutlupolatcan/.hermes/shared-skills/canonical/hermes-config-editing/SKILL.md": frozenset({
+        "4b454404c5fed7c63d573cd431ebf65a19aeee9de602105ee0e2406f88af5255",
+        "c4a597ed809a5f2b37e8ae876099898c46691d33f397906e5363a47e1c7f3dd4",
+    }),
+}
+
+
+def _is_config_safety_doc_promotion(tool_name: str, args: Any) -> bool:
+    """OPS-239 human-approved two-target, content-pinned document promotion."""
+    if tool_name != "write_file" or _profile_from_home() != "general":
+        return False
+    if not isinstance(args, Mapping) or not isinstance(args.get("content"), str):
+        return False
+    raw = args.get("path")
+    if not isinstance(raw, str) or raw not in _CONFIG_SAFETY_DOC_TARGETS:
+        return False
+    try:
+        target = Path(raw)
+        if not target.is_absolute() or target.suffix != ".md" or ".." in target.parts:
+            return False
+        if str(target.resolve()) != raw:
+            return False
+        if any(part.is_symlink() for part in (target, *target.parents)):
+            return False
+        if target.exists():
+            info = target.stat()
+            if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
+                return False
+        digest = hashlib.sha256(args["content"].encode("utf-8")).hexdigest()
+        return digest in _CONFIG_SAFETY_DOC_TARGETS[raw]
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def _pre_tool_call(tool_name: str = "", args: Any = None, **_: Any):
+    if _is_config_safety_doc_promotion(tool_name, args):
+        return None
     if _is_exact_doc_promotion(tool_name, args):
         return None
     if _is_inert_doc_candidate(tool_name, args):
