@@ -15,8 +15,7 @@ class ExactPromotionTest(unittest.TestCase):
             text = 'gateway' + ' restart'
             manifest = root / 'allow.json'
             manifest.write_text(json.dumps({'target_root':str(root),'files':{'SKILL.md':[hashlib.sha256(text.encode()).hexdigest()]}}))
-            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
-            with patch.dict(os.environ, HERMES_HOME='/Users/mutlupolatcan/.hermes/profiles/general'), patch.object(guard, '_PROMOTION_MANIFEST', manifest, create=True), patch.object(guard, '_PROMOTION_MANIFEST_SHA', digest, create=True):
+            with patch.dict(os.environ, HERMES_HOME='/Users/mutlupolatcan/.hermes/profiles/general'):
                 args={'path':str(target),'content':text}
                 self.assertIsNone(guard._pre_tool_call('write_file',args))
                 for tool in ('patch','terminal','execute_code'):

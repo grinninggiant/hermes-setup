@@ -16,9 +16,6 @@ class DocGuardTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve() / 'candidate'
         self.root.mkdir()
-        self.patcher = patch.object(guard, '_DOC_CANDIDATE_ROOT', self.root, create=True)
-        self.patcher.start()
-        self.addCleanup(self.patcher.stop)
         self.home = patch.dict(os.environ, HERMES_HOME='/Users/mutlupolatcan/.hermes/profiles/general')
         self.home.start()
         self.addCleanup(self.home.stop)

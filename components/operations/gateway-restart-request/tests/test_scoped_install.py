@@ -18,7 +18,8 @@ class ScopedInstallTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(SCRIPT), '--apply', '--hermes-home', str(home), '--profile', 'general', '--plugin-only'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             plugin = home / 'profiles/general/plugins/gateway-restart-request'
-            self.assertEqual((plugin / 'ops239-promotion.json').read_bytes(), (SCRIPT.parent / 'ops239-promotion.json').read_bytes())
+            self.assertEqual((plugin / 'plugin.yaml').read_bytes(), (SCRIPT.parent / 'plugin.yaml').read_bytes())
+            self.assertFalse((plugin / 'ops239-promotion.json').exists())
             self.assertEqual((home / 'profiles/general/config.yaml').read_text(), 'plugins:\n  enabled: []\n')
             self.assertFalse((home / 'profiles/coder/plugins').exists())
 
@@ -49,7 +50,7 @@ class ScopedInstallTests(unittest.TestCase):
             root = Path(temp)
             source = root / 'source'
             source.mkdir()
-            for name in ('plugin.yaml', '__init__.py'):
+            for name in ('__init__.py',):
                 (source / name).write_text('candidate')
             target = root / 'target'
             target.mkdir()

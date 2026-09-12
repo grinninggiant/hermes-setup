@@ -93,7 +93,7 @@ def install_plugin(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f"{PLUGIN}-", dir=str(destination.parent)))
     try:
-        for name in ("plugin.yaml", "__init__.py", "ops239-promotion.json"):
+        for name in ("plugin.yaml", "__init__.py"):
             shutil.copy2(source / name, staging / name)
         os.chmod(staging, 0o700)
         backup = None
