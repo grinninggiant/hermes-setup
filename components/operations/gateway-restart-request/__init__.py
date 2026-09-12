@@ -259,7 +259,37 @@ def _is_general_document_write(tool_name: str, args: Any) -> bool:
         return False
 
 
+_SECURITY_DOC_TARGET = '/Users/mutlupolatcan/.hermes/shared-skills/canonical/agent-security-and-auth/SKILL.md'
+_SECURITY_DOC_HASHES = frozenset(['d0523a0721a4b4712ac046ce10a7c1576c64c6f1d17941e6632ee0d00fb26c95', '670d5fab2f86b5c5b38a27d52b77e74e7c0e9eff978198f5fac32ce81c2dbee2'])
+
+
+def _is_security_doc_promotion(tool_name: str, args: Any) -> bool:
+    """Approved exact document bytes only; no command or cross-profile authority."""
+    if tool_name != "write_file" or _profile_from_home() != "general":
+        return False
+    if not isinstance(args, Mapping) or set(args) - {"path", "content", "cross_profile"}:
+        return False
+    if args.get("cross_profile", False) is not False:
+        return False
+    if args.get("path") != _SECURITY_DOC_TARGET or not isinstance(args.get("content"), str):
+        return False
+    try:
+        target = Path(_SECURITY_DOC_TARGET)
+        if str(target.resolve()) != _SECURITY_DOC_TARGET:
+            return False
+        if any(part.is_symlink() for part in (target, *target.parents)):
+            return False
+        info = target.stat()
+        if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
+            return False
+        return hashlib.sha256(args["content"].encode("utf-8")).hexdigest() in _SECURITY_DOC_HASHES
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def _pre_tool_call(tool_name: str = "", args: Any = None, **_: Any):
+    if _is_security_doc_promotion(tool_name, args):
+        return None
     if _is_general_document_write(tool_name, args):
         return None
     if _is_config_safety_doc_promotion(tool_name, args):
