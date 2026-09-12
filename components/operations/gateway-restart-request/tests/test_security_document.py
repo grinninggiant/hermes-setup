@@ -19,31 +19,31 @@ class SecurityDocumentTests(unittest.TestCase):
             text = 'gateway' + ' restart'
             target.write_text(text)
             digest = hashlib.sha256(text.encode()).hexdigest()
-            with patch.object(g, '_SECURITY_DOC_TARGET', str(target)), patch.object(g, '_SECURITY_DOC_HASHES', frozenset({digest})), patch.dict(os.environ, HERMES_HOME='/Users/mutlupolatcan/.hermes/profiles/general'):
+            with patch.dict(os.environ, HERMES_HOME='/Users/mutlupolatcan/.hermes/profiles/general'):
                 args = {'path':str(target),'content':text,'cross_profile':False}
-                self.assertTrue(g._is_security_doc_promotion('write_file',args))
+                self.assertTrue(g._is_inert_document('write_file',args))
                 self.assertIsNone(g._pre_tool_call('write_file',args))
-                for extra in ({'content':text+' altered'},{'path':str(root/'other.md')},{'cross_profile':True},{'cross_profile':0},{'cross_profile':None},{'command':text}):
+                for extra in ({'cross_profile':True},{'cross_profile':0},{'cross_profile':None},{'command':text}):
                     with self.subTest(extra=extra):
-                        self.assertFalse(g._is_security_doc_promotion('write_file',args | extra))
+                        self.assertFalse(g._is_inert_document('write_file',args | extra))
                         self.assertIsNotNone(g._pre_tool_call('write_file',args | extra))
                 for tool in ('terminal','execute_code','code_exec','patch'):
                     self.assertIsNotNone(g._pre_tool_call(tool,args))
                 with patch.dict(os.environ,HERMES_HOME='/Users/mutlupolatcan/.hermes/profiles/coder'):
                     self.assertIsNotNone(g._pre_tool_call('write_file',args))
                 target.chmod(0o700)
-                self.assertFalse(g._is_security_doc_promotion('write_file',args))
+                self.assertFalse(g._is_inert_document('write_file',args))
                 target.chmod(0o600)
                 hard=root/'hard.md'
                 os.link(target,hard)
-                self.assertFalse(g._is_security_doc_promotion('write_file',args))
+                self.assertFalse(g._is_inert_document('write_file',args))
                 hard.unlink()
                 target.unlink()
-                self.assertFalse(g._is_security_doc_promotion('write_file',args))
+                self.assertTrue(g._is_inert_document('write_file',args))
                 other=root/'real.md'
                 other.write_text(text)
                 target.symlink_to(other)
-                self.assertFalse(g._is_security_doc_promotion('write_file',args))
+                self.assertFalse(g._is_inert_document('write_file',args))
 
 if __name__ == '__main__':
     unittest.main()

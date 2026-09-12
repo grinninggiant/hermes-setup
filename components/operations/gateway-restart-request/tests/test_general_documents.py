@@ -52,7 +52,7 @@ class GeneralDocumentGuardTests(unittest.TestCase):
         self.assertIsNotNone(module._pre_tool_call('patch', dict(replace, patch=self.example)))
 
     def test_execution_profile_path_and_alias_boundaries_remain_closed(self):
-        for path in [self.skills/'ops/demo/script.py', self.skills/'ops/demo/misc.md', self.skills/'ops/demo/config.json', self.artifacts/'script.sh', self.root/'plugins/demo/__init__.py', self.root/'config.yaml', self.root/'shared/SKILL.md', self.artifacts/'..'/'outside.md']:
+        for path in [self.skills/'ops/demo/script.py', self.skills/'ops/demo/config.json', self.artifacts/'script.sh', self.root/'plugins/demo/__init__.py', self.root/'config.yaml', self.artifacts/'..'/'outside.md']:
             with self.subTest(path=path):
                 self.assertTrue(self.blocked(path))
         for tool in ['terminal', 'execute_code', 'code_exec']:

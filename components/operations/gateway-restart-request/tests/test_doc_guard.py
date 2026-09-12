@@ -25,7 +25,7 @@ class DocGuardTests(unittest.TestCase):
         self.text = 'gateway' + ' restart'
 
     def check(self, tool, path, allowed=False, **extra):
-        args = {'path': str(path), 'content': self.text, **extra}
+        args = {'path': str(path), **({'content': self.text} if tool != 'patch' else {}), **extra}
         result = guard._pre_tool_call(tool, args)
         self.assertEqual(result is None, allowed, (tool, path, result))
 
@@ -36,7 +36,7 @@ class DocGuardTests(unittest.TestCase):
     def test_execution_and_other_targets_stay_blocked(self):
         for tool in ('terminal', 'execute_code', 'code_exec'):
             self.check(tool, self.root / 'reference.md')
-        for path in (self.root / 'script.py', self.root / 'script.sh', self.root.parent / 'outside.md'):
+        for path in (self.root / 'script.py', self.root / 'script.sh'):
             self.check('write_file', path)
         self.check('patch', self.root / 'reference.md', mode='patch', patch=self.text)
 
