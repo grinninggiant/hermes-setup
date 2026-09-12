@@ -97,7 +97,11 @@ def install_plugin(source: Path, destination: Path) -> None:
             shutil.copy2(source / name, staging / name)
         os.chmod(staging, 0o700)
         if destination.exists() or destination.is_symlink():
-            destination.rename(destination.with_name(f"{destination.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}"))
+            # Plugin discovery is recursive: a sibling backup can shadow the live ID.
+            backup_root = destination.parent.parent / "plugin-backups"
+            backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            backup = backup_root / f"{destination.name}.bak-{time.time_ns()}"
+            destination.rename(backup)
         staging.rename(destination)
     finally:
         if staging.exists():
