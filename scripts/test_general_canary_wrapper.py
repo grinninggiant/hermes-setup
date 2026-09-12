@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 TARGET = Path(os.environ.get('WRAPPER_TARGET', str(Path(__file__).with_name('hermes-gateway-keychain.sh'))))
-RELEASE = '593baf8a705cf100b2671c6d70c8b454151644ae'
+RELEASE = 'b7013cf0a9bbb87b6b672e5f997832b9ddd73399'
 PROFILES = ('general', 'assistant', 'researcher', 'coder', 'writer', 'producer', 'marketing', 'health', 'finance')
 LOOKUP = 'token=$(/usr/bin/security find-generic-password -s "$service" -a "$profile" -w)'
 ROOT = 'bootstrap_root="/Users/mutlupolatcan/.hermes/runtime/hermes-gateway-sdk-bootstrap"'
