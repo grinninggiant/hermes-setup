@@ -21,6 +21,14 @@ python3 components/operations/gateway-restart-request/install_gateway_restart_re
 python3 components/operations/gateway-restart-request/install_gateway_restart_request.py --apply
 ```
 
+## Native inbound fence adapter (not activated)
+
+`continuation_delivery.fence_authorized_inbound` can be registered on `pre_gateway_dispatch` with an immutable owner home and store. It checks owner/store/source scope and invokes native source authorization itself, because this hook runs before native auth. Internal events cannot fence. Native additive telemetry kwargs are accepted but not persisted. The helper returns no routing directive and does not alter the human command.
+
+The installed-tree fixture registers it through a real `PluginContext` and invokes native `_hm_admit_event`; authorization, session lookup and routing resolution are controlled test doubles. It covers `/stop` and ordinary new-message ingress, not the complete Stop handler, live Telegram or restart. The production plugin does not register it yet.
+
+**Open failure boundary:** an injected fence-write failure is swallowed by native observer dispatch, leaves the intent pending and lets the human event continue. This characterization test passing is evidence of the unresolved gap, NOT safe cancellation acceptance. Before activation, establish durable recovery plus a continuation-side failure gate without blocking the human Stop escape hatch.
+
 ## Durable cancellation generation
 
 `ContinuationStore.fence(session_id, authorized=True)` atomically increments the session's persistent generation and cancels its existing eligible intents. It records the fence even when there are no intents yet, so a delayed pre-fence `record()` cannot recreate work after cancellation.

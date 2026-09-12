@@ -42,13 +42,13 @@ def installed_continuation(tmp_path):
         assert module.__file__ is not None
         assert Path(module.__file__).parent == installed
         modules.append(module)
-    return modules[0].ContinuationStore, modules[1].schedule_bound
+    return modules[0].ContinuationStore, modules[1].schedule_bound, modules[1]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_sqlite_to_native_ingress(tmp_path, monkeypatch, cancel, installed_continuation):
-    ContinuationStore, schedule_bound = installed_continuation
+    ContinuationStore, schedule_bound, _ = installed_continuation
     home = tmp_path / "home"
     home.mkdir()
     (home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"entries": {
@@ -93,3 +93,46 @@ async def test_sqlite_to_native_ingress(tmp_path, monkeypatch, cancel, installed
             assert store.get("op-1")["state"] != "completed"
         finally:
             runner._clear_plugin_message_injector()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('text', ['/stop', 'new authorized instruction'])
+@pytest.mark.parametrize('authorized,internal,profile,write_failure,expected', [
+    (True, False, None, False, 1), (False, False, None, False, 0),
+    (True, True, None, False, 0), (True, False, 'coder', False, 0),
+    (True, False, None, True, 0),
+])
+async def test_native_inbound_fence_authority(tmp_path, monkeypatch, installed_continuation,
+                                             authorized, internal, profile, write_failure, expected, text):
+    from gateway.platforms.event import MessageEvent
+    Store, _, delivery = installed_continuation
+    home = tmp_path / 'general'
+    home.mkdir()
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id='42', user_id='42',
+                           chat_type='dm', profile=profile)
+    event = MessageEvent(text=text, source=source, internal=internal)
+    store = Store(home / 'continuations.sqlite3')
+    store.record('op-1', 'session-42', 'a' * 64, 'b' * 64)
+    if write_failure:
+        # Characterize an OPEN safety gap, not successful cancellation acceptance:
+        # native observer failures are suppressed and user ingress still proceeds.
+        monkeypatch.setattr(store, 'fence', Mock(side_effect=OSError('test-only write failure')))
+    runner = object.__new__(GatewayRunner)
+    runner._scale_to_zero_note_real_inbound = Mock()
+    runner._is_user_authorized_for_source = Mock(return_value=authorized)
+    runner._get_unauthorized_dm_behavior = Mock(return_value='ignore')
+    runner._resolve_profile_home_for_source = Mock(return_value=home)
+    runner._session_key_for_source = Mock(return_value='route-42')
+    runner.session_store = SimpleNamespace(lookup_by_session_key=Mock(
+        return_value=SimpleNamespace(session_id='session-42')))
+    manager = PluginManager(scope_key=str(home))
+    ctx = PluginContext(PluginManifest(name='fence-test', key='fence-test', source='user'), manager)
+    ctx.register_hook('pre_gateway_dispatch', lambda **kwargs: delivery.fence_authorized_inbound(
+        store, owner_home=home, **kwargs))
+    with patch('hermes_cli.plugins.get_plugin_manager', return_value=manager):
+        admitted = await runner._hm_admit_event(event)
+    assert store.generation('session-42') == expected
+    assert store.get('op-1')['state'] == ('cancelled' if expected else 'pending')
+    if not internal:
+        assert (admitted is not None) is authorized

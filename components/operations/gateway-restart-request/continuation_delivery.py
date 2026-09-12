@@ -8,6 +8,38 @@ import inspect
 import re
 
 
+def fence_authorized_inbound(store, *, owner_home, event, gateway, session_store, **_telemetry):
+    """Native pre-dispatch observer; no directive and no implicit source authority.
+
+    Registration must bind owner_home/store to the owning plugin, not ambient
+    runtime state. Errors propagate to the caller; this helper alone cannot make
+    native observer exception suppression a durable cancellation guarantee.
+    """
+    from pathlib import Path
+    owner = Path(owner_home).resolve()
+    source = event.source
+    if getattr(event, "internal", False) or getattr(source, "profile_route_rejected", False):
+        return None
+    if getattr(source, "profile", None) not in (None, "", owner.name):
+        return None
+    if not Path(store.path).resolve().is_relative_to(owner):
+        raise ValueError("foreign_continuation_store")
+    if Path(gateway._resolve_profile_home_for_source(source)).resolve() != owner:
+        return None
+    authorized = gateway._is_user_authorized_for_source(source)
+    if inspect.iscoroutine(authorized):
+        authorized.close()
+    if authorized is not True:
+        return None
+    if session_store is not gateway.session_store:
+        raise ValueError("foreign_session_store")
+    key = gateway._session_key_for_source(source)
+    entry = session_store.lookup_by_session_key(key)
+    if entry is not None:
+        store.fence(entry.session_id, authorized=True)
+    return None
+
+
 def schedule_bound(store, ctx, operation_id, owner_id, session_key, *, authority_guard):
     if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", operation_id):
         raise ValueError("invalid_operation_id")
