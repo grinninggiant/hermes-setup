@@ -206,7 +206,56 @@ def _is_config_safety_doc_promotion(tool_name: str, args: Any) -> bool:
         return False
 
 
+_GENERAL_SKILL_DOC_ROOT = Path("/Users/mutlupolatcan/.hermes/profiles/general/skills")
+_GENERAL_AUDIT_DOC_ROOT = Path("/Users/mutlupolatcan/.hermes/profiles/general/artifacts/astra-instruction-revision")
+
+
+def _is_general_document_write(tool_name: str, args: Any) -> bool:
+    """Human-approved general-only inert document roots; never execution tools."""
+    if _profile_from_home() != "general" or not isinstance(args, Mapping):
+        return False
+    fields = {
+        "write_file": {"path", "content"},
+        "patch": {"mode", "path", "old_string", "new_string", "replace_all"},
+    }
+    if tool_name not in fields or set(args) - fields[tool_name]:
+        return False
+    if tool_name == "patch" and args.get("mode", "replace") != "replace":
+        return False
+    if not isinstance(args.get("path"), str):
+        return False
+    target = Path(args["path"])
+    if not target.is_absolute() or ".." in target.parts:
+        return False
+    try:
+        if target.is_relative_to(_GENERAL_SKILL_DOC_ROOT):
+            relative = target.relative_to(_GENERAL_SKILL_DOC_ROOT)
+            allowed = target.name == "SKILL.md" or (
+                target.suffix == ".md" and "references" in relative.parts[:-1]
+            )
+            root = _GENERAL_SKILL_DOC_ROOT
+        elif target.is_relative_to(_GENERAL_AUDIT_DOC_ROOT):
+            allowed = target.suffix in {".md", ".json"}
+            root = _GENERAL_AUDIT_DOC_ROOT
+        else:
+            return False
+        if not allowed:
+            return False
+        target.resolve().relative_to(root.resolve())
+        if any(part.is_symlink() for part in (target, *target.parents)):
+            return False
+        if target.exists():
+            info = target.stat()
+            if not target.is_file() or info.st_mode & 0o111 or info.st_nlink != 1:
+                return False
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def _pre_tool_call(tool_name: str = "", args: Any = None, **_: Any):
+    if _is_general_document_write(tool_name, args):
+        return None
     if _is_config_safety_doc_promotion(tool_name, args):
         return None
     if _is_exact_doc_promotion(tool_name, args):
