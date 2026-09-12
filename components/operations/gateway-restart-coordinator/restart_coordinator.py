@@ -34,6 +34,7 @@ class Runtime(Protocol):
     def restart(self, profile: str) -> None: ...
     def managed(self, pid: int, profile: str) -> bool: ...
     def health(self, url: str) -> dict[str, Any]: ...
+    def provenance(self, profile: str, pid: int) -> dict[str, Any]: ...
 
 
 def requester_from_home(home: str | Path) -> str:
@@ -66,10 +67,12 @@ class ProcessRuntime:
         uid: int | None = None,
         hermes: str = "/Users/mutlupolatcan/.local/bin/hermes",
         restart_timeout: float = 1860.0,
+        profile_root: str | Path = "/Users/mutlupolatcan/.hermes/profiles",
     ):
         self.uid = os.getuid() if uid is None else uid
         self.hermes = hermes
         self.restart_timeout = restart_timeout
+        self.profile_root = Path(profile_root)
 
     @staticmethod
     def parse_launchd_pid(output: str) -> int:
@@ -155,13 +158,19 @@ class ProcessRuntime:
         parsed = urlparse(url)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise RuntimeError("health_url_not_loopback")
-        # Do not let environment proxies or HTTP redirects leave loopback.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoHealthRedirect())
         with opener.open(url, timeout=5) as response:
             payload = json.load(response)
         if not isinstance(payload, dict):
             raise RuntimeError("invalid_health_payload")
         return payload
+
+    def provenance(self, profile: str, pid: int) -> dict[str, Any]:
+        self._label(profile)
+        state = json.loads((self.profile_root / profile / "gateway_state.json").read_text())
+        if type(state.get("pid")) is not int or state["pid"] != pid or self.pid(profile) != pid:
+            raise RuntimeError("runtime_provenance_pid_mismatch")
+        return {key: state.get(key) for key in ("pid", "code_sha", "code_version")}
 
 
 def _sha256(path: Path) -> str:
@@ -221,10 +230,17 @@ def _coordinate_valid(payload: dict[str, Any], prefix: str) -> bool:
 
 
 def _validated_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    operation = payload.get("operation", "activate_deployment")
+    if operation not in {"activate_deployment", "restart_current"}:
+        raise RequestError("invalid_operation")
     required = {
-        "task_id", "target_profile", "artifact_path", "artifact_sha256", "expected_version",
-        "expected_pid", "rollback_path", "rollback_sha256", "health_url", "semantic_canary",
+        "task_id", "target_profile", "expected_version", "expected_pid", "health_url", "semantic_canary",
     }
+    coordinates = {"artifact_path", "artifact_sha256", "rollback_path", "rollback_sha256"}
+    if operation == "activate_deployment":
+        required |= coordinates
+    elif coordinates.intersection(payload):
+        raise RequestError("restart_current_with_deployment_coordinates")
     if not required.issubset(payload):
         raise RequestError("missing_required_field")
     if not isinstance(payload["task_id"], str) or not payload["task_id"].strip():
@@ -236,11 +252,16 @@ def _validated_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if expected_pid == "dependency_new_pid":
         if not isinstance(dependency, str) or not dependency:
             raise RequestError("dependency_pid_without_dependency")
-    elif not isinstance(expected_pid, int) or expected_pid <= 0:
+    elif type(expected_pid) is not int or expected_pid <= 0:
         raise RequestError("invalid_expected_pid")
     if not isinstance(payload["expected_version"], str) or not payload["expected_version"]:
         raise RequestError("invalid_expected_version")
-    for prefix in ("artifact", "rollback"):
+    if "expected_core_sha" in payload and (
+        not isinstance(payload["expected_core_sha"], str)
+        or not re.fullmatch(r"[0-9a-f]{40}", payload["expected_core_sha"])
+    ):
+        raise RequestError("invalid_expected_core_sha")
+    for prefix in (("artifact", "rollback") if operation == "activate_deployment" else ()):
         path = Path(payload[f"{prefix}_path"])
         expected = payload[f"{prefix}_sha256"]
         if not path.is_absolute() or not path.is_file() or path.is_symlink():
@@ -338,7 +359,7 @@ class CoordinatorStore:
         if requester not in ALLOWED_REQUESTERS:
             raise RequestError("requester_not_allowed")
         clean = _validated_payload(payload)
-        if self.allowed_artifact_roots:
+        if self.allowed_artifact_roots and clean.get("operation") != "restart_current":
             for prefix in ("artifact", "rollback"):
                 supplied = Path(clean[f"{prefix}_path"])
                 lexical = Path(os.path.abspath(supplied))
@@ -388,10 +409,11 @@ class CoordinatorStore:
                 superseded = conn.execute(
                     """SELECT r.id,r.task_id,r.evidence_json FROM requests r
                        WHERE r.target_profile=? AND r.status='queued' AND r.dependency_task_id IS NULL
+                         AND COALESCE(json_extract(r.payload_json,'$.operation'),'activate_deployment')=?
                          AND (? IS NULL OR r.task_id<>?)
                          AND NOT EXISTS (SELECT 1 FROM requests f WHERE f.leader_id=r.id)
                          AND NOT EXISTS (SELECT 1 FROM requests d WHERE d.dependency_task_id=r.task_id)""",
-                    (clean["target_profile"], dependency, dependency),
+                    (clean["target_profile"], clean.get("operation", "activate_deployment"), dependency, dependency),
                 ).fetchall()
                 for old in superseded:
                     evidence = json.loads(old["evidence_json"])
@@ -413,7 +435,7 @@ class CoordinatorStore:
             cursor = conn.execute(
                 """INSERT INTO requests(task_id,requester,target_profile,artifact_sha256,expected_version,
                    contract_sha256,dependency_task_id,payload_json,status,leader_id) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (clean["task_id"], requester, clean["target_profile"], clean["artifact_sha256"],
+                (clean["task_id"], requester, clean["target_profile"], clean.get("artifact_sha256", ""),
                  clean["expected_version"], contract_hash, clean.get("dependency_task_id"), encoded, status, leader_id),
             )
             request_id = int(cursor.lastrowid)
@@ -616,12 +638,21 @@ class Coordinator:
             current = current[part]
         return current
 
+    def _core_provenance(self, payload: dict[str, Any], profile: str, pid: int) -> dict[str, Any]:
+        if "expected_core_sha" not in payload:
+            return {}
+        evidence = self.runtime.provenance(profile, pid)
+        if evidence.get("pid") != pid or evidence.get("code_sha") != payload["expected_core_sha"]:
+            raise RuntimeError("loaded_core_mismatch")
+        return evidence
+
     def _verify(self, request: dict[str, Any], old_pid: int) -> dict[str, Any]:
         task_id = request["task_id"]
         payload = request["payload"]
         profile = request["target_profile"]
         new_pid: int | None = None
         health: dict[str, Any] = {}
+        core_provenance: dict[str, Any] = {}
         rollback_verified = False
         accepted = False
         attempts_used = 0
@@ -633,13 +664,14 @@ class Coordinator:
                 if attempt == 1:
                     self.store.transition(task_id, "verifying", {"new_pid": new_pid})
                 health = self.runtime.health(payload["health_url"])
+                core_provenance = self._core_provenance(payload, profile, new_pid)
                 canary = payload["semantic_canary"]
-                rollback_verified = _coordinate_valid(payload, "rollback")
+                deployment = payload.get("operation") != "restart_current"
+                rollback_verified = deployment and _coordinate_valid(payload, "rollback")
                 accepted = (
                     new_pid != old_pid
                     and self.runtime.managed(new_pid, profile)
-                    and _coordinate_valid(payload, "artifact")
-                    and rollback_verified
+                    and (not deployment or (_coordinate_valid(payload, "artifact") and rollback_verified))
                     and health.get("version") == payload["expected_version"]
                     and self._lookup(health, canary["path"]) == canary["equals"]
                 )
@@ -651,7 +683,7 @@ class Coordinator:
             if attempt < self.readiness_attempts:
                 time.sleep(self.readiness_delay)
         try:
-            rollback_verified = _coordinate_valid(payload, "rollback")
+            rollback_verified = payload.get("operation") != "restart_current" and _coordinate_valid(payload, "rollback")
         except Exception:
             rollback_verified = False
         evidence = {
@@ -659,6 +691,7 @@ class Coordinator:
             "new_pid": new_pid,
             "health": health,
             "readiness_attempts": attempts_used,
+            "core_provenance": core_provenance,
         }
         if accepted:
             return self.store.transition(task_id, "succeeded", evidence)
@@ -670,6 +703,9 @@ class Coordinator:
 
     def _already_satisfied(self, request: dict[str, Any], current_pid: int) -> dict[str, Any] | None:
         payload = request["payload"]
+        # An explicit new restart is an operation, not deployment convergence.
+        if payload.get("operation") == "restart_current":
+            return None
         profile = request["target_profile"]
         if not self.store.has_succeeded_coordinate(
             profile,
@@ -680,6 +716,7 @@ class Coordinator:
             return None
         try:
             health = self.runtime.health(payload["health_url"])
+            core_provenance = self._core_provenance(payload, profile, current_pid)
             canary = payload["semantic_canary"]
             accepted = (
                 self.runtime.managed(current_pid, profile)
@@ -701,6 +738,7 @@ class Coordinator:
                 "new_pid": current_pid,
                 "health": health,
                 "readiness_attempts": 0,
+                "core_provenance": core_provenance,
             },
         )
 
@@ -710,7 +748,7 @@ class Coordinator:
         profile = request["target_profile"]
         try:
             old_pid = self.runtime.pid(profile)
-            valid_coordinates = (
+            valid_coordinates = payload.get("operation") == "restart_current" or (
                 _coordinate_valid(payload, "artifact")
                 and _coordinate_valid(payload, "rollback")
                 and _artifact_valid(Path(payload["artifact_path"]))
