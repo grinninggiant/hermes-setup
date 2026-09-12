@@ -214,9 +214,15 @@ def _is_general_document_write(tool_name: str, args: Any) -> bool:
     """Human-approved general-only inert document roots; never execution tools."""
     if _profile_from_home() != "general" or not isinstance(args, Mapping):
         return False
+    # Native execute-code file wrappers include explicit no-authority defaults.
+    # Accept only their exact neutral values, never cross-profile permission.
+    if args.get("cross_profile", False) is not False:
+        return False
+    if "patch" in args and (tool_name != "patch" or args["patch"] is not None):
+        return False
     fields = {
-        "write_file": {"path", "content"},
-        "patch": {"mode", "path", "old_string", "new_string", "replace_all"},
+        "write_file": {"path", "content", "cross_profile"},
+        "patch": {"mode", "path", "old_string", "new_string", "replace_all", "patch", "cross_profile"},
     }
     if tool_name not in fields or set(args) - fields[tool_name]:
         return False
