@@ -60,7 +60,7 @@ def schedule_bound(store, ctx, operation_id, owner_id, session_key, *, authority
         return False
 
     def authority_now():
-        if not store.dispatch_safe():
+        if not store.dispatch_safe() or not store.runtime_owns(operation_id):
             return False
         result = authority_guard()
         if inspect.iscoroutine(result):

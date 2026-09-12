@@ -7,7 +7,11 @@ from continuation_store import ContinuationStore
 
 def _crash_during_submission(path):
     import os
-    ContinuationStore(Path(path)).submit("op-1", "owner-1", lambda: os._exit(19))
+    store = ContinuationStore(Path(path))
+    args = ("op-1", "session-1", "a" * 64, "b" * 64)
+    store.record(*args)
+    assert store.claim(*args, owner_id="owner-1")
+    store.submit("op-1", "owner-1", lambda: os._exit(19))
 
 
 class ContinuationTests(unittest.TestCase):
@@ -88,10 +92,8 @@ class ContinuationTests(unittest.TestCase):
         from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "continuations.sqlite3"
-            store = ContinuationStore(path)
             args = ("op-1", "session-1", "a" * 64, "b" * 64)
-            store.record(*args)
-            store.claim(*args, owner_id="owner-1")
+            # The child creates and owns its operation before the crash.
             child = multiprocessing.get_context("spawn").Process(target=_crash_during_submission, args=(str(path),))
             child.start()
             child.join(timeout=10)

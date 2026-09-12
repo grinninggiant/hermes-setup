@@ -11,6 +11,12 @@ import threading
 # Process-local circuit breaker only; never represents durable restart recovery.
 _UNSAFE_PATHS = set()
 _UNSAFE_PATHS_LOCK = threading.Lock()
+_RUNTIME_NONCE = uuid.uuid4().hex
+
+
+def _runtime_id():
+    # Include PID so forked children cannot inherit the parent's module nonce.
+    return f"{os.getpid()}:{_RUNTIME_NONCE}"
 
 
 class ContinuationStore:
@@ -37,8 +43,13 @@ class ContinuationStore:
                 route_digest TEXT NOT NULL,
                 checkpoint_digest TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'pending',
-                owner_id TEXT
+                owner_id TEXT,
+                runtime_id TEXT NOT NULL DEFAULT ''
             )""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(intents)")}
+            if "runtime_id" not in columns:
+                # Legacy rows stay unowned; migration is not renewed authority.
+                db.execute("ALTER TABLE intents ADD COLUMN runtime_id TEXT NOT NULL DEFAULT ''")
             db.execute("""CREATE TABLE IF NOT EXISTS session_fences (
                 session_id TEXT PRIMARY KEY,
                 generation INTEGER NOT NULL
@@ -52,6 +63,11 @@ class ContinuationStore:
                 if write:
                     db.execute("BEGIN IMMEDIATE")
                 yield db
+
+    def runtime_owns(self, operation_id):
+        with self._connection() as db:
+            return db.execute("SELECT 1 FROM intents WHERE operation_id = ? AND runtime_id = ?",
+                              (operation_id, _runtime_id())).fetchone() is not None
 
     def generation(self, session_id):
         """Capture BEFORE authoritative authorization/checkpoint reads, not after them."""
@@ -87,8 +103,8 @@ class ContinuationStore:
             if (fenced[0] if fenced is not None else 0) != expected_generation:
                 raise ValueError("stale_generation")
             db.execute("""INSERT INTO intents
-                (operation_id, session_id, route_digest, checkpoint_digest)
-                VALUES (?, ?, ?, ?)""", (operation_id, session_id, route_digest, checkpoint_digest))
+                (operation_id, session_id, route_digest, checkpoint_digest, runtime_id)
+                VALUES (?, ?, ?, ?, ?)""", (operation_id, session_id, route_digest, checkpoint_digest, _runtime_id()))
 
     def claim(self, operation_id, session_id, route_digest, checkpoint_digest, *, owner_id=None):
         """Atomically reserve an exact binding; a claim is not dispatch acceptance.
@@ -102,8 +118,8 @@ class ContinuationStore:
         with self._connection(write=True) as db:
             result = db.execute("""UPDATE intents SET state = 'claimed', owner_id = ?
                 WHERE operation_id = ? AND session_id = ? AND route_digest = ?
-                AND checkpoint_digest = ? AND state = 'pending'""",
-                (owner_id, operation_id, session_id, route_digest, checkpoint_digest))
+                AND checkpoint_digest = ? AND state = 'pending' AND runtime_id = ?""",
+                (owner_id, operation_id, session_id, route_digest, checkpoint_digest, _runtime_id()))
             return result.rowcount == 1
 
     def submit(self, operation_id, owner_id, inject):
@@ -117,13 +133,14 @@ class ContinuationStore:
             return False
         with self._connection(write=True) as db:
             changed = db.execute("""UPDATE intents SET state = 'dispatching'
-                WHERE operation_id = ? AND owner_id = ? AND state = 'claimed'""",
-                (operation_id, owner_id)).rowcount
+                WHERE operation_id = ? AND owner_id = ? AND state = 'claimed' AND runtime_id = ?""",
+                (operation_id, owner_id, _runtime_id())).rowcount
             if changed != 1:
                 return False
         with self._connection(write=True) as db:
             row = db.execute("""SELECT state FROM intents
-                WHERE operation_id = ? AND owner_id = ?""", (operation_id, owner_id)).fetchone()
+                WHERE operation_id = ? AND owner_id = ? AND runtime_id = ?""",
+                (operation_id, owner_id, _runtime_id())).fetchone()
             if row is None or row["state"] != "dispatching" or not self.dispatch_safe():
                 return False
             try:

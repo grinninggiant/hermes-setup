@@ -21,6 +21,14 @@ python3 components/operations/gateway-restart-request/install_gateway_restart_re
 python3 components/operations/gateway-restart-request/install_gateway_restart_request.py --apply
 ```
 
+## Runtime ownership and recovery gate
+
+Each newly recorded intent is bound to a random loaded-module runtime nonce plus PID. `claim`, `submit`, and the native dispatch guard require that runtime identity. A fresh process cannot inherit execution authority by reading a saved owner ID, and duplicate `record` does not rebind an old operation. The PID component also rejects a forked child that inherited the nonce. Reloading the store module invalidates queued dispatch guards.
+
+Source migration adds `runtime_id` with an empty default for legacy rows; it preserves their metadata without assigning current runtime authority. An old row may still say `pending` or `claimed`: use `runtime_owns` to distinguish it from executable local work. This has only run on test databases; do not mix old and new writers.
+
+This is a **deny-by-default recovery boundary**, not implemented automatic continuation. No API currently rebinds a prior-runtime operation. A future reviewed reconciliation path must verify the coordinator's actual result, exact session/checkpoint, native recovery ownership and newer human/Stop/Done evidence before any controlled transfer. Do not bypass this by replacing the operation ID, setting the runtime column directly, or clearing state. Read-only evidence survives the boundary; successful restart continuation and rollback acceptance remain open.
+
 ## Native inbound fence adapter (not activated)
 
 `continuation_delivery.fence_authorized_inbound` can be registered on `pre_gateway_dispatch` with an immutable owner home and store. It checks owner/store/source scope and invokes native source authorization itself, because this hook runs before native auth. Internal events cannot fence. Native additive telemetry kwargs are accepted but not persisted. The helper returns no routing directive and does not alter the human command.
