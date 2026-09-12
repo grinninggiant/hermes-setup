@@ -24,6 +24,12 @@ Optional `expected_core_sha` checks the native loaded core commit through `gatew
 
 A successful queue result still does not prove user-channel delivery, automatic continuation, or deployment rollback. Do not promote a new producer before the installed coordinator supports its operation schema.
 
+## Loaded component identity
+
+The request plugin's registered handler adds `request_plugin.loaded_code_sha256` to its response. The actual coordinator service emits a `coordinator_started` log event after obtaining its exclusive lock, binding its PID to both coordinator and facade loaded-code fingerprints. These fingerprints are captured from executing module bytecode, not subsequent disk reads. A standalone status CLI import is not daemon-serving evidence.
+
+The fingerprints use reference-neutral marshal format 0 and are interpreter/compiled-filename bound. Compile the immutable candidate bytes with the exact serving filename, same interpreter and reported optimization level to derive the expected value without executing candidate code. Verify source-file integrity separately and bind startup evidence to a fresh supervisor PID. No user-delivery or automatic-continuation claim follows from this telemetry.
+
 ## Request schema
 
 ```json

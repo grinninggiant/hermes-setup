@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import marshal
 import fcntl
 import json
 import os
@@ -16,11 +18,13 @@ from restart_coordinator import (
     CoordinatorStore,
     ProcessRuntime,
     RequestError,
+    LOADED_CODE_SHA256 as COORDINATOR_LOADED_CODE_SHA256,
     requester_from_ancestry,
     requester_from_home,
 )
 
 DEFAULT_STATE = Path("/Users/mutlupolatcan/.hermes/restart-coordinator")
+LOADED_CODE_SHA256 = hashlib.sha256(marshal.dumps(sys._getframe().f_code, 0)).hexdigest()
 
 
 def parser() -> argparse.ArgumentParser:
@@ -88,28 +92,35 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     lock_path = state_dir / "coordinator.lock"
-    lock = lock_path.open("a+", encoding="utf-8")
-    os.chmod(lock_path, 0o600)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print(json.dumps({"status": "already_running"}, sort_keys=True), file=sys.stderr)
-        return 3
-
-    coordinator = Coordinator(store, ProcessRuntime())
-    while True:
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        os.chmod(lock_path, 0o600)
         try:
-            result = coordinator.process_once()
-            for event in store.pending_outbox():
-                print(json.dumps({"event": "restart_terminal", **event["payload"]}, sort_keys=True), flush=True)
-                store.ack_outbox(event["id"])
-            if result is not None:
-                print(json.dumps({"event": "restart_execution", "task_id": result["task_id"], "status": result["status"]}, sort_keys=True), flush=True)
-        except Exception as exc:  # launchd keeps the service alive; state machine recovers on the next tick
-            print(json.dumps({"event": "coordinator_error", "type": type(exc).__name__, "message": str(exc)}, sort_keys=True), file=sys.stderr, flush=True)
-        if args.once:
-            return 0
-        time.sleep(1)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(json.dumps({"status": "already_running"}, sort_keys=True), file=sys.stderr)
+            return 3
+
+        coordinator = Coordinator(store, ProcessRuntime())
+        print(json.dumps({
+            "event": "coordinator_started", "pid": os.getpid(),
+            "coordinator_loaded_code_sha256": COORDINATOR_LOADED_CODE_SHA256,
+            "facade_loaded_code_sha256": LOADED_CODE_SHA256,
+            "python_cache_tag": sys.implementation.cache_tag,
+            "python_optimization": sys.flags.optimize,
+        }, sort_keys=True), flush=True)
+        while True:
+            try:
+                result = coordinator.process_once()
+                for event in store.pending_outbox():
+                    print(json.dumps({"event": "restart_terminal", **event["payload"]}, sort_keys=True), flush=True)
+                    store.ack_outbox(event["id"])
+                if result is not None:
+                    print(json.dumps({"event": "restart_execution", "task_id": result["task_id"], "status": result["status"]}, sort_keys=True), flush=True)
+            except Exception as exc:  # launchd keeps the service alive; state machine recovers on the next tick
+                print(json.dumps({"event": "coordinator_error", "type": type(exc).__name__, "message": str(exc)}, sort_keys=True), file=sys.stderr, flush=True)
+            if args.once:
+                return 0
+            time.sleep(1)
 
 
 if __name__ == "__main__":
