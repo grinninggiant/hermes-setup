@@ -53,6 +53,11 @@ def requester_from_ancestry(ancestors: list[int], gateway_pids: dict[str, int]) 
     return matches[0]
 
 
+class _NoHealthRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError("health_redirect_rejected")
+
+
 class ProcessRuntime:
     """Production runtime with fixed launchd and Hermes command surfaces."""
 
@@ -150,7 +155,9 @@ class ProcessRuntime:
         parsed = urlparse(url)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise RuntimeError("health_url_not_loopback")
-        with urllib.request.urlopen(url, timeout=5) as response:
+        # Do not let environment proxies or HTTP redirects leave loopback.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoHealthRedirect())
+        with opener.open(url, timeout=5) as response:
             payload = json.load(response)
         if not isinstance(payload, dict):
             raise RuntimeError("invalid_health_payload")
@@ -187,7 +194,30 @@ def _coordinate_valid(payload: dict[str, Any], prefix: str) -> bool:
         }
         if current != identity or metadata.st_mode & 0o222:
             return False
-    return _sha256(path) == payload[f"{prefix}_sha256"]
+    if _sha256(path) != payload[f"{prefix}_sha256"]:
+        return False
+    # Existing explicit file-reference manifests bind the referenced bytes too.
+    # Opaque historical coordinates remain coordinate-only, not serving proof.
+    if path.suffix == ".json":
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if isinstance(manifest, dict) and "sha256" in manifest:
+            reference = manifest.get("artifact", manifest.get("artifact_path"))
+            digest = manifest["sha256"]
+            if not isinstance(reference, str) or not isinstance(digest, str):
+                return False
+            target = Path(reference)
+            if not re.fullmatch(r"[0-9a-f]{64}", digest) or not target.is_absolute():
+                return False
+            if any(part.is_symlink() for part in (target, *target.parents)):
+                return False
+            if not target.is_file() or target.stat().st_nlink != 1:
+                return False
+            if _sha256(target) != digest:
+                return False
+    return True
 
 
 def _validated_payload(payload: dict[str, Any]) -> dict[str, Any]:
