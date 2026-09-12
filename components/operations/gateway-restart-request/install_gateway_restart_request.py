@@ -93,7 +93,7 @@ def install_plugin(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f"{PLUGIN}-", dir=str(destination.parent)))
     try:
-        for name in ("plugin.yaml", "__init__.py"):
+        for name in ("plugin.yaml", "__init__.py", "ops239-promotion.json"):
             shutil.copy2(source / name, staging / name)
         os.chmod(staging, 0o700)
         if destination.exists() or destination.is_symlink():
@@ -108,11 +108,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--hermes-home", type=Path, default=Path("/Users/mutlupolatcan/.hermes"))
+    parser.add_argument("--profile", choices=PROFILES, help="Limit installation to one existing supported profile")
+    parser.add_argument("--plugin-only", action="store_true", help="Install artifacts without editing configuration")
     args = parser.parse_args()
     source = Path(__file__).resolve().parent
     home = args.hermes_home.resolve()
-    print(f"mode={'APPLY' if args.apply else 'DRY-RUN'} profiles={','.join(PROFILES)}")
-    for profile in PROFILES:
+    profiles = (args.profile,) if args.profile else PROFILES
+    print(f"mode={'APPLY' if args.apply else 'DRY-RUN'} profiles={','.join(profiles)}")
+    for profile in profiles:
         config = home / "profiles" / profile / "config.yaml"
         destination = home / "profiles" / profile / "plugins" / PLUGIN
         if not config.is_file():
@@ -121,6 +124,9 @@ def main() -> int:
             print(f"PLAN {profile}: install+enable {PLUGIN}")
             continue
         install_plugin(source, destination)
+        if args.plugin_only:
+            print(f"OK {profile}: plugin installed config=untouched")
+            continue
         original = config.read_text(encoding="utf-8")
         updated, plugin_changed = enable_plugin_text(original)
         updated, toolset_changed = enable_existing_top_level_toolset_text(updated)
