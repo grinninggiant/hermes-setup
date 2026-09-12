@@ -40,6 +40,17 @@ class GeneralDocumentGuardTests(unittest.TestCase):
         args = {'mode':'replace', 'path':str(self.skills/'ops/demo/SKILL.md'), 'old_string':'old', 'new_string':self.example}
         self.assertIsNone(module._pre_tool_call('patch', args))
 
+    def test_native_wrapper_neutral_metadata(self):
+        path = self.artifacts/'evidence.json'
+        write = {'path': str(path), 'content': self.example, 'cross_profile': False}
+        replace = {'path': str(path), 'old_string': 'old', 'new_string': self.example, 'mode': 'replace', 'replace_all': False, 'patch': None, 'cross_profile': False}
+        self.assertIsNone(module._pre_tool_call('write_file', write))
+        self.assertIsNone(module._pre_tool_call('patch', replace))
+        for value in (True, None, 0, ''):
+            with self.subTest(value=repr(value)):
+                self.assertIsNotNone(module._pre_tool_call('write_file', dict(write, cross_profile=value)))
+        self.assertIsNotNone(module._pre_tool_call('patch', dict(replace, patch=self.example)))
+
     def test_execution_profile_path_and_alias_boundaries_remain_closed(self):
         for path in [self.skills/'ops/demo/script.py', self.skills/'ops/demo/misc.md', self.skills/'ops/demo/config.json', self.artifacts/'script.sh', self.root/'plugins/demo/__init__.py', self.root/'config.yaml', self.root/'shared/SKILL.md', self.artifacts/'..'/'outside.md']:
             with self.subTest(path=path):
