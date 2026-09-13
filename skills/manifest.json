@@ -55,7 +55,7 @@
     {
       "name": "weekly-review-planning",
       "path": "productivity/weekly-review-planning/SKILL.md",
-      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
       "license": "MIT",
       "verified_profiles": [
         "assistant",
@@ -68,7 +68,7 @@
         "researcher",
         "writer"
       ],
-      "verification_evidence": "verification/retirement-reference-cleanup.json",
+      "verification_evidence": "verification/retired-pointer-parity.json",
       "rollout": "No implicit installation; controlled existing-profile rollout verified by fresh loader, not old session injection."
     },
     {
@@ -112,7 +112,7 @@
     {
       "name": "competitor-news-monitor",
       "path": "research/competitor-news-monitor/SKILL.md",
-      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
       "license": "MIT",
       "verified_profiles": [
         "assistant",
@@ -125,7 +125,7 @@
         "researcher",
         "writer"
       ],
-      "verification_evidence": "verification/productivity-monitoring.json",
+      "verification_evidence": "verification/retired-pointer-parity.json",
       "rollout": "No implicit installation; controlled existing-profile rollout verified by fresh loader, not old session injection."
     },
     {
@@ -245,7 +245,7 @@
     {
       "name": "inspecting-hermes-desktop-dom",
       "path": "software-development/inspecting-hermes-desktop-dom/SKILL.md",
-      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
       "license": "MIT",
       "verified_profiles": [
         "assistant",
@@ -258,7 +258,7 @@
         "researcher",
         "writer"
       ],
-      "verification_evidence": "verification/capability-contracts.json",
+      "verification_evidence": "verification/retired-pointer-parity.json",
       "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
     },
     {
@@ -332,20 +332,20 @@
     {
       "name": "document-to-action-items",
       "path": "productivity/document-to-action-items/SKILL.md",
-      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
       "license": "MIT",
       "verified_profiles": [
-        "general",
         "assistant",
         "coder",
-        "writer",
-        "researcher",
-        "marketing",
         "finance",
+        "general",
         "health",
-        "producer"
+        "marketing",
+        "producer",
+        "researcher",
+        "writer"
       ],
-      "verification_evidence": "verification/document-task-routing.json",
+      "verification_evidence": "verification/retired-pointer-parity.json",
       "rollout": "No implicit installation; exact source/general and other-profile loader hashes verified; model behavior acceptance open."
     }
   ]

@@ -8,7 +8,7 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [Competitors, News, Market-Research, Monitoring]
-    related_skills: [blogwatcher, rss-feeds, reddit-reading]
+    related_skills: [rss-feeds, reddit-reading]
 ---
 
 # Competitor News Monitor
@@ -23,7 +23,7 @@ Track a declared company set and report only material, new developments with pri
 - "Track funding, partnerships, executive moves, and incidents."
 - A cron tick fires for an existing competitor watch (steps 3-6).
 
-Don't use for: one-off company research (use `web_search`/`web_extract` directly) or plain feed reading (`blogwatcher`).
+Don't use for: one-off company research (use `web_search`/`web_extract` directly) or plain feed reading (blogwatcher (not installed; use available tools or reinstall on demand)).
 
 ## Procedure — Setup (foreground, once)
 

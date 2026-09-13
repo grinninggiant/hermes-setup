@@ -8,7 +8,7 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [Weekly-Review, Planning, Tasks, Calendar, Productivity]
-    related_skills: [obsidian, notion, google-workspace, email-inbox-triage]
+    related_skills: [notion, google-workspace, email-inbox-triage]
 ---
 
 # Weekly Review and Planning
@@ -37,7 +37,7 @@ Load `google-workspace` or the relevant calendar connector. Inspect the complete
 
 ### 3. Clear capture inboxes
 
-Review the task inbox, notes (`obsidian`, `notion`), flagged email (`email-inbox-triage` owns thread-level triage), and other declared capture points. Convert each item to next action, project, waiting, scheduled, someday, reference, archive, or delete proposal. Do not mutate until scope is approved. Done when remaining unprocessed items are counted and stated.
+Review the task inbox, notes (obsidian (not installed; use available tools or reinstall on demand), `notion`), flagged email (`email-inbox-triage` owns thread-level triage), and other declared capture points. Convert each item to next action, project, waiting, scheduled, someday, reference, archive, or delete proposal. Do not mutate until scope is approved. Done when remaining unprocessed items are counted and stated.
 
 ### 4. Reconcile active projects
 

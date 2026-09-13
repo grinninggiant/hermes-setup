@@ -8,12 +8,12 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [Documents, OCR, Action-Items, Deadlines, Extraction]
-    related_skills: [pdf, docx, notion]
+    related_skills: [pdf, notion]
 ---
 
 # Document to Action Items
 
-Turn documents into cited facts and proposed actions. Extraction is not legal advice, and low-confidence OCR or ambiguous language must remain visible. The `pdf` / `docx` skills own extraction mechanics; this skill owns what happens to the extracted content.
+Turn documents into cited facts and proposed actions. Extraction is not legal advice, and low-confidence OCR or ambiguous language must remain visible. The `pdf` / docx (not installed; use available tools or reinstall on demand) skills own extraction mechanics; this skill owns what happens to the extracted content.
 
 ## When to Use
 
@@ -32,7 +32,7 @@ Use `read_file` for local files and `web_extract` for URLs to identify files, ve
 
 ### 2. Extract with provenance
 
-Load `pdf` or `docx`. Extract text/tables while retaining file and page/section coordinates. For scans, record OCR confidence or visible quality issues. Done when every extracted field can cite its source location.
+Load `pdf` or docx (not installed; use available tools or reinstall on demand). Extract text/tables while retaining file and page/section coordinates. For scans, record OCR confidence or visible quality issues. Done when every extracted field can cite its source location.
 
 ### 3. Classify evidence
 
