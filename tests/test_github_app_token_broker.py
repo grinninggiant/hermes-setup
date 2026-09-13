@@ -36,6 +36,17 @@ class FakeResponse:
 
 
 class BrokerTests(unittest.TestCase):
+    def test_typed_draft_is_narrow_and_raw_draft_rejected(self):
+        base = [BROKER.GH_BINARY, 'api', 'repos/grinninggiant/hermes-setup/pulls', '-X', 'POST', '-f', 'title=fixture', '-f', 'head=fixture', '-f', 'base=main']
+        for value in ('true', 'false'):
+            cmd = base + ['-F', 'draft=' + value]
+            self.assertEqual(BROKER.validate_command(cmd), cmd)
+        for suffix in (['-f', 'draft=false'], ['-F', 'draft=@/etc/passwd'], ['-F', 'draft=1'], ['-F', 'draft=False'], ['-F', 'body=true'], ['-F'], ['-F', 'draft=false', '-f', 'draft=true']):
+            with self.subTest(suffix=suffix), self.assertRaises(BROKER.BrokerError):
+                BROKER.validate_command(base + suffix)
+        with self.assertRaises(BROKER.BrokerError):
+            BROKER.validate_command([BROKER.GH_BINARY, 'api', 'repos/grinninggiant/hermes-setup/issues/1/comments', '-X', 'POST', '-f', 'body=fixture', '-F', 'draft=false'])
+
     def test_normalize_resolved_accepts_only_pinned_installation(self):
         values = BROKER.normalize_resolved(
             {

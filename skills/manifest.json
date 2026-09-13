@@ -243,6 +243,16 @@
         "general"
       ],
       "rollout": "No implicit installation; source matches existing general package bytes only. Serving runtime/model acceptance and other-profile rollout remain open."
+    },
+    {
+      "name": "github-auth",
+      "path": "github/github-auth/SKILL.md",
+      "sha256": "5262b5f1b7ef733faa6b546768e3b985032a0adbfd6766aeceab5458fa51278d",
+      "license": "MIT",
+      "verified_profiles": [
+        "general"
+      ],
+      "rollout": "No implicit installation; source matches general package bytes. Live auth scope changes and other-profile deployment are not claimed."
     }
   ]
 }

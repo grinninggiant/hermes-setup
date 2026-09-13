@@ -347,6 +347,14 @@ def validate_command(command: Sequence[str]) -> list[str]:
             method_explicit = True
             index += 1
             continue
+        if argument == "-F":
+            if index + 1 >= len(tail) or tail[index + 1] not in {"draft=true", "draft=false"}:
+                raise BrokerError("only literal typed draft booleans are allowed")
+            if endpoint != f"{repo_root}/pulls" or "draft" in raw_fields:
+                raise BrokerError("typed draft requires PR creation without duplicate fields")
+            raw_fields["draft"] = tail[index + 1].split("=", 1)[1]
+            index += 2
+            continue
         if argument in {"-f", "--raw-field"}:
             if index + 1 >= len(tail):
                 raise BrokerError("missing gh api raw field")
@@ -360,6 +368,8 @@ def validate_command(command: Sequence[str]) -> list[str]:
         if "=" not in field:
             raise BrokerError("invalid gh api raw field")
         name, value = field.split("=", 1)
+        if name == "draft":
+            raise BrokerError("draft requires literal typed boolean via -F")
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name) or name in raw_fields:
             raise BrokerError("invalid gh api raw field")
         raw_fields[name] = value
