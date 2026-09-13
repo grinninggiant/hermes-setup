@@ -12,4 +12,4 @@ Use a branch and PR. Review the entire changed capability, not just file size. R
 
 Publish only reviewed reusable methods. Do not bulk-copy a profile directory here. Exclude credentials, auth stores, config with private identifiers, session databases, logs, personal health/finance facts and runtime snapshots. Sensitive domain state stays in its governed private storage; a private repository is not a secret vault either.
 
-Run `python3 skills/test_library.py` from the repository root. These source checks are not end-to-end model or deployment acceptance.
+Run `uv run --with-requirements skills/requirements-test.txt python skills/test_library.py` from the repository root, or use an existing isolated environment with those dependencies. Frontmatter is parsed as YAML, including quoted, unquoted and multiline descriptions. These source checks are not end-to-end model or deployment acceptance.

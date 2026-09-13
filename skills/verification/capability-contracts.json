@@ -1,0 +1,492 @@
+{
+  "scope": "11 reviewed packages, existing copies only; no new profile skill or runtime policy.",
+  "loader_checks": [
+    {
+      "name": "session-librarian",
+      "profile": "general",
+      "sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf"
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "general",
+      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe"
+    },
+    {
+      "name": "codex",
+      "profile": "general",
+      "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1"
+    },
+    {
+      "name": "obsidian",
+      "profile": "general",
+      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765"
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "general",
+      "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd"
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "general",
+      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "general",
+      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb"
+    },
+    {
+      "name": "codebase-inspection",
+      "profile": "general",
+      "sha256": "0575b54adcb43fa8de542098eda12ec6d45184a8e98eb043fb0f9ede74a1d4bf"
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "general",
+      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a"
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "general",
+      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090"
+    },
+    {
+      "name": "findmy",
+      "profile": "general",
+      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782"
+    },
+    {
+      "name": "session-librarian",
+      "profile": "assistant",
+      "sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf"
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "assistant",
+      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe"
+    },
+    {
+      "name": "codex",
+      "profile": "assistant",
+      "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1"
+    },
+    {
+      "name": "obsidian",
+      "profile": "assistant",
+      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765"
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "assistant",
+      "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd"
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "assistant",
+      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "assistant",
+      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb"
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "assistant",
+      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a"
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "assistant",
+      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090"
+    },
+    {
+      "name": "findmy",
+      "profile": "assistant",
+      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782"
+    },
+    {
+      "name": "session-librarian",
+      "profile": "coder",
+      "sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf"
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "coder",
+      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe"
+    },
+    {
+      "name": "codex",
+      "profile": "coder",
+      "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1"
+    },
+    {
+      "name": "obsidian",
+      "profile": "coder",
+      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765"
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "coder",
+      "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd"
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "coder",
+      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "coder",
+      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb"
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "coder",
+      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a"
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "coder",
+      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090"
+    },
+    {
+      "name": "findmy",
+      "profile": "coder",
+      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782"
+    },
+    {
+      "name": "session-librarian",
+      "profile": "finance",
+      "sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf"
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "finance",
+      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe"
+    },
+    {
+      "name": "codex",
+      "profile": "finance",
+      "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1"
+    },
+    {
+      "name": "obsidian",
+      "profile": "finance",
+      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765"
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "finance",
+      "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd"
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "finance",
+      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "finance",
+      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb"
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "finance",
+      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a"
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "finance",
+      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090"
+    },
+    {
+      "name": "findmy",
+      "profile": "finance",
+      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782"
+    },
+    {
+      "name": "session-librarian",
+      "profile": "health",
+      "sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf"
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "health",
+      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe"
+    },
+    {
+      "name": "codex",
+      "profile": "health",
+      "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1"
+    },
+    {
+      "name": "obsidian",
+      "profile": "health",
+      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765"
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "health",
+      "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd"
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "health",
+      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "health",
+      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb"
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "health",
+      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a"
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "health",
+      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090"
+    },
+    {
+      "name": "findmy",
+      "profile": "health",
+      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782"
+    },
+    {
+      "name": "session-librarian",
+      "profile": "marketing",
+      "sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf"
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "marketing",
+      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe"
+    },
+    {
+      "name": "codex",
+      "profile": "marketing",
+      "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1"
+    },
+    {
+      "name": "obsidian",
+      "profile": "marketing",
+      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765"
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "marketing",
+      "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd"
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "marketing",
+      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "marketing",
+      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb"
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "marketing",
+      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a"
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "marketing",
+      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090"
+    },
+    {
+      "name": "findmy",
+      "profile": "marketing",
+      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782"
+    },
+    {
+      "name": "session-librarian",
+      "profile": "producer",
+      "sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf"
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "producer",
+      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe"
+    },
+    {
+      "name": "codex",
+      "profile": "producer",
+      "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1"
+    },
+    {
+      "name": "obsidian",
+      "profile": "producer",
+      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765"
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "producer",
+      "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd"
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "producer",
+      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "producer",
+      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb"
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "producer",
+      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a"
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "producer",
+      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090"
+    },
+    {
+      "name": "findmy",
+      "profile": "producer",
+      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782"
+    },
+    {
+      "name": "session-librarian",
+      "profile": "researcher",
+      "sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf"
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "researcher",
+      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe"
+    },
+    {
+      "name": "codex",
+      "profile": "researcher",
+      "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1"
+    },
+    {
+      "name": "obsidian",
+      "profile": "researcher",
+      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765"
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "researcher",
+      "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd"
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "researcher",
+      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "researcher",
+      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb"
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "researcher",
+      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a"
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "researcher",
+      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090"
+    },
+    {
+      "name": "findmy",
+      "profile": "researcher",
+      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782"
+    },
+    {
+      "name": "session-librarian",
+      "profile": "writer",
+      "sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf"
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "writer",
+      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe"
+    },
+    {
+      "name": "codex",
+      "profile": "writer",
+      "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1"
+    },
+    {
+      "name": "obsidian",
+      "profile": "writer",
+      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765"
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "writer",
+      "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd"
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "writer",
+      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "writer",
+      "sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb"
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "writer",
+      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a"
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "writer",
+      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090"
+    },
+    {
+      "name": "findmy",
+      "profile": "writer",
+      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782"
+    }
+  ],
+  "supporting_files": "No supporting files present in these installed packages.",
+  "general_canary": "candidate, exact baseline, candidate fresh loader checks PASS",
+  "protected_files_unchanged": 51,
+  "bounded_decisions": {
+    "model_requested": "gpt-6-astra",
+    "reasoning_requested": "low",
+    "cases": [
+      "safe_continue",
+      "stop",
+      "real_approval"
+    ],
+    "versions": [
+      "baseline",
+      "candidate"
+    ],
+    "manual_review": "PASS: exact safe test command proposed, Stop without tools, deployment approval preserved. Tools not executed by probe; not broad behavior superiority."
+  },
+  "capability_evidence": {
+    "pygount": "uvx pygount 3.2.0, real JSON count returned for repository test file; no system Python override.",
+    "codex": "Live codex exec --help: explicitly noninteractive; help only, no Codex agent launched.",
+    "hermes_sessions": "Installed runtime sessions --help confirms management commands; no session mutation.",
+    "findmy": "Apple Support documented last-known locations and crowdsourced updates; no user-device location queried.",
+    "desktop_cdp": "Source resolveDevCdpPort confirms packaged/no-dev-server/opted-out/invalid-port; no app relaunched.",
+    "hf": "Official CLI docs verified; binary absent from current PATH, no account actions.",
+    "other_connectors": "No Reminders/Find My/blogwatcher account operation; installed capability remains task-specific preflight."
+  },
+  "references": [
+    "https://pygount.readthedocs.io/en/latest/usage/",
+    "https://pygount.readthedocs.io/en/latest/installation/",
+    "https://support.apple.com/en-us/104978",
+    "https://huggingface.co/docs/huggingface_hub/guides/cli"
+  ]
+}

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 import unittest
+import yaml
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = json.loads((ROOT/'manifest.json').read_text())
@@ -24,11 +25,16 @@ class LibraryContracts(unittest.TestCase):
             raw = (ROOT/row['path']).read_bytes()
             self.assertEqual(hashlib.sha256(raw).hexdigest(), row['sha256'])
             text = raw.decode()
-            front = text.split('---', 2)[1]
-            self.assertIn('name: '+row['name'], front)
-            self.assertIn('license: '+row['license'], front)
-            self.assertRegex(front, r'(?m)^author: .+')
-            self.assertRegex(front, r'(?m)^description: "[^"\n]+"$')
+            lines = text.splitlines()
+            self.assertEqual(lines[0], '---')
+            end = lines.index('---', 1)
+            front = yaml.safe_load('\n'.join(lines[1:end]))
+            self.assertIsInstance(front, dict)
+            self.assertEqual(front['name'], row['name'])
+            self.assertEqual(front['license'], row['license'])
+            for key in ('author', 'description'):
+                self.assertIsInstance(front[key], str)
+                self.assertTrue(front[key].strip())
 
     def test_manifest_covers_all_entrypoints(self):
         expected = {row['path'] for row in MANIFEST['skills']}
