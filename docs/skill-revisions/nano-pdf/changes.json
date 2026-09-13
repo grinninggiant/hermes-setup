@@ -1,0 +1,10 @@
+[
+  {
+    "old": "- Page numbers may be 0-based or 1-based depending on version — if the edit hits the wrong page, retry with ±1",
+    "new": "- Before editing, verify the installed version’s page-number convention using its help or documentation. Work on a copy and target the exact intended page. If the wrong page changes, inspect the result and restore the copy before correcting the target; do not blindly retry with ±1."
+  },
+  {
+    "old": "- Always verify the output PDF after editing (use `read_file` to check file size, or open it)",
+    "new": "- Verify the changed page’s extracted text and rendered appearance against the requested edit, and check that unrelated pages stayed unchanged. File size or successful process exit alone is not proof of a correct edit."
+  }
+]
