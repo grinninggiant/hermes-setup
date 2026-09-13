@@ -2042,6 +2042,41 @@ class DeliveryLedger:
         result.update({str(state): int(count) for state, count in rows})
         return result
 
+    def _reconciled_direct_failures(self) -> set[str]:
+        """Read evidence without changing or renewing historical activation grants."""
+        if not self._db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_activation_reconciliations'"
+        ).fetchone():
+            return set()
+        audits = {key: (issue_id, evidence) for key, issue_id, evidence in self._db.execute(
+            "SELECT operation_key_sha256,issue_id,evidence_json FROM direct_activation_reconciliations"
+        )}
+        cursor = self._db.execute("SELECT * FROM direct_activation_grants WHERE state='failed'")
+        columns = [column[0] for column in cursor.description]
+        reconciled = set()
+        for values in cursor.fetchall():
+            row = dict(zip(columns, values))
+            key = hashlib.sha256(row['operation_key'].encode()).hexdigest()
+            if key not in audits:
+                continue
+            issue_id, encoded = audits[key]
+            try:
+                evidence = json.loads(encoded)
+                snapshot_hash = hashlib.sha256(json.dumps(row, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                valid = (
+                    isinstance(evidence, dict)
+                    and evidence.get('operation_key_sha256') == key
+                    and evidence.get('issue_id') == issue_id
+                    and bool(issue_id)
+                    and evidence.get('original_error') == row['last_error']
+                    and evidence.get('grant_sha256') == snapshot_hash
+                )
+            except (ValueError, TypeError):
+                valid = False
+            if valid:
+                reconciled.add(row['operation_key'])
+        return reconciled
+
     def direct_activation_counts(self, *, now: int | None = None) -> dict[str, Any]:
         now = int(time.time()) if now is None else int(now)
         with self._lock:
@@ -2069,6 +2104,10 @@ class DeliveryLedger:
                 "SELECT last_error FROM direct_activation_grants WHERE last_error IS NOT NULL "
                 "ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
+            reconciled = self._reconciled_direct_failures()
+            unresolved_errors = [error for key, error in self._db.execute(
+                "SELECT operation_key,last_error FROM direct_activation_grants WHERE last_error IS NOT NULL ORDER BY updated_at DESC"
+            ) if key not in reconciled]
         result: dict[str, Any] = {
             "reserved": 0,
             "granted": 0,
@@ -2086,6 +2125,11 @@ class DeliveryLedger:
             "last_error": error_row[0] if error_row else None,
         }
         result.update({str(state): int(count) for state, count in rows})
+        result['failed_historical'] = result['failed']
+        result['reconciled_no_activation'] = len(reconciled)
+        result['failed'] -= len(reconciled)
+        result['last_historical_error'] = result['last_error']
+        result['last_error'] = unresolved_errors[0] if unresolved_errors else None
         return result
 
     def prune(self, *, now: int | None = None) -> int:

@@ -2,6 +2,32 @@
 
 A native Linear Agent Session platform plugin for Hermes Gateway. Linear is the human-facing task and discussion surface; Hermes remains the conversation and execution layer. The same tracked adapter code runs as nine isolated profile-local instances. No separate bridge daemon or Hermes built-in webhook route is used.
 
+## Evidence-only Direct reconciliation (0.8.36)
+
+The explicitly approved general-only canary uses `direct_reconciliation.py` from the
+reviewed component checkout. Run it in the existing general profile environment with
+one `--operation-sha256` per exact approved outbound operation. Default is read-only;
+`--apply --expected-sha256 <dry-run-sha256>` repeats authoritative vendor reads and
+rejects changed local or remote evidence before committing one atomic audit batch.
+
+The tool joins raw Direct keys to SHA256 outbound keys, decodes supported quota result
+envelopes, and checks successful outbound disposition plus exact vendor issue,
+creator, delegate, team and title fingerprint. It never sends a vendor mutation,
+creates a session, dispatches a callback, or changes a grant row. Existing failed
+grant rows, original errors and Stop fences remain untouched. The separate
+`direct_activation_reconciliations` table records metadata-only evidence; an identical
+repeat is a no-op and conflicting evidence is not overwritten.
+
+Health separates unresolved `failed` from `failed_historical` and
+`reconciled_no_activation`, with `last_historical_error` retained. A changed grant
+invalidates its audit hash and becomes an unresolved failure again. No new state is
+added to the execution grant CHECK constraint. Other profiles receive neither code
+nor database changes without a separate rollout decision.
+
+Rollback restores the prior plugin artifact; no database restore or audit deletion
+is necessary. The older reader conservatively reports the retained failed rows as
+degraded. Approval and execution authority are never restored by reconciliation.
+
 ## Architecture
 
 ```mermaid
