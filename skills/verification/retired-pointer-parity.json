@@ -1,0 +1,185 @@
+{
+  "classification": "FRESH_LOADER_SOURCE_PARITY_NOT_MODEL_ACCEPTANCE",
+  "loader_checks": [
+    {
+      "name": "weekly-review-planning",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
+      "profile": "general"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
+      "profile": "general"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
+      "profile": "general"
+    },
+    {
+      "name": "document-to-action-items",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
+      "profile": "general"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
+      "profile": "assistant"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
+      "profile": "assistant"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
+      "profile": "assistant"
+    },
+    {
+      "name": "document-to-action-items",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
+      "profile": "assistant"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
+      "profile": "coder"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
+      "profile": "coder"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
+      "profile": "coder"
+    },
+    {
+      "name": "document-to-action-items",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
+      "profile": "coder"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
+      "profile": "writer"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
+      "profile": "writer"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
+      "profile": "writer"
+    },
+    {
+      "name": "document-to-action-items",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
+      "profile": "writer"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
+      "profile": "researcher"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
+      "profile": "researcher"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
+      "profile": "researcher"
+    },
+    {
+      "name": "document-to-action-items",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
+      "profile": "researcher"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
+      "profile": "marketing"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
+      "profile": "marketing"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
+      "profile": "marketing"
+    },
+    {
+      "name": "document-to-action-items",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
+      "profile": "marketing"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
+      "profile": "finance"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
+      "profile": "finance"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
+      "profile": "finance"
+    },
+    {
+      "name": "document-to-action-items",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
+      "profile": "finance"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
+      "profile": "health"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
+      "profile": "health"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
+      "profile": "health"
+    },
+    {
+      "name": "document-to-action-items",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
+      "profile": "health"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "71283424181687f362d498a57dcbff9d9851e8fa31ebb397c909fdb63318b326",
+      "profile": "producer"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "sha256": "ac0c7b10b779637388e83b223fd8a785fac5d0e889a2faf0b7195ccd9148cd7a",
+      "profile": "producer"
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "sha256": "57c20de7aa918faf10630e9eaca2f6acbdce36b34add2b0c3f118f5c14bae6e7",
+      "profile": "producer"
+    },
+    {
+      "name": "document-to-action-items",
+      "sha256": "15e3e47abe7ad2abd8f29839fc309ead6d4db536506ac94d6b31bb5c9007f430",
+      "profile": "producer"
+    }
+  ]
+}

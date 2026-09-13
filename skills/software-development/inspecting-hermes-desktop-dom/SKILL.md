@@ -8,7 +8,7 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [desktop, electron, cdp, dom, ui-verification, self-inspection]
-    related_skills: [node-inspect-debugger, systematic-debugging, dogfood]
+    related_skills: [systematic-debugging]
 ---
 
 # Inspecting the live Hermes desktop DOM
@@ -38,9 +38,9 @@ CDP; inspect an authorized screenshot with the available vision tool for visual 
 - Checking a design token's computed value on a real node
 - Reading renderer console errors the user mentions but can't copy out
 
-**Don't use for:** perf profiling or heap work (`node-inspect-debugger`,
-`debugging-hermes-desktop`), or anything where the real question is "does this
-look right".
+**Don't use for:** performance profiling or heap analysis (use an appropriate
+debugger workflow, installing its skill on demand if needed), or anything
+where the real question is "does this look right".
 
 ## The port
 
