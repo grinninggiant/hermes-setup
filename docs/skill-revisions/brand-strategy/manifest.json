@@ -1,0 +1,43 @@
+{
+  "scope": "Reviewed general-only source snapshot; no automatic installation",
+  "files": [
+    {
+      "path": "SKILL.md",
+      "sha256": "949fa0e5de44e570be0d63f88732af9af371ce5c3df898331e70591e347b2ee6"
+    },
+    {
+      "path": "references/brand-direction-calibration.md",
+      "sha256": "eae4880513acc540715e4f092535eb1af277a9c0953c367c1123b731accfdd97"
+    },
+    {
+      "path": "references/brand-identity-infrastructure-sequencing.md",
+      "sha256": "ebfffbc2b5e21b5d3c594342a130eb9144089f26725288de35d49808473ed863"
+    },
+    {
+      "path": "references/domain-constrained-brand-longlists.md",
+      "sha256": "2be9df3ef34169735a9b11d6c97a61a4caee22f0c0ef88905b199b9b2560e1bf"
+    },
+    {
+      "path": "references/domain-constrained-bulk-naming.md",
+      "sha256": "6bf531444969de8a1d0ec066fa5bb69c186e3605a92093765955460ed6d94e2a"
+    },
+    {
+      "path": "references/multi-brand-topology-and-calibration.md",
+      "sha256": "da870fb65663a0cde541f217cd3552f414ecae678b2a06823fc3e352ac5daaa1"
+    },
+    {
+      "path": "references/product-vs-umbrella-company-name.md",
+      "sha256": "c906b5531b5657e599242939586dc182a80639339ae515641989b61a5cd30e59"
+    },
+    {
+      "path": "references/software-product-name-preflight.md",
+      "sha256": "8664e965f477fa8125f6ff69026c45da4d009342e50d9686f4024b57710ef836"
+    },
+    {
+      "path": "references/story-led-multi-brand-domain-preflight.md",
+      "sha256": "7e2ba5d97a21c14461eb36243facc7d0439da1578c65eb46a19b6de4542c05ab"
+    }
+  ],
+  "license_metadata": "Original skill has no author/license fields. Do not invent these or register it in the MIT-only source library.",
+  "verification": "Six structural tests and a bounded three-case baseline/candidate Astra-low comparison; not full OPS-239 acceptance."
+}

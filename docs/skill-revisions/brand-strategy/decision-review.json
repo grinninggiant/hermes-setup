@@ -1,0 +1,16 @@
+{
+  "status": "BOUNDED_DECISION_COMPARISON_PASS_NOT_FULL_ACCEPTANCE",
+  "requested_provider": "openai-codex",
+  "requested_model": "gpt-6-astra",
+  "reasoning_effort": "low",
+  "calls": 6,
+  "cases_per_version": 3,
+  "response_ids": "Provider adapter returned null; no vendor model-identity attestation claimed",
+  "review": {
+    "clear_brief": "Both versions respect seven raw unverified ideas, avoid re-asking and do not research domains. No improvement claimed on this case.",
+    "domain_unknown": "Both versions refuse availability from timeout/DNS silence. Baseline still requests corroborating WHOIS/DNS signals. Candidate uses bounded authoritative RDAP retry and distinguishes no registration object from registrar availability/reservation/premium status.",
+    "readonly_boundary": "Both versions keep output in the conversation and refuse unauthorized purchases/accounts/external writes. No regression observed."
+  },
+  "scope": "Entrypoint plus canonical domain reference in three synthetic text-only cases. No tool execution, workers, agent sessions, live domain checks, purchases or external records.",
+  "limitations": "Not statistical performance evidence, full reference-routing acceptance or end-to-end production verification. Structural tests remain separately classified."
+}
