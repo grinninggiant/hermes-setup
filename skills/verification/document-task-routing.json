@@ -1,0 +1,59 @@
+{
+  "loader_checks": [
+    {
+      "profile": "general",
+      "name": "document-to-action-items",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "resolved_path_verified": true
+    },
+    {
+      "profile": "assistant",
+      "name": "document-to-action-items",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "resolved_path_verified": true
+    },
+    {
+      "profile": "coder",
+      "name": "document-to-action-items",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "resolved_path_verified": true
+    },
+    {
+      "profile": "writer",
+      "name": "document-to-action-items",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "resolved_path_verified": true
+    },
+    {
+      "profile": "researcher",
+      "name": "document-to-action-items",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "resolved_path_verified": true
+    },
+    {
+      "profile": "marketing",
+      "name": "document-to-action-items",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "resolved_path_verified": true
+    },
+    {
+      "profile": "finance",
+      "name": "document-to-action-items",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "resolved_path_verified": true
+    },
+    {
+      "profile": "health",
+      "name": "document-to-action-items",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "resolved_path_verified": true
+    },
+    {
+      "profile": "producer",
+      "name": "document-to-action-items",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "resolved_path_verified": true
+    }
+  ],
+  "scope": "Fresh native loader only; not full model/task acceptance"
+}

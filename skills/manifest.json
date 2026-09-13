@@ -328,6 +328,25 @@
       ],
       "verification_evidence": "verification/capability-contracts.json",
       "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
+    },
+    {
+      "name": "document-to-action-items",
+      "path": "productivity/document-to-action-items/SKILL.md",
+      "sha256": "563757a26142a3686f1943cb106849b1feea108641395a0997c2ddd3bbaf6207",
+      "license": "MIT",
+      "verified_profiles": [
+        "general",
+        "assistant",
+        "coder",
+        "writer",
+        "researcher",
+        "marketing",
+        "finance",
+        "health",
+        "producer"
+      ],
+      "verification_evidence": "verification/document-task-routing.json",
+      "rollout": "No implicit installation; exact source/general and other-profile loader hashes verified; model behavior acceptance open."
     }
   ]
 }
