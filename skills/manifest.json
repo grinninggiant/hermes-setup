@@ -148,25 +148,6 @@
       "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
     },
     {
-      "name": "product-price-monitor",
-      "path": "productivity/product-price-monitor/SKILL.md",
-      "sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
-      "license": "MIT",
-      "verified_profiles": [
-        "assistant",
-        "coder",
-        "finance",
-        "general",
-        "health",
-        "marketing",
-        "producer",
-        "researcher",
-        "writer"
-      ],
-      "verification_evidence": "verification/capability-contracts.json",
-      "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
-    },
-    {
       "name": "codex",
       "path": "autonomous-ai-agents/codex/SKILL.md",
       "sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
@@ -186,47 +167,9 @@
       "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
     },
     {
-      "name": "obsidian",
-      "path": "note-taking/obsidian/SKILL.md",
-      "sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
-      "license": "MIT",
-      "verified_profiles": [
-        "assistant",
-        "coder",
-        "finance",
-        "general",
-        "health",
-        "marketing",
-        "producer",
-        "researcher",
-        "writer"
-      ],
-      "verification_evidence": "verification/capability-contracts.json",
-      "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
-    },
-    {
       "name": "github-issue-to-pr",
       "path": "github/github-issue-to-pr/SKILL.md",
       "sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
-      "license": "MIT",
-      "verified_profiles": [
-        "assistant",
-        "coder",
-        "finance",
-        "general",
-        "health",
-        "marketing",
-        "producer",
-        "researcher",
-        "writer"
-      ],
-      "verification_evidence": "verification/capability-contracts.json",
-      "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
-    },
-    {
-      "name": "huggingface-hub",
-      "path": "mlops/huggingface-hub/SKILL.md",
-      "sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
       "license": "MIT",
       "verified_profiles": [
         "assistant",
@@ -268,63 +211,6 @@
       "license": "MIT",
       "verified_profiles": [
         "general"
-      ],
-      "verification_evidence": "verification/capability-contracts.json",
-      "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
-    },
-    {
-      "name": "blogwatcher",
-      "path": "research/blogwatcher/SKILL.md",
-      "sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
-      "license": "MIT",
-      "verified_profiles": [
-        "assistant",
-        "coder",
-        "finance",
-        "general",
-        "health",
-        "marketing",
-        "producer",
-        "researcher",
-        "writer"
-      ],
-      "verification_evidence": "verification/capability-contracts.json",
-      "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
-    },
-    {
-      "name": "apple-reminders",
-      "path": "apple/apple-reminders/SKILL.md",
-      "sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
-      "license": "MIT",
-      "verified_profiles": [
-        "assistant",
-        "coder",
-        "finance",
-        "general",
-        "health",
-        "marketing",
-        "producer",
-        "researcher",
-        "writer"
-      ],
-      "verification_evidence": "verification/capability-contracts.json",
-      "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
-    },
-    {
-      "name": "findmy",
-      "path": "apple/findmy/SKILL.md",
-      "sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
-      "license": "MIT",
-      "verified_profiles": [
-        "assistant",
-        "coder",
-        "finance",
-        "general",
-        "health",
-        "marketing",
-        "producer",
-        "researcher",
-        "writer"
       ],
       "verification_evidence": "verification/capability-contracts.json",
       "rollout": "No implicit installation; exact existing-profile entrypoint rollout and fresh loader verified. Existing session injection is distinct."
