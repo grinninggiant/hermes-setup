@@ -1,0 +1,641 @@
+{
+  "rows": [
+    {
+      "name": "session-librarian",
+      "profile": "assistant",
+      "baseline_sha256": "9da2d0ba82b771ae83560965ffaa910db01e76bba8c1d914133a0d8c6957f2ba",
+      "candidate_sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf",
+      "supporting_files": []
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "assistant",
+      "baseline_sha256": "b87bf2102fed13d2c7c64759fa153f24f5e43a0afcf6f8ec5e13def92a6642ef",
+      "candidate_sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
+      "supporting_files": []
+    },
+    {
+      "name": "codex",
+      "profile": "assistant",
+      "baseline_sha256": "3ed457c2b8d5d9c33ab3817cea9753cbcf7f165105eb9da488633a624216d51f",
+      "candidate_sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
+      "supporting_files": []
+    },
+    {
+      "name": "obsidian",
+      "profile": "assistant",
+      "baseline_sha256": "7aea4e8f89f94ab2876d79898d10a5d4cdab31390c53f72ad6934b071179f826",
+      "candidate_sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
+      "supporting_files": []
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "assistant",
+      "baseline_sha256": "d422963778ee3fadb182322aa65b742f47a73b456b00fd0935e8ab66caf118e0",
+      "candidate_sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
+      "supporting_files": []
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "assistant",
+      "baseline_sha256": "68ee2e5ae17e0f2968f8550534f3fce1c7eae461b95cbe1dbc34b8d487665bc5",
+      "candidate_sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
+      "supporting_files": []
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "assistant",
+      "baseline_sha256": "a78a5f8d277a1d6d39fccd5ecf1e76ce519a1ace831f06078dfcc91cb54a3399",
+      "candidate_sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "supporting_files": []
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "assistant",
+      "baseline_sha256": "b85be5a9b86b90287266dd142a0ae9740be926298fbcb772f56b8a4d6451bb12",
+      "candidate_sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
+      "supporting_files": []
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "assistant",
+      "baseline_sha256": "ee5084f2d7ec196488bef2c74248fb3d8328d1b2e3277ddda3f0de9da6fc7131",
+      "candidate_sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
+      "supporting_files": []
+    },
+    {
+      "name": "findmy",
+      "profile": "assistant",
+      "baseline_sha256": "19ec56e3b7f9f0be13c26d99948ed5684d8fb1f9c478da078c19356b5df63f57",
+      "candidate_sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
+      "supporting_files": []
+    },
+    {
+      "name": "session-librarian",
+      "profile": "coder",
+      "baseline_sha256": "9da2d0ba82b771ae83560965ffaa910db01e76bba8c1d914133a0d8c6957f2ba",
+      "candidate_sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf",
+      "supporting_files": []
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "coder",
+      "baseline_sha256": "b87bf2102fed13d2c7c64759fa153f24f5e43a0afcf6f8ec5e13def92a6642ef",
+      "candidate_sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
+      "supporting_files": []
+    },
+    {
+      "name": "codex",
+      "profile": "coder",
+      "baseline_sha256": "3ed457c2b8d5d9c33ab3817cea9753cbcf7f165105eb9da488633a624216d51f",
+      "candidate_sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
+      "supporting_files": []
+    },
+    {
+      "name": "obsidian",
+      "profile": "coder",
+      "baseline_sha256": "7aea4e8f89f94ab2876d79898d10a5d4cdab31390c53f72ad6934b071179f826",
+      "candidate_sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
+      "supporting_files": []
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "coder",
+      "baseline_sha256": "d422963778ee3fadb182322aa65b742f47a73b456b00fd0935e8ab66caf118e0",
+      "candidate_sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
+      "supporting_files": []
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "coder",
+      "baseline_sha256": "68ee2e5ae17e0f2968f8550534f3fce1c7eae461b95cbe1dbc34b8d487665bc5",
+      "candidate_sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
+      "supporting_files": []
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "coder",
+      "baseline_sha256": "a78a5f8d277a1d6d39fccd5ecf1e76ce519a1ace831f06078dfcc91cb54a3399",
+      "candidate_sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "supporting_files": []
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "coder",
+      "baseline_sha256": "b85be5a9b86b90287266dd142a0ae9740be926298fbcb772f56b8a4d6451bb12",
+      "candidate_sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
+      "supporting_files": []
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "coder",
+      "baseline_sha256": "ee5084f2d7ec196488bef2c74248fb3d8328d1b2e3277ddda3f0de9da6fc7131",
+      "candidate_sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
+      "supporting_files": []
+    },
+    {
+      "name": "findmy",
+      "profile": "coder",
+      "baseline_sha256": "19ec56e3b7f9f0be13c26d99948ed5684d8fb1f9c478da078c19356b5df63f57",
+      "candidate_sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
+      "supporting_files": []
+    },
+    {
+      "name": "session-librarian",
+      "profile": "finance",
+      "baseline_sha256": "9da2d0ba82b771ae83560965ffaa910db01e76bba8c1d914133a0d8c6957f2ba",
+      "candidate_sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf",
+      "supporting_files": []
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "finance",
+      "baseline_sha256": "b87bf2102fed13d2c7c64759fa153f24f5e43a0afcf6f8ec5e13def92a6642ef",
+      "candidate_sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
+      "supporting_files": []
+    },
+    {
+      "name": "codex",
+      "profile": "finance",
+      "baseline_sha256": "3ed457c2b8d5d9c33ab3817cea9753cbcf7f165105eb9da488633a624216d51f",
+      "candidate_sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
+      "supporting_files": []
+    },
+    {
+      "name": "obsidian",
+      "profile": "finance",
+      "baseline_sha256": "7aea4e8f89f94ab2876d79898d10a5d4cdab31390c53f72ad6934b071179f826",
+      "candidate_sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
+      "supporting_files": []
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "finance",
+      "baseline_sha256": "d422963778ee3fadb182322aa65b742f47a73b456b00fd0935e8ab66caf118e0",
+      "candidate_sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
+      "supporting_files": []
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "finance",
+      "baseline_sha256": "68ee2e5ae17e0f2968f8550534f3fce1c7eae461b95cbe1dbc34b8d487665bc5",
+      "candidate_sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
+      "supporting_files": []
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "finance",
+      "baseline_sha256": "a78a5f8d277a1d6d39fccd5ecf1e76ce519a1ace831f06078dfcc91cb54a3399",
+      "candidate_sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "supporting_files": []
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "finance",
+      "baseline_sha256": "b85be5a9b86b90287266dd142a0ae9740be926298fbcb772f56b8a4d6451bb12",
+      "candidate_sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
+      "supporting_files": []
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "finance",
+      "baseline_sha256": "ee5084f2d7ec196488bef2c74248fb3d8328d1b2e3277ddda3f0de9da6fc7131",
+      "candidate_sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
+      "supporting_files": []
+    },
+    {
+      "name": "findmy",
+      "profile": "finance",
+      "baseline_sha256": "19ec56e3b7f9f0be13c26d99948ed5684d8fb1f9c478da078c19356b5df63f57",
+      "candidate_sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
+      "supporting_files": []
+    },
+    {
+      "name": "session-librarian",
+      "profile": "general",
+      "baseline_sha256": "9da2d0ba82b771ae83560965ffaa910db01e76bba8c1d914133a0d8c6957f2ba",
+      "candidate_sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf",
+      "supporting_files": []
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "general",
+      "baseline_sha256": "b87bf2102fed13d2c7c64759fa153f24f5e43a0afcf6f8ec5e13def92a6642ef",
+      "candidate_sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
+      "supporting_files": []
+    },
+    {
+      "name": "codex",
+      "profile": "general",
+      "baseline_sha256": "562d2138263983775950eb18b25fac199c79caf220b603fc6f159815f83977c8",
+      "candidate_sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
+      "supporting_files": []
+    },
+    {
+      "name": "obsidian",
+      "profile": "general",
+      "baseline_sha256": "7aea4e8f89f94ab2876d79898d10a5d4cdab31390c53f72ad6934b071179f826",
+      "candidate_sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
+      "supporting_files": []
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "general",
+      "baseline_sha256": "d422963778ee3fadb182322aa65b742f47a73b456b00fd0935e8ab66caf118e0",
+      "candidate_sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
+      "supporting_files": []
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "general",
+      "baseline_sha256": "68ee2e5ae17e0f2968f8550534f3fce1c7eae461b95cbe1dbc34b8d487665bc5",
+      "candidate_sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
+      "supporting_files": []
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "general",
+      "baseline_sha256": "a78a5f8d277a1d6d39fccd5ecf1e76ce519a1ace831f06078dfcc91cb54a3399",
+      "candidate_sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "supporting_files": []
+    },
+    {
+      "name": "codebase-inspection",
+      "profile": "general",
+      "baseline_sha256": "d62554263461919dff7d77c3c0c284c2190c894f312a84d7a770a030dab642dc",
+      "candidate_sha256": "0575b54adcb43fa8de542098eda12ec6d45184a8e98eb043fb0f9ede74a1d4bf",
+      "supporting_files": []
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "general",
+      "baseline_sha256": "b85be5a9b86b90287266dd142a0ae9740be926298fbcb772f56b8a4d6451bb12",
+      "candidate_sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
+      "supporting_files": []
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "general",
+      "baseline_sha256": "ee5084f2d7ec196488bef2c74248fb3d8328d1b2e3277ddda3f0de9da6fc7131",
+      "candidate_sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
+      "supporting_files": []
+    },
+    {
+      "name": "findmy",
+      "profile": "general",
+      "baseline_sha256": "19ec56e3b7f9f0be13c26d99948ed5684d8fb1f9c478da078c19356b5df63f57",
+      "candidate_sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
+      "supporting_files": []
+    },
+    {
+      "name": "session-librarian",
+      "profile": "health",
+      "baseline_sha256": "9da2d0ba82b771ae83560965ffaa910db01e76bba8c1d914133a0d8c6957f2ba",
+      "candidate_sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf",
+      "supporting_files": []
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "health",
+      "baseline_sha256": "b87bf2102fed13d2c7c64759fa153f24f5e43a0afcf6f8ec5e13def92a6642ef",
+      "candidate_sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
+      "supporting_files": []
+    },
+    {
+      "name": "codex",
+      "profile": "health",
+      "baseline_sha256": "3ed457c2b8d5d9c33ab3817cea9753cbcf7f165105eb9da488633a624216d51f",
+      "candidate_sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
+      "supporting_files": []
+    },
+    {
+      "name": "obsidian",
+      "profile": "health",
+      "baseline_sha256": "7aea4e8f89f94ab2876d79898d10a5d4cdab31390c53f72ad6934b071179f826",
+      "candidate_sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
+      "supporting_files": []
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "health",
+      "baseline_sha256": "d422963778ee3fadb182322aa65b742f47a73b456b00fd0935e8ab66caf118e0",
+      "candidate_sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
+      "supporting_files": []
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "health",
+      "baseline_sha256": "68ee2e5ae17e0f2968f8550534f3fce1c7eae461b95cbe1dbc34b8d487665bc5",
+      "candidate_sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
+      "supporting_files": []
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "health",
+      "baseline_sha256": "a78a5f8d277a1d6d39fccd5ecf1e76ce519a1ace831f06078dfcc91cb54a3399",
+      "candidate_sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "supporting_files": []
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "health",
+      "baseline_sha256": "b85be5a9b86b90287266dd142a0ae9740be926298fbcb772f56b8a4d6451bb12",
+      "candidate_sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
+      "supporting_files": []
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "health",
+      "baseline_sha256": "ee5084f2d7ec196488bef2c74248fb3d8328d1b2e3277ddda3f0de9da6fc7131",
+      "candidate_sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
+      "supporting_files": []
+    },
+    {
+      "name": "findmy",
+      "profile": "health",
+      "baseline_sha256": "19ec56e3b7f9f0be13c26d99948ed5684d8fb1f9c478da078c19356b5df63f57",
+      "candidate_sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
+      "supporting_files": []
+    },
+    {
+      "name": "session-librarian",
+      "profile": "marketing",
+      "baseline_sha256": "9da2d0ba82b771ae83560965ffaa910db01e76bba8c1d914133a0d8c6957f2ba",
+      "candidate_sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf",
+      "supporting_files": []
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "marketing",
+      "baseline_sha256": "b87bf2102fed13d2c7c64759fa153f24f5e43a0afcf6f8ec5e13def92a6642ef",
+      "candidate_sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
+      "supporting_files": []
+    },
+    {
+      "name": "codex",
+      "profile": "marketing",
+      "baseline_sha256": "3ed457c2b8d5d9c33ab3817cea9753cbcf7f165105eb9da488633a624216d51f",
+      "candidate_sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
+      "supporting_files": []
+    },
+    {
+      "name": "obsidian",
+      "profile": "marketing",
+      "baseline_sha256": "7aea4e8f89f94ab2876d79898d10a5d4cdab31390c53f72ad6934b071179f826",
+      "candidate_sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
+      "supporting_files": []
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "marketing",
+      "baseline_sha256": "d422963778ee3fadb182322aa65b742f47a73b456b00fd0935e8ab66caf118e0",
+      "candidate_sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
+      "supporting_files": []
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "marketing",
+      "baseline_sha256": "68ee2e5ae17e0f2968f8550534f3fce1c7eae461b95cbe1dbc34b8d487665bc5",
+      "candidate_sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
+      "supporting_files": []
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "marketing",
+      "baseline_sha256": "a78a5f8d277a1d6d39fccd5ecf1e76ce519a1ace831f06078dfcc91cb54a3399",
+      "candidate_sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "supporting_files": []
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "marketing",
+      "baseline_sha256": "b85be5a9b86b90287266dd142a0ae9740be926298fbcb772f56b8a4d6451bb12",
+      "candidate_sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
+      "supporting_files": []
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "marketing",
+      "baseline_sha256": "ee5084f2d7ec196488bef2c74248fb3d8328d1b2e3277ddda3f0de9da6fc7131",
+      "candidate_sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
+      "supporting_files": []
+    },
+    {
+      "name": "findmy",
+      "profile": "marketing",
+      "baseline_sha256": "19ec56e3b7f9f0be13c26d99948ed5684d8fb1f9c478da078c19356b5df63f57",
+      "candidate_sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
+      "supporting_files": []
+    },
+    {
+      "name": "session-librarian",
+      "profile": "producer",
+      "baseline_sha256": "9da2d0ba82b771ae83560965ffaa910db01e76bba8c1d914133a0d8c6957f2ba",
+      "candidate_sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf",
+      "supporting_files": []
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "producer",
+      "baseline_sha256": "b87bf2102fed13d2c7c64759fa153f24f5e43a0afcf6f8ec5e13def92a6642ef",
+      "candidate_sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
+      "supporting_files": []
+    },
+    {
+      "name": "codex",
+      "profile": "producer",
+      "baseline_sha256": "3ed457c2b8d5d9c33ab3817cea9753cbcf7f165105eb9da488633a624216d51f",
+      "candidate_sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
+      "supporting_files": []
+    },
+    {
+      "name": "obsidian",
+      "profile": "producer",
+      "baseline_sha256": "7aea4e8f89f94ab2876d79898d10a5d4cdab31390c53f72ad6934b071179f826",
+      "candidate_sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
+      "supporting_files": []
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "producer",
+      "baseline_sha256": "d422963778ee3fadb182322aa65b742f47a73b456b00fd0935e8ab66caf118e0",
+      "candidate_sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
+      "supporting_files": []
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "producer",
+      "baseline_sha256": "68ee2e5ae17e0f2968f8550534f3fce1c7eae461b95cbe1dbc34b8d487665bc5",
+      "candidate_sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
+      "supporting_files": []
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "producer",
+      "baseline_sha256": "a78a5f8d277a1d6d39fccd5ecf1e76ce519a1ace831f06078dfcc91cb54a3399",
+      "candidate_sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "supporting_files": []
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "producer",
+      "baseline_sha256": "b85be5a9b86b90287266dd142a0ae9740be926298fbcb772f56b8a4d6451bb12",
+      "candidate_sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
+      "supporting_files": []
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "producer",
+      "baseline_sha256": "ee5084f2d7ec196488bef2c74248fb3d8328d1b2e3277ddda3f0de9da6fc7131",
+      "candidate_sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
+      "supporting_files": []
+    },
+    {
+      "name": "findmy",
+      "profile": "producer",
+      "baseline_sha256": "19ec56e3b7f9f0be13c26d99948ed5684d8fb1f9c478da078c19356b5df63f57",
+      "candidate_sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
+      "supporting_files": []
+    },
+    {
+      "name": "session-librarian",
+      "profile": "researcher",
+      "baseline_sha256": "9da2d0ba82b771ae83560965ffaa910db01e76bba8c1d914133a0d8c6957f2ba",
+      "candidate_sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf",
+      "supporting_files": []
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "researcher",
+      "baseline_sha256": "b87bf2102fed13d2c7c64759fa153f24f5e43a0afcf6f8ec5e13def92a6642ef",
+      "candidate_sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
+      "supporting_files": []
+    },
+    {
+      "name": "codex",
+      "profile": "researcher",
+      "baseline_sha256": "3ed457c2b8d5d9c33ab3817cea9753cbcf7f165105eb9da488633a624216d51f",
+      "candidate_sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
+      "supporting_files": []
+    },
+    {
+      "name": "obsidian",
+      "profile": "researcher",
+      "baseline_sha256": "7aea4e8f89f94ab2876d79898d10a5d4cdab31390c53f72ad6934b071179f826",
+      "candidate_sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
+      "supporting_files": []
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "researcher",
+      "baseline_sha256": "d422963778ee3fadb182322aa65b742f47a73b456b00fd0935e8ab66caf118e0",
+      "candidate_sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
+      "supporting_files": []
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "researcher",
+      "baseline_sha256": "68ee2e5ae17e0f2968f8550534f3fce1c7eae461b95cbe1dbc34b8d487665bc5",
+      "candidate_sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
+      "supporting_files": []
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "researcher",
+      "baseline_sha256": "a78a5f8d277a1d6d39fccd5ecf1e76ce519a1ace831f06078dfcc91cb54a3399",
+      "candidate_sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "supporting_files": []
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "researcher",
+      "baseline_sha256": "b85be5a9b86b90287266dd142a0ae9740be926298fbcb772f56b8a4d6451bb12",
+      "candidate_sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
+      "supporting_files": []
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "researcher",
+      "baseline_sha256": "ee5084f2d7ec196488bef2c74248fb3d8328d1b2e3277ddda3f0de9da6fc7131",
+      "candidate_sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
+      "supporting_files": []
+    },
+    {
+      "name": "findmy",
+      "profile": "researcher",
+      "baseline_sha256": "19ec56e3b7f9f0be13c26d99948ed5684d8fb1f9c478da078c19356b5df63f57",
+      "candidate_sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
+      "supporting_files": []
+    },
+    {
+      "name": "session-librarian",
+      "profile": "writer",
+      "baseline_sha256": "9da2d0ba82b771ae83560965ffaa910db01e76bba8c1d914133a0d8c6957f2ba",
+      "candidate_sha256": "780e90a659070a4de1c0b141a19609658c9332bbd041d6eba80934531dbecfaf",
+      "supporting_files": []
+    },
+    {
+      "name": "product-price-monitor",
+      "profile": "writer",
+      "baseline_sha256": "b87bf2102fed13d2c7c64759fa153f24f5e43a0afcf6f8ec5e13def92a6642ef",
+      "candidate_sha256": "775401965879b85e52b6a8ae9121de8bd75bf10b66e87a1de0d3e022abff8abe",
+      "supporting_files": []
+    },
+    {
+      "name": "codex",
+      "profile": "writer",
+      "baseline_sha256": "3ed457c2b8d5d9c33ab3817cea9753cbcf7f165105eb9da488633a624216d51f",
+      "candidate_sha256": "40c5e82875cffa0a59dfef57556d10cd7edf93e64bd32203ffdc8bce608335f1",
+      "supporting_files": []
+    },
+    {
+      "name": "obsidian",
+      "profile": "writer",
+      "baseline_sha256": "7aea4e8f89f94ab2876d79898d10a5d4cdab31390c53f72ad6934b071179f826",
+      "candidate_sha256": "c61475ef25367c63bd9bc20a44fdffc48f99ed4f329af0603a5311c3a9d93765",
+      "supporting_files": []
+    },
+    {
+      "name": "github-issue-to-pr",
+      "profile": "writer",
+      "baseline_sha256": "d422963778ee3fadb182322aa65b742f47a73b456b00fd0935e8ab66caf118e0",
+      "candidate_sha256": "9c0f62be767c23f95d2034ce22a23562e20c76cdd0beb9e678e802e5846a2bbd",
+      "supporting_files": []
+    },
+    {
+      "name": "huggingface-hub",
+      "profile": "writer",
+      "baseline_sha256": "68ee2e5ae17e0f2968f8550534f3fce1c7eae461b95cbe1dbc34b8d487665bc5",
+      "candidate_sha256": "4589a289a9bd7b4517720e7fd26d1d30bb4aeece16775461c9ba868398d2f88a",
+      "supporting_files": []
+    },
+    {
+      "name": "inspecting-hermes-desktop-dom",
+      "profile": "writer",
+      "baseline_sha256": "a78a5f8d277a1d6d39fccd5ecf1e76ce519a1ace831f06078dfcc91cb54a3399",
+      "candidate_sha256": "2bd5e163b4171a24b04532fedc0c74788cf81c592f60e9899650a476873f36cb",
+      "supporting_files": []
+    },
+    {
+      "name": "blogwatcher",
+      "profile": "writer",
+      "baseline_sha256": "b85be5a9b86b90287266dd142a0ae9740be926298fbcb772f56b8a4d6451bb12",
+      "candidate_sha256": "e55cc62ddbf9e0fd5ac5f23c23b8a97a455ae4bd282ec3fb5eeab61f51baef3a",
+      "supporting_files": []
+    },
+    {
+      "name": "apple-reminders",
+      "profile": "writer",
+      "baseline_sha256": "ee5084f2d7ec196488bef2c74248fb3d8328d1b2e3277ddda3f0de9da6fc7131",
+      "candidate_sha256": "5b8d2e1a92ed6470eef681df9fb784fb02b725eb94226806108e62bd5b65e090",
+      "supporting_files": []
+    },
+    {
+      "name": "findmy",
+      "profile": "writer",
+      "baseline_sha256": "19ec56e3b7f9f0be13c26d99948ed5684d8fb1f9c478da078c19356b5df63f57",
+      "candidate_sha256": "8507653c7456955ac0469b94322d836e95c283e625a0b656e1d6af478301e782",
+      "supporting_files": []
+    }
+  ]
+}
