@@ -1,0 +1,203 @@
+{
+  "scope": "Four reviewed reusable packages; full library acceptance remains open.",
+  "loader_checks": [
+    {
+      "profile": "general",
+      "name": "meeting-action-items",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "profile": "general",
+      "name": "weekly-review-planning",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "profile": "general",
+      "name": "email-inbox-triage",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "profile": "general",
+      "name": "competitor-news-monitor",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "profile": "assistant",
+      "name": "meeting-action-items",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "profile": "assistant",
+      "name": "weekly-review-planning",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "profile": "assistant",
+      "name": "email-inbox-triage",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "profile": "assistant",
+      "name": "competitor-news-monitor",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "profile": "coder",
+      "name": "meeting-action-items",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "profile": "coder",
+      "name": "weekly-review-planning",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "profile": "coder",
+      "name": "email-inbox-triage",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "profile": "coder",
+      "name": "competitor-news-monitor",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "profile": "finance",
+      "name": "meeting-action-items",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "profile": "finance",
+      "name": "weekly-review-planning",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "profile": "finance",
+      "name": "email-inbox-triage",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "profile": "finance",
+      "name": "competitor-news-monitor",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "profile": "health",
+      "name": "meeting-action-items",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "profile": "health",
+      "name": "weekly-review-planning",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "profile": "health",
+      "name": "email-inbox-triage",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "profile": "health",
+      "name": "competitor-news-monitor",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "profile": "marketing",
+      "name": "meeting-action-items",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "profile": "marketing",
+      "name": "weekly-review-planning",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "profile": "marketing",
+      "name": "email-inbox-triage",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "profile": "marketing",
+      "name": "competitor-news-monitor",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "profile": "producer",
+      "name": "meeting-action-items",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "profile": "producer",
+      "name": "weekly-review-planning",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "profile": "producer",
+      "name": "email-inbox-triage",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "profile": "producer",
+      "name": "competitor-news-monitor",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "profile": "researcher",
+      "name": "meeting-action-items",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "profile": "researcher",
+      "name": "weekly-review-planning",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "profile": "researcher",
+      "name": "email-inbox-triage",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "profile": "researcher",
+      "name": "competitor-news-monitor",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "profile": "writer",
+      "name": "meeting-action-items",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "profile": "writer",
+      "name": "weekly-review-planning",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "profile": "writer",
+      "name": "email-inbox-triage",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "profile": "writer",
+      "name": "competitor-news-monitor",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    }
+  ],
+  "supporting_files": "No supporting files present in these four installed packages.",
+  "general_canary": "candidate, exact baseline, candidate fresh-loader checks passed",
+  "protected_files_unchanged": 51,
+  "bounded_decisions": {
+    "requested_model": "gpt-6-astra",
+    "reasoning": "low",
+    "cases": [
+      "oneoff_no_news",
+      "stop",
+      "approval"
+    ],
+    "versions": [
+      "baseline",
+      "candidate"
+    ],
+    "manual_review": "PASS: clear one-off response without scheduler call; Stop without calls; unsent draft awaiting approval. No general superiority or native external execution claimed."
+  },
+  "source_tests": "5 structural tests passed; baseline failed 2 targeted assertions as expected."
+}
