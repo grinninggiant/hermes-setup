@@ -123,6 +123,35 @@ class CandidateInstallerContractTests(unittest.TestCase):
                     ],
                 )
 
+    def test_send_wrapper_matches_general_gateway_and_preserves_other_profiles(self) -> None:
+        gateway_source = (COMPONENT.parents[2] / "scripts" / "hermes-gateway-keychain.sh").read_text()
+        send_source = (COMPONENT / "scripts" / "onepassword_hermes_send_launcher.sh").read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = root / "argv"
+            bootstrap_root = root / "bootstrap"
+            fake_python = bootstrap_root / "venv" / "bin" / "python"
+            fake_python.parent.mkdir(parents=True)
+            fake_python.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$@" > "{capture}"\n')
+            fake_python.chmod(0o700)
+            bootstrap = bootstrap_root / "hermes_gateway_sdk_bootstrap.py"
+            bootstrap.write_text("#!/bin/sh\n")
+            bootstrap.chmod(0o700)
+            gateway = root / "gateway"
+            gateway.write_text(build_harness(gateway_source, bootstrap_root))
+            result = subprocess.run(["/bin/zsh", str(gateway), "general"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            runtime_args = capture.read_text().splitlines()[2:]
+            self.assertEqual(runtime_args[0], "--hermes-executable")
+            sender = root / "sender"
+            sender.write_text(build_harness(send_source, bootstrap_root))
+            for profile in ("general", "assistant", "researcher", "coder", "writer", "producer", "marketing", "health", "finance"):
+                with self.subTest(profile=profile):
+                    args = ["--to", "telegram", "--json", "test-only inert message"]
+                    result = subprocess.run(["/bin/bash", str(sender), profile, *args], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(capture.read_text().splitlines(), [str(bootstrap), profile, *(runtime_args if profile == "general" else []), "--command", "send", "--", *args])
+
     def test_harness_source_drift_fails_before_subprocess(self) -> None:
         source_path = COMPONENT.parents[2] / "scripts" / "hermes-gateway-keychain.sh"
         source = source_path.read_text(encoding="utf-8")
