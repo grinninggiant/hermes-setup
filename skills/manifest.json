@@ -55,7 +55,7 @@
     {
       "name": "weekly-review-planning",
       "path": "productivity/weekly-review-planning/SKILL.md",
-      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
       "license": "MIT",
       "verified_profiles": [
         "assistant",
@@ -68,7 +68,7 @@
         "researcher",
         "writer"
       ],
-      "verification_evidence": "verification/productivity-monitoring.json",
+      "verification_evidence": "verification/retirement-reference-cleanup.json",
       "rollout": "No implicit installation; controlled existing-profile rollout verified by fresh loader, not old session injection."
     },
     {
@@ -93,7 +93,7 @@
     {
       "name": "meeting-action-items",
       "path": "productivity/meeting-action-items/SKILL.md",
-      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
       "license": "MIT",
       "verified_profiles": [
         "assistant",
@@ -106,7 +106,7 @@
         "researcher",
         "writer"
       ],
-      "verification_evidence": "verification/productivity-monitoring.json",
+      "verification_evidence": "verification/retirement-reference-cleanup.json",
       "rollout": "No implicit installation; controlled existing-profile rollout verified by fresh loader, not old session injection."
     },
     {

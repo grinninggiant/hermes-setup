@@ -1,0 +1,188 @@
+{
+  "scope": "Fresh native skill_view plus exact source/installed parity; no new deployment policy",
+  "loader_checks": [
+    {
+      "name": "weekly-review-planning",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "profile": "general"
+    },
+    {
+      "name": "meeting-action-items",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
+      "profile": "general"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "profile": "assistant"
+    },
+    {
+      "name": "meeting-action-items",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
+      "profile": "assistant"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "profile": "coder"
+    },
+    {
+      "name": "meeting-action-items",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
+      "profile": "coder"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "profile": "writer"
+    },
+    {
+      "name": "meeting-action-items",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
+      "profile": "writer"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "profile": "researcher"
+    },
+    {
+      "name": "meeting-action-items",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
+      "profile": "researcher"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "profile": "marketing"
+    },
+    {
+      "name": "meeting-action-items",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
+      "profile": "marketing"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "profile": "finance"
+    },
+    {
+      "name": "meeting-action-items",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
+      "profile": "finance"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "profile": "health"
+    },
+    {
+      "name": "meeting-action-items",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
+      "profile": "health"
+    },
+    {
+      "name": "weekly-review-planning",
+      "sha256": "fa392174cfc119fab5a5ef042d80c73152b158a25bb07b6edb7e19638fba0ebf",
+      "profile": "producer"
+    },
+    {
+      "name": "meeting-action-items",
+      "sha256": "0bb7c24dfeece530c5f9aa6d0f2a790bc1809bd979e3604333a2ae4997e5c6aa",
+      "profile": "producer"
+    }
+  ],
+  "checks": [
+    {
+      "profile": "general",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "general",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "assistant",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "assistant",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "coder",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "coder",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "writer",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "writer",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "researcher",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "researcher",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "marketing",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "marketing",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "finance",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "finance",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "health",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "health",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "producer",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "source_equals_installed": true
+    },
+    {
+      "profile": "producer",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "source_equals_installed": true
+    }
+  ],
+  "behavior_acceptance": "Not claimed; fresh loader and byte parity only."
+}

@@ -8,12 +8,12 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [Meetings, Action-Items, Follow-Up, Productivity]
-    related_skills: [teams-meeting-pipeline, google-workspace, notion]
+    related_skills: [google-workspace, notion]
 ---
 
 # Meeting Action Items
 
-Convert an existing transcript or notes set into accountable follow-through. `teams-meeting-pipeline` can retrieve Teams artifacts; this skill begins once notes/transcript content is available, from any source.
+Convert an existing transcript or notes set into accountable follow-through. This skill begins once notes/transcript content is available, from any source.
 
 ## When to Use
 
@@ -22,7 +22,7 @@ Convert an existing transcript or notes set into accountable follow-through. `te
 - "Draft the follow-up and create tickets."
 - "Reconcile these notes with the existing project board."
 
-Don't use for: retrieving meeting recordings or transcripts (use `teams-meeting-pipeline` or the relevant connector first).
+Don't use for: retrieving meeting recordings or transcripts (use an available connector for the source first).
 
 ## Procedure
 

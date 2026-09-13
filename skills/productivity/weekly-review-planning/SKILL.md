@@ -8,7 +8,7 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [Weekly-Review, Planning, Tasks, Calendar, Productivity]
-    related_skills: [obsidian, notion, airtable, google-workspace, email-inbox-triage]
+    related_skills: [obsidian, notion, google-workspace, email-inbox-triage]
 ---
 
 # Weekly Review and Planning
