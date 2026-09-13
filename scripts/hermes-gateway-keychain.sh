@@ -10,7 +10,7 @@ esac
 
 hermes_executable="/Users/mutlupolatcan/.local/bin/hermes"
 if [[ "$profile" == "general" ]]; then
-  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-7eb71ea4aaed8da8b88aad31eac7dd4cd0c434b7/venv/bin/hermes"
+  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-a1ed3beae45eda913c36b36e19405b8b61a0cec1/venv/bin/hermes"
 fi
 
 service="com.polatcangames.hermes.op-service-account"
