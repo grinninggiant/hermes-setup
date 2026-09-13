@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "scope": "Reviewed reusable skill sources only; no credentials, runtime state or personal health/finance records",
+  "skills": [
+    {
+      "name": "test-driven-development",
+      "path": "software-development/test-driven-development/SKILL.md",
+      "sha256": "44ac06026463db4bc9d94c40d17c55fc9f2bb099c6a152d0a15e384c99241ba0",
+      "license": "MIT",
+      "verified_profiles": [
+        "general"
+      ],
+      "rollout": "No implicit installation; other profiles require exact baseline and permitted rollout."
+    },
+    {
+      "name": "systematic-debugging",
+      "path": "software-development/systematic-debugging/SKILL.md",
+      "sha256": "f45f3a53ce7a88f8835bce5785d57917f3b64185e7adda000299717d1e965142",
+      "license": "MIT",
+      "verified_profiles": [
+        "general"
+      ],
+      "rollout": "No implicit installation; other profiles require exact baseline and permitted rollout."
+    },
+    {
+      "name": "simplify-code",
+      "path": "software-development/simplify-code/SKILL.md",
+      "sha256": "096e80cb8ca4e69985c6fcb1949a13e0392537e9bfbf592b1b83e365cca86317",
+      "license": "MIT",
+      "verified_profiles": [
+        "general"
+      ],
+      "rollout": "No implicit installation; other profiles require exact baseline and permitted rollout."
+    },
+    {
+      "name": "plan",
+      "path": "software-development/plan/SKILL.md",
+      "sha256": "730af9207157febb9a7e851b1185171fffc4240b228f22b33831d849e8b05fb8",
+      "license": "MIT",
+      "verified_profiles": [
+        "general"
+      ],
+      "rollout": "No implicit installation; other profiles require exact baseline and permitted rollout."
+    },
+    {
+      "name": "requesting-code-review",
+      "path": "software-development/requesting-code-review/SKILL.md",
+      "sha256": "7762ed57a33847b6e34d3a2992687acab0c6746b0a30282f5b181892ab7db8ab",
+      "license": "MIT",
+      "verified_profiles": [
+        "general"
+      ],
+      "rollout": "No implicit installation; other profiles require exact baseline and permitted rollout."
+    }
+  ]
+}
