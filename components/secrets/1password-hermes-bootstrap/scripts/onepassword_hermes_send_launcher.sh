@@ -31,5 +31,11 @@ exec /usr/bin/env -i \
       exit 66
     }
 
+    # Keep general maintenance sends on its activated gateway release.
+    if [[ "$profile" == "general" ]]; then
+      exec "$bootstrap_python" "$bootstrap_script" "$profile" \
+        --hermes-executable "/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-7eb71ea4aaed8da8b88aad31eac7dd4cd0c434b7/venv/bin/hermes" \
+        --command send -- "$@"
+    fi
     exec "$bootstrap_python" "$bootstrap_script" "$profile" --command send -- "$@"
   ' hermes-send-clean "$@"
