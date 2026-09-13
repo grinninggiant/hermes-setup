@@ -42,7 +42,8 @@ class WrapperContract(unittest.TestCase):
             with self.subTest(profile=profile):
                 result = invoke(TARGET.read_text(), profile)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                executable = f'/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-{RELEASE}/venv/bin/hermes' if profile == 'general' else '/Users/mutlupolatcan/.local/bin/hermes'
+                release = RELEASE if profile == 'general' else 'def2cf0ca4e941cb9799a74786f1c8c4a41065d8'
+                executable = f'/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-{release}/venv/bin/hermes'
                 self.assertEqual(json.loads(result.stdout), [profile, '--hermes-executable', executable])
     def test_unsupported_profile(self):
         self.assertEqual(invoke(TARGET.read_text(), 'not-a-profile').returncode, 64)

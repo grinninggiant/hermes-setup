@@ -8,7 +8,7 @@ case "$profile" in
   *) print -u2 -- "Unsupported Hermes profile: $profile"; exit 64 ;;
 esac
 
-hermes_executable="/Users/mutlupolatcan/.local/bin/hermes"
+hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-def2cf0ca4e941cb9799a74786f1c8c4a41065d8/venv/bin/hermes"
 if [[ "$profile" == "general" ]]; then
   hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-c2144ba6f696981c02bbbc39b33eebca95a22634/venv/bin/hermes"
 fi
