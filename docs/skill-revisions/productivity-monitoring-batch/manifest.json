@@ -1,0 +1,220 @@
+{
+  "rows": [
+    {
+      "name": "meeting-action-items",
+      "profile": "assistant",
+      "baseline_sha256": "1902f782551da96ee1f9b34d6f13af627f06150a498d874b0cc2a75d06d35aa8",
+      "candidate_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "name": "weekly-review-planning",
+      "profile": "assistant",
+      "baseline_sha256": "a689257facb937cfca9bc5507dd9e729f287f0cd3f6abbf73448eb25f73fbaab",
+      "candidate_sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "name": "email-inbox-triage",
+      "profile": "assistant",
+      "baseline_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "candidate_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "profile": "assistant",
+      "baseline_sha256": "d8fd2a3a26ff45455709595132a092825a48f6c9dd3bcc98b06c1a43eaa7fcca",
+      "candidate_sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "name": "meeting-action-items",
+      "profile": "coder",
+      "baseline_sha256": "1902f782551da96ee1f9b34d6f13af627f06150a498d874b0cc2a75d06d35aa8",
+      "candidate_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "name": "weekly-review-planning",
+      "profile": "coder",
+      "baseline_sha256": "a689257facb937cfca9bc5507dd9e729f287f0cd3f6abbf73448eb25f73fbaab",
+      "candidate_sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "name": "email-inbox-triage",
+      "profile": "coder",
+      "baseline_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "candidate_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "profile": "coder",
+      "baseline_sha256": "d8fd2a3a26ff45455709595132a092825a48f6c9dd3bcc98b06c1a43eaa7fcca",
+      "candidate_sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "name": "meeting-action-items",
+      "profile": "finance",
+      "baseline_sha256": "1902f782551da96ee1f9b34d6f13af627f06150a498d874b0cc2a75d06d35aa8",
+      "candidate_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "name": "weekly-review-planning",
+      "profile": "finance",
+      "baseline_sha256": "a689257facb937cfca9bc5507dd9e729f287f0cd3f6abbf73448eb25f73fbaab",
+      "candidate_sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "name": "email-inbox-triage",
+      "profile": "finance",
+      "baseline_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "candidate_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "profile": "finance",
+      "baseline_sha256": "d8fd2a3a26ff45455709595132a092825a48f6c9dd3bcc98b06c1a43eaa7fcca",
+      "candidate_sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "name": "meeting-action-items",
+      "profile": "general",
+      "baseline_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d",
+      "candidate_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "name": "weekly-review-planning",
+      "profile": "general",
+      "baseline_sha256": "a689257facb937cfca9bc5507dd9e729f287f0cd3f6abbf73448eb25f73fbaab",
+      "candidate_sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "name": "email-inbox-triage",
+      "profile": "general",
+      "baseline_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "candidate_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "profile": "general",
+      "baseline_sha256": "5f462310b171415328faab7729d072d617af9325608df9b911e24fb51b3bbb91",
+      "candidate_sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "name": "meeting-action-items",
+      "profile": "health",
+      "baseline_sha256": "1902f782551da96ee1f9b34d6f13af627f06150a498d874b0cc2a75d06d35aa8",
+      "candidate_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "name": "weekly-review-planning",
+      "profile": "health",
+      "baseline_sha256": "a689257facb937cfca9bc5507dd9e729f287f0cd3f6abbf73448eb25f73fbaab",
+      "candidate_sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "name": "email-inbox-triage",
+      "profile": "health",
+      "baseline_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "candidate_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "profile": "health",
+      "baseline_sha256": "d8fd2a3a26ff45455709595132a092825a48f6c9dd3bcc98b06c1a43eaa7fcca",
+      "candidate_sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "name": "meeting-action-items",
+      "profile": "marketing",
+      "baseline_sha256": "1902f782551da96ee1f9b34d6f13af627f06150a498d874b0cc2a75d06d35aa8",
+      "candidate_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "name": "weekly-review-planning",
+      "profile": "marketing",
+      "baseline_sha256": "a689257facb937cfca9bc5507dd9e729f287f0cd3f6abbf73448eb25f73fbaab",
+      "candidate_sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "name": "email-inbox-triage",
+      "profile": "marketing",
+      "baseline_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "candidate_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "profile": "marketing",
+      "baseline_sha256": "d8fd2a3a26ff45455709595132a092825a48f6c9dd3bcc98b06c1a43eaa7fcca",
+      "candidate_sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "name": "meeting-action-items",
+      "profile": "producer",
+      "baseline_sha256": "1902f782551da96ee1f9b34d6f13af627f06150a498d874b0cc2a75d06d35aa8",
+      "candidate_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "name": "weekly-review-planning",
+      "profile": "producer",
+      "baseline_sha256": "a689257facb937cfca9bc5507dd9e729f287f0cd3f6abbf73448eb25f73fbaab",
+      "candidate_sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "name": "email-inbox-triage",
+      "profile": "producer",
+      "baseline_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "candidate_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "profile": "producer",
+      "baseline_sha256": "d8fd2a3a26ff45455709595132a092825a48f6c9dd3bcc98b06c1a43eaa7fcca",
+      "candidate_sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "name": "meeting-action-items",
+      "profile": "researcher",
+      "baseline_sha256": "1902f782551da96ee1f9b34d6f13af627f06150a498d874b0cc2a75d06d35aa8",
+      "candidate_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "name": "weekly-review-planning",
+      "profile": "researcher",
+      "baseline_sha256": "a689257facb937cfca9bc5507dd9e729f287f0cd3f6abbf73448eb25f73fbaab",
+      "candidate_sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "name": "email-inbox-triage",
+      "profile": "researcher",
+      "baseline_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "candidate_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "profile": "researcher",
+      "baseline_sha256": "d8fd2a3a26ff45455709595132a092825a48f6c9dd3bcc98b06c1a43eaa7fcca",
+      "candidate_sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    },
+    {
+      "name": "meeting-action-items",
+      "profile": "writer",
+      "baseline_sha256": "1902f782551da96ee1f9b34d6f13af627f06150a498d874b0cc2a75d06d35aa8",
+      "candidate_sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d"
+    },
+    {
+      "name": "weekly-review-planning",
+      "profile": "writer",
+      "baseline_sha256": "a689257facb937cfca9bc5507dd9e729f287f0cd3f6abbf73448eb25f73fbaab",
+      "candidate_sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666"
+    },
+    {
+      "name": "email-inbox-triage",
+      "profile": "writer",
+      "baseline_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "candidate_sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021"
+    },
+    {
+      "name": "competitor-news-monitor",
+      "profile": "writer",
+      "baseline_sha256": "d8fd2a3a26ff45455709595132a092825a48f6c9dd3bcc98b06c1a43eaa7fcca",
+      "candidate_sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d"
+    }
+  ]
+}

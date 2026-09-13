@@ -51,6 +51,82 @@
         "general"
       ],
       "rollout": "No implicit installation; other profiles require exact baseline and permitted rollout."
+    },
+    {
+      "name": "weekly-review-planning",
+      "path": "productivity/weekly-review-planning/SKILL.md",
+      "sha256": "7a505e5a999a3fba02fc5fc114af5ac9b0b79453cffe770231953365ce6dd666",
+      "license": "MIT",
+      "verified_profiles": [
+        "assistant",
+        "coder",
+        "finance",
+        "general",
+        "health",
+        "marketing",
+        "producer",
+        "researcher",
+        "writer"
+      ],
+      "verification_evidence": "verification/productivity-monitoring.json",
+      "rollout": "No implicit installation; controlled existing-profile rollout verified by fresh loader, not old session injection."
+    },
+    {
+      "name": "email-inbox-triage",
+      "path": "email/email-inbox-triage/SKILL.md",
+      "sha256": "cd57ccc9d563b5186012b41d6bbf52e96c2837c5b8e79d524e8e5e6a44af6021",
+      "license": "MIT",
+      "verified_profiles": [
+        "assistant",
+        "coder",
+        "finance",
+        "general",
+        "health",
+        "marketing",
+        "producer",
+        "researcher",
+        "writer"
+      ],
+      "verification_evidence": "verification/productivity-monitoring.json",
+      "rollout": "No implicit installation; controlled existing-profile rollout verified by fresh loader, not old session injection."
+    },
+    {
+      "name": "meeting-action-items",
+      "path": "productivity/meeting-action-items/SKILL.md",
+      "sha256": "c84a75cf6b4cf34507072f7421675308caa020ff679c175bbcc23984aff7041d",
+      "license": "MIT",
+      "verified_profiles": [
+        "assistant",
+        "coder",
+        "finance",
+        "general",
+        "health",
+        "marketing",
+        "producer",
+        "researcher",
+        "writer"
+      ],
+      "verification_evidence": "verification/productivity-monitoring.json",
+      "rollout": "No implicit installation; controlled existing-profile rollout verified by fresh loader, not old session injection."
+    },
+    {
+      "name": "competitor-news-monitor",
+      "path": "research/competitor-news-monitor/SKILL.md",
+      "sha256": "64d074286a578e64cb64d7967e00a5235fb832ec1ffc594069f06b755b909a8d",
+      "license": "MIT",
+      "verified_profiles": [
+        "assistant",
+        "coder",
+        "finance",
+        "general",
+        "health",
+        "marketing",
+        "producer",
+        "researcher",
+        "writer"
+      ],
+      "verification_evidence": "verification/productivity-monitoring.json",
+      "rollout": "No implicit installation; controlled existing-profile rollout verified by fresh loader, not old session injection."
     }
   ]
 }

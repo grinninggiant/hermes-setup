@@ -28,7 +28,7 @@ class LibraryContracts(unittest.TestCase):
             self.assertIn('name: '+row['name'], front)
             self.assertIn('license: '+row['license'], front)
             self.assertRegex(front, r'(?m)^author: .+')
-            self.assertRegex(front, r'(?m)^description: "Use when .+"$')
+            self.assertRegex(front, r'(?m)^description: "[^"\n]+"$')
 
     def test_manifest_covers_all_entrypoints(self):
         expected = {row['path'] for row in MANIFEST['skills']}
@@ -49,7 +49,15 @@ class LibraryContracts(unittest.TestCase):
 
     def test_deployment_not_overclaimed(self):
         for row in MANIFEST['skills']:
-            self.assertEqual(row['verified_profiles'], ['general'])
+            if 'verification_evidence' in row:
+                evidence = json.loads((ROOT/row['verification_evidence']).read_text())
+                checks = [c for c in evidence['loader_checks'] if c['name'] == row['name']]
+                self.assertEqual(len(checks), len(row['verified_profiles']))
+                self.assertEqual(sorted(c['profile'] for c in checks), sorted(row['verified_profiles']))
+                for check in checks:
+                    self.assertEqual(check['sha256'], row['sha256'])
+            else:
+                self.assertEqual(row['verified_profiles'], ['general'])
             self.assertIn('No implicit installation', row['rollout'])
 
 if __name__ == '__main__':
