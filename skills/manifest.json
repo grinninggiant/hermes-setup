@@ -233,6 +233,16 @@
       ],
       "verification_evidence": "verification/retired-pointer-parity.json",
       "rollout": "No implicit installation; exact source/general and other-profile loader hashes verified; model behavior acceptance open."
+    },
+    {
+      "name": "github-pr-workflow",
+      "path": "github/github-pr-workflow/SKILL.md",
+      "sha256": "e265ec7b871b978d0fa3f574e565dccbd3a76f1e08ab592441985483042dbc20",
+      "license": "MIT",
+      "verified_profiles": [
+        "general"
+      ],
+      "rollout": "No implicit installation; source matches existing general package bytes only. Serving runtime/model acceptance and other-profile rollout remain open."
     }
   ]
 }
