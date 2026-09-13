@@ -1,0 +1,34 @@
+{
+  "issue": "OPS-239",
+  "scope": "general only; content-preserving reorganization of existing skill",
+  "original_sha256": "d752ffa2993cb64edee12b5be89030e007aaebffc5bdd0032466ef7a57dd1c8c",
+  "frontmatter": "---\nname: github-pr-workflow\ndescription: \"GitHub PR lifecycle: branch, commit, open, CI, merge.\"\nversion: 1.1.0\nauthor: Hermes Agent\nlicense: MIT\nplatforms: [linux, macos, windows]\nmetadata:\n  hermes:\n    tags: [GitHub, Pull-Requests, CI/CD, Git, Automation, Merge]\n    related_skills: [github-auth, github-code-review]\n---\n",
+  "references_in_order": [
+    "references/workflow-overview.md",
+    "references/workflow-prerequisites.md",
+    "references/workflow-branch.md",
+    "references/workflow-commit.md",
+    "references/workflow-open-pr.md",
+    "references/workflow-ci-status.md",
+    "references/workflow-ci-repair.md",
+    "references/workflow-merge.md",
+    "references/workflow-example.md",
+    "references/workflow-commands.md"
+  ],
+  "files_sha256": {
+    "SKILL.md": "8365aa507db9f812b65379aead326ca8b8a336ad8522b1354aa24570cfdd4f2c",
+    "references/workflow-overview.md": "62f16a57ff246dc16d640c9e3c3e3b44bb4e26209987d49fec917f999b341e33",
+    "references/workflow-prerequisites.md": "938b8ba9063bf8501d12c57479fa3d46ed498270096ea209084e561d6abf424a",
+    "references/workflow-branch.md": "edb6b0379addfc73b844cb0ccdd9996da3131a365174254eaac3978a68a28bb6",
+    "references/workflow-commit.md": "c7f2d13b0c6393ef5e72455a2ef3206f63b5f34a455046a6145727d4e639b243",
+    "references/workflow-open-pr.md": "d2ec945cc78cc61857d7927a0a94ad1e65ff8056975da2671786ae76732e0258",
+    "references/workflow-ci-status.md": "874a3a0deebdc688f6ab702dca1cd3d5ff4fd3502575c8e780c3e0ad538233a4",
+    "references/workflow-ci-repair.md": "1779d4603187a808888d20c08f2d0239ddd30aa4969015d8d3016d6f1a7a6010",
+    "references/workflow-merge.md": "b47e2bddb06bc3b5173c6b4506c861da27e1ee872c3dbbefeee64ddbaadd688b",
+    "references/workflow-example.md": "9e464962802c2de41d4c1957e063ad65ec413a42aac781d95d1901ac2185d5a8",
+    "references/workflow-commands.md": "937911a5f6e5cff1ff887ca58997ff54ac65ea79d532d6c6f8df3e51e53df954"
+  },
+  "original_bytes": 10034,
+  "router_bytes": 2458,
+  "acceptance": "OPEN"
+}
