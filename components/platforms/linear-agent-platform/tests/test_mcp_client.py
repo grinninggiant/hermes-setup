@@ -664,8 +664,12 @@ class LinearMCPClientTests(unittest.IsolatedAsyncioTestCase):
                 await self.asyncTearDown()
                 await self.asyncSetUp()
 
-    def test_vendor_tool_contract_tracks_2026_09_09_live_set(self):
-        self.assertEqual(len(EXPECTED_VENDOR_TOOL_NAMES), 65)
+    def test_vendor_tool_contract_tracks_update_diff_without_execution_grant(self):
+        from mcp_client import EXECUTABLE_VENDOR_TOOLS, MUTATION_VENDOR_TOOLS
+        self.assertIn("update_diff", EXPECTED_VENDOR_TOOL_NAMES)
+        self.assertNotIn("update_diff", EXECUTABLE_VENDOR_TOOLS)
+        self.assertNotIn("update_diff", MUTATION_VENDOR_TOOLS)
+        self.assertEqual(len(EXPECTED_VENDOR_TOOL_NAMES), 66)
         self.assertIn("get_template", EXPECTED_VENDOR_TOOL_NAMES)
         self.assertIn("list_templates", EXPECTED_VENDOR_TOOL_NAMES)
         self.assertIn("template", LIVE_TOOL_PROPERTY_FIELDS["save_issue"])
