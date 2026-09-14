@@ -51,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
             "/Users/mutlupolatcan/.hermes/runtime",
             "/Users/mutlupolatcan/.hermes/backups",
         ],
+        allowed_artifact_files=[
+            "/Users/mutlupolatcan/.hermes/scripts/hermes-gateway-keychain.sh",
+        ],
     )
 
     if args.command == "request":

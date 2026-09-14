@@ -290,9 +290,13 @@ def _validated_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class CoordinatorStore:
-    def __init__(self, path: str | Path, allowed_artifact_roots: list[str | Path] | None = None):
+    def __init__(self, path: str | Path, allowed_artifact_roots: list[str | Path] | None = None,
+                 allowed_artifact_files: list[str | Path] | None = None):
         self.path = Path(path)
         self.allowed_artifact_roots = tuple(Path(root).resolve() for root in allowed_artifact_roots or ())
+        # Exact file grants never authorize siblings or descendants. Do not
+        # resolve symlinks here: enqueue must reject aliases to the grant.
+        self.allowed_artifact_files = frozenset(Path(os.path.abspath(file)) for file in allowed_artifact_files or ())
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.path.parent, 0o700)
         self._initialize()
@@ -363,16 +367,19 @@ class CoordinatorStore:
         if requester not in ALLOWED_REQUESTERS:
             raise RequestError("requester_not_allowed")
         clean = _validated_payload(payload)
-        if self.allowed_artifact_roots and clean.get("operation") != "restart_current":
+        if (self.allowed_artifact_roots or self.allowed_artifact_files) and clean.get("operation") != "restart_current":
             for prefix in ("artifact", "rollback"):
                 supplied = Path(clean[f"{prefix}_path"])
                 lexical = Path(os.path.abspath(supplied))
                 resolved = supplied.resolve(strict=True)
                 if lexical != resolved:
                     raise RequestError(f"{prefix}_path_contains_symlink")
-                if not any(resolved.is_relative_to(root) for root in self.allowed_artifact_roots):
+                exact_file = resolved in self.allowed_artifact_files
+                if not exact_file and not any(resolved.is_relative_to(root) for root in self.allowed_artifact_roots):
                     raise RequestError(f"{prefix}_path_outside_allowed_roots")
                 metadata = resolved.stat()
+                if exact_file and (not resolved.is_file() or metadata.st_nlink != 1):
+                    raise RequestError(f"{prefix}_not_unique_regular_file")
                 if metadata.st_mode & 0o222:
                     raise RequestError(f"{prefix}_not_immutable")
                 clean[f"{prefix}_path"] = str(resolved)
