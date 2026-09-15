@@ -373,7 +373,11 @@ class RegistrationTests(unittest.TestCase):
             )
         self.assertEqual(
             result,
-            {"error": "linear_tool_failed", "reason": "OutboundLedgerError"},
+            {
+                "error": "linear_tool_failed", "reason": "OutboundLedgerError",
+                "diagnostic": {"version": 1, "code": "unknown", "stage": "execution",
+                               "tool": None, "http_status": None},
+            },
         )
         mcp.call_tool.assert_not_called()
 
@@ -3487,7 +3491,11 @@ payload
             graphql_client=FakeGraphQL(),
             mcp_client=mcp,
         )
-        self.assertEqual(first, {"error": "linear_mutation_outcome_unknown", "reason": "vendor_is_error"})
+        self.assertEqual(first, {
+            "error": "linear_mutation_outcome_unknown", "reason": "vendor_is_error",
+            "diagnostic": {"version": 1, "code": "unknown", "stage": "vendor_operation",
+                           "tool": None, "http_status": None},
+        })
         self.assertEqual(
             second,
             {"status": "outcome_unknown", "replayed": True, "result_id": None, "error_code": "vendor_is_error"},
