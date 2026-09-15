@@ -416,6 +416,22 @@ The read-only fleet audit must report five dimensions separately: allowlisted so
 
 ## Official Linear MCP outbound tools
 
+MCP failures add a payload-free `diagnostic` object without replacing the existing
+`error` or `reason` fields. Version 1 contains only `version`, allowlisted `code`
+and `stage`, an executable vendor `tool` (or null), and an integer `http_status`
+from 100–599 (or null). Codes are assigned at the local failure boundary, never
+inferred from exception text or vendor error metadata. Stages distinguish MCP
+connect, catalog validation, identity `get_user`, and the actual vendor operation;
+wrapper-only failures use `graphql_connect` or `execution`. Unknown exceptions
+remain `code: unknown`. Reconnection failures keep their connect/catalog stage
+rather than being attributed to the requested tool.
+
+Diagnostics never include messages, causes, arguments, bodies, headers, tokens,
+session IDs, or arbitrary provider metadata. Existing legacy `reason` rendering
+is unchanged; consumers should use `diagnostic` for safe structured triage.
+This is instrumentation only: catalog recognition, execution authorization,
+OAuth custody, retries, cancellation and ambiguous-mutation fences are unchanged.
+
 Outbound tools are independently gated from the inbound webhook adapter. With `outbound_mcp.enabled: false`, plugin 0.6.0 registers no Linear model tools and preserves the 0.5.0 runtime behavior. With `enabled: true` and `mutations_enabled: false`, only `linear_get_issue` and `linear_list_issues` are exposed. Mutation tools require both literal `mutations_enabled: true` and an explicit profile-local `allowed_mutation_tools` list. Derya/general may receive `linear_save_issue` plus `linear_save_comment` for coordination; specialist profiles may receive only `linear_save_comment`. A missing, empty, malformed, or unknown allowlist leaves the profile read-only. This gate is independent of the profile-global Hermes approval mode so ordinary terminal, cron, recovery, and coordination workflows are not forced into manual approval.
 
 This source patch alone authorizes no live profile. Profile config rollout, plugin promotion, and gateway restart are separate operator-approval gates. The reviewed target shapes are:

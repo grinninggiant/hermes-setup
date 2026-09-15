@@ -215,8 +215,53 @@ class OAuthTokenProvider(Protocol):
     ) -> str: ...
 
 
+DIAGNOSTIC_CODES = frozenset({
+    "unknown", "connect_contract", "catalog_contract", "http_status",
+    "http_timeout", "http_transport", "auth_refresh", "jsonrpc_error",
+    "jsonrpc_contract", "response_contract", "vendor_error", "vendor_contract",
+    "session_lost", "cancelled", "tool_contract",
+})
+DIAGNOSTIC_STAGES = frozenset({
+    "unknown", "connect", "catalog_validation", "identity", "vendor_operation",
+    "graphql_connect", "execution",
+})
+
+
+def _diagnostic_value(value: Any, allowed: frozenset[str], default: Any) -> Any:
+    # Exact builtins only: no coercion, arbitrary __str__, or metadata passthrough.
+    return value if type(value) is str and value in allowed else default
+
+
 class LinearMCPError(RuntimeError):
-    pass
+    """Legacy exception plus an independently allowlisted, payload-free diagnostic."""
+
+    def __init__(self, *args: Any, code: str = "unknown", stage: str = "unknown",
+                 tool: str | None = None, http_status: int | None = None) -> None:
+        super().__init__(*args)
+        self.code = code
+        self.stage = stage
+        self.tool = tool
+        self.http_status = http_status
+
+    def diagnostic(self, *, stage: str = "unknown") -> dict[str, Any]:
+        return {
+            "version": 1,
+            "code": _diagnostic_value(self.code, DIAGNOSTIC_CODES, "unknown"),
+            "stage": _diagnostic_value(
+                self.stage, DIAGNOSTIC_STAGES - {"unknown"},
+                _diagnostic_value(stage, DIAGNOSTIC_STAGES, "unknown"),
+            ),
+            "tool": _diagnostic_value(self.tool, EXECUTABLE_VENDOR_TOOLS, None),
+            "http_status": self.http_status if (
+                type(self.http_status) is int and 100 <= self.http_status <= 599
+            ) else None,
+        }
+
+
+def safe_mcp_diagnostic(exc: Exception, *, stage: str = "unknown") -> dict[str, Any]:
+    # Do not inspect exception messages, causes, args, or provider metadata.
+    error = exc if isinstance(exc, LinearMCPError) else LinearMCPError()
+    return LinearMCPError.diagnostic(error, stage=stage)
 
 
 class LinearMCPToolError(LinearMCPError):
@@ -246,7 +291,7 @@ class LinearMCPClient:
         allow_test_endpoint: bool = False,
     ) -> None:
         if not allow_test_endpoint and endpoint != OFFICIAL_LINEAR_MCP_ENDPOINT:
-            raise LinearMCPError("Linear MCP bearer transport requires the exact official endpoint")
+            raise LinearMCPError("Linear MCP bearer transport requires the exact official endpoint", code="connect_contract", stage="connect")
         self.oauth_store = oauth_store
         self.endpoint = endpoint
         self.timeout_seconds = float(timeout_seconds)
@@ -277,7 +322,9 @@ class LinearMCPClient:
         self._invalidate_negotiated_state()
         try:
             await self._connect_impl()
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, LinearMCPError) and exc.stage == "unknown":
+                exc.stage = "connect"
             try:
                 await self._close_unlocked()
             except BaseException:
@@ -298,22 +345,22 @@ class LinearMCPClient:
         )
         negotiated = str(initialize.get("protocolVersion") or "")
         if negotiated not in SUPPORTED_PROTOCOL_VERSIONS:
-            raise LinearMCPError("Linear MCP negotiated an unsupported protocol version")
+            raise LinearMCPError("Linear MCP negotiated an unsupported protocol version", code="connect_contract", stage="connect")
         self._provisional_protocol_version = negotiated
         capabilities = initialize.get("capabilities")
         tools_capability = capabilities.get("tools") if isinstance(capabilities, dict) else None
         if not isinstance(tools_capability, dict):
-            raise LinearMCPError("Linear MCP initialize omitted a valid tools capability")
+            raise LinearMCPError("Linear MCP initialize omitted a valid tools capability", code="connect_contract", stage="connect")
         if "listChanged" in tools_capability and not isinstance(
             tools_capability["listChanged"], bool
         ):
-            raise LinearMCPError("Linear MCP initialize returned an invalid tools capability")
+            raise LinearMCPError("Linear MCP initialize returned an invalid tools capability", code="connect_contract", stage="connect")
         server_info = initialize.get("serverInfo")
         if not isinstance(server_info, dict) or any(
             not isinstance(server_info.get(field), str)
             for field in ("name", "version")
         ):
-            raise LinearMCPError("Linear MCP initialize returned invalid server info")
+            raise LinearMCPError("Linear MCP initialize returned invalid server info", code="connect_contract", stage="connect")
         self._provisional_session_id = response_session_id
         await self._send_notification("notifications/initialized", {})
         tools: list[dict[str, Any]] = []
@@ -321,49 +368,53 @@ class LinearMCPClient:
         cursor: str | None = None
         seen_cursors: set[str] = set()
         for _page in range(MAX_TOOL_LIST_PAGES):
-            listed, _response_session_id = await self._send_rpc(
-                "tools/list", {"cursor": cursor} if cursor else {}
-            )
+            try:
+                listed, _response_session_id = await self._send_rpc(
+                    "tools/list", {"cursor": cursor} if cursor else {}
+                )
+            except LinearMCPError as exc:
+                exc.stage = "catalog_validation"
+                raise
             page_tools = listed.get("tools")
             if not isinstance(page_tools, list) or len(page_tools) > MAX_TOOLS_PER_PAGE:
-                raise LinearMCPError("Linear MCP tools/list returned an invalid contract")
+                raise LinearMCPError("Linear MCP tools/list returned an invalid contract", code="catalog_contract", stage="catalog_validation")
             for tool in page_tools:
                 if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
-                    raise LinearMCPError("Linear MCP tools/list returned an invalid tool")
+                    raise LinearMCPError("Linear MCP tools/list returned an invalid tool", code="catalog_contract", stage="catalog_validation")
                 tool_name = tool["name"]
                 if not tool_name or len(tool_name) > 128 or tool_name in tool_names:
-                    raise LinearMCPError("Linear MCP tools/list returned a duplicate or invalid tool")
+                    raise LinearMCPError("Linear MCP tools/list returned a duplicate or invalid tool", code="catalog_contract", stage="catalog_validation")
                 tool_names.add(tool_name)
                 tools.append(tool)
                 if len(tools) > MAX_TOTAL_TOOLS:
-                    raise LinearMCPError("Linear MCP tools/list exceeded the total tool limit")
+                    raise LinearMCPError("Linear MCP tools/list exceeded the total tool limit", code="catalog_contract", stage="catalog_validation")
             next_cursor = listed.get("nextCursor")
             if next_cursor in (None, ""):
                 break
             if not isinstance(next_cursor, str) or len(next_cursor) > MAX_CURSOR_LENGTH:
-                raise LinearMCPError("Linear MCP tools/list returned an invalid cursor")
+                raise LinearMCPError("Linear MCP tools/list returned an invalid cursor", code="catalog_contract", stage="catalog_validation")
             cursor = next_cursor
             if cursor in seen_cursors:
-                raise LinearMCPError("Linear MCP tools/list cursor repeated")
+                raise LinearMCPError("Linear MCP tools/list cursor repeated", code="catalog_contract", stage="catalog_validation")
             seen_cursors.add(cursor)
         else:
-            raise LinearMCPError("Linear MCP tools/list exceeded the page limit")
+            raise LinearMCPError("Linear MCP tools/list exceeded the page limit", code="catalog_contract", stage="catalog_validation")
         if tool_names != EXPECTED_VENDOR_TOOL_NAMES:
-            raise LinearMCPError("Linear MCP vendor tool-name contract drifted")
+            raise LinearMCPError("Linear MCP vendor tool-name contract drifted", code="catalog_contract", stage="catalog_validation")
         validated_tool_schemas = {tool["name"]: tool for tool in tools}
         missing = sorted(self.required_tools - set(validated_tool_schemas))
         if missing:
-            raise LinearMCPError(f"Linear MCP missing required tools: {', '.join(missing)}")
+            raise LinearMCPError(f"Linear MCP missing required tools: {', '.join(missing)}", code="catalog_contract", stage="catalog_validation")
         for tool_name, tool in validated_tool_schemas.items():
             schema = tool.get("inputSchema")
             if not isinstance(schema, dict):
-                raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}")
+                raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}", code="catalog_contract", stage="catalog_validation")
             if tool_name == "get_workspace":
                 if schema != WORKSPACE_TOOL_INPUT_SCHEMA:
-                    raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}")
+                    raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}", code="catalog_contract", stage="catalog_validation")
                 continue
             if schema.get("$schema") != OFFICIAL_LINEAR_INPUT_SCHEMA_URI:
-                raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}")
+                raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}", code="catalog_contract", stage="catalog_validation")
         for tool_name, required_fields in REQUIRED_TOOL_INPUT_FIELDS.items():
             schema = validated_tool_schemas[tool_name].get("inputSchema")
             properties = schema.get("properties") if isinstance(schema, dict) else None
@@ -385,13 +436,13 @@ class LinearMCPClient:
                 or not isinstance(properties, dict)
                 or set(properties) != LIVE_TOOL_PROPERTY_FIELDS[tool_name]
             ):
-                raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}")
+                raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}", code="catalog_contract", stage="catalog_validation")
             for field in required_fields:
                 property_schema = properties[field]
                 if _schema_without_descriptions(property_schema) != _expected_forwarded_contract(
                     tool_name, field
                 ):
-                    raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}.{field}")
+                    raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}.{field}", code="catalog_contract", stage="catalog_validation")
             if pinned_required:
                 required_by_vendor = schema.get("required")
                 if (
@@ -400,7 +451,7 @@ class LinearMCPClient:
                     or set(required_by_vendor) != pinned_required
                     or len(required_by_vendor) != len(pinned_required)
                 ):
-                    raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}.required")
+                    raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}.required", code="catalog_contract", stage="catalog_validation")
         self.session_id = self._provisional_session_id
         self.protocol_version = negotiated
         self.tool_schemas = validated_tool_schemas
@@ -491,7 +542,7 @@ class LinearMCPClient:
 
     async def _send_notification(self, method: str, params: dict[str, Any]) -> None:
         if self._session is None:
-            raise LinearMCPError("Linear MCP client is not connected")
+            raise LinearMCPError("Linear MCP client is not connected", code="connect_contract", stage="connect")
         payload = {"jsonrpc": "2.0", "method": method, "params": params}
         token = await self.oauth_store.access_token()
         try:
@@ -513,12 +564,12 @@ class LinearMCPClient:
                         allow_redirects=False,
                     ) as retried:
                         if retried.status < 200 or retried.status >= 300:
-                            raise LinearMCPError("Linear MCP notification was rejected")
+                            raise LinearMCPError("Linear MCP notification was rejected", code="http_status", http_status=retried.status)
                     return
                 if response.status < 200 or response.status >= 300:
-                    raise LinearMCPError("Linear MCP notification was rejected")
+                    raise LinearMCPError("Linear MCP notification was rejected", code="http_status", http_status=response.status)
         except asyncio.TimeoutError as exc:
-            raise LinearMCPError("Linear MCP notification timed out") from exc
+            raise LinearMCPError("Linear MCP notification timed out", code="http_timeout") from exc
 
     async def _send_rpc(
         self,
@@ -546,17 +597,17 @@ class LinearMCPClient:
             or has_result == has_error
         ):
             if mutation:
-                raise MCPOutcomeUnknown("Linear mutation JSON-RPC envelope was invalid; outcome is unknown")
-            raise LinearMCPError("Linear MCP returned an invalid JSON-RPC envelope")
+                raise MCPOutcomeUnknown("Linear mutation JSON-RPC envelope was invalid; outcome is unknown", code="jsonrpc_contract")
+            raise LinearMCPError("Linear MCP returned an invalid JSON-RPC envelope", code="jsonrpc_contract")
         if has_error:
             if mutation:
-                raise MCPOutcomeUnknown("Linear mutation returned a JSON-RPC error; outcome is unknown")
-            raise LinearMCPError("Linear MCP returned a JSON-RPC error")
+                raise MCPOutcomeUnknown("Linear mutation returned a JSON-RPC error; outcome is unknown", code="jsonrpc_error")
+            raise LinearMCPError("Linear MCP returned a JSON-RPC error", code="jsonrpc_error")
         result = envelope["result"]
         if not isinstance(result, dict):
             if mutation:
-                raise MCPOutcomeUnknown("Linear mutation result was invalid; outcome is unknown")
-            raise LinearMCPError("Linear MCP result was not an object")
+                raise MCPOutcomeUnknown("Linear mutation result was invalid; outcome is unknown", code="jsonrpc_contract")
+            raise LinearMCPError("Linear MCP result was not an object", code="jsonrpc_contract")
         return result, response_session_id
 
     @staticmethod
@@ -609,9 +660,9 @@ class LinearMCPClient:
         if not valid_content_type:
             if mutation:
                 raise MCPOutcomeUnknown(
-                    "Linear mutation response had an invalid content type; outcome is unknown"
+                    "Linear mutation response had an invalid content type; outcome is unknown", code="response_contract"
                 )
-            raise LinearMCPError("Linear MCP response had an invalid content type")
+            raise LinearMCPError("Linear MCP response had an invalid content type", code="response_contract")
         try:
             raw = await LinearMCPClient._read_bounded_response(response)
             text = raw.decode("utf-8")
@@ -651,8 +702,8 @@ class LinearMCPClient:
             aiohttp.ContentTypeError,
         ) as exc:
             if mutation:
-                raise MCPOutcomeUnknown("Linear mutation response was invalid; outcome is unknown") from exc
-            raise LinearMCPError("Linear MCP response was not valid bounded JSON-RPC") from exc
+                raise MCPOutcomeUnknown("Linear mutation response was invalid; outcome is unknown", code="response_contract") from exc
+            raise LinearMCPError("Linear MCP response was not valid bounded JSON-RPC", code="response_contract") from exc
 
     async def _post(
         self,
@@ -666,7 +717,7 @@ class LinearMCPClient:
         allow_session_recovery: bool = True,
     ) -> tuple[dict[str, Any], str | None]:
         if self._session is None:
-            raise LinearMCPError("Linear MCP client is not connected")
+            raise LinearMCPError("Linear MCP client is not connected", code="connect_contract", stage="connect")
         refresh_available = allow_refresh
         read_retry_available = allow_read_retry
         dispatched = False
@@ -691,20 +742,20 @@ class LinearMCPClient:
                         except asyncio.CancelledError as exc:
                             if mutation:
                                 raise MCPOutcomeUnknown(
-                                    "Linear mutation authentication refresh was cancelled; outcome is unknown"
+                                    "Linear mutation authentication refresh was cancelled; outcome is unknown", code="auth_refresh", http_status=401
                                 ) from exc
                             raise
                         except Exception as exc:
                             if mutation:
                                 raise MCPOutcomeUnknown(
-                                    "Linear mutation authentication refresh failed; outcome is unknown"
+                                    "Linear mutation authentication refresh failed; outcome is unknown", code="auth_refresh", http_status=401
                                 ) from exc
                             raise LinearMCPError(
-                                "Linear MCP authentication refresh failed"
+                                "Linear MCP authentication refresh failed", code="auth_refresh", http_status=401
                             ) from exc
                         if mutation:
                             raise MCPOutcomeUnknown(
-                                "Linear mutation authentication changed; mutation was not retried and outcome is unknown"
+                                "Linear mutation authentication changed; mutation was not retried and outcome is unknown", code="auth_refresh", http_status=401
                             )
                         refresh_available = False
                         retry_after_refresh = True
@@ -715,13 +766,13 @@ class LinearMCPClient:
                     ):
                         if mutation:
                             raise _MCPMutationSessionLost(
-                                "Linear mutation session was lost; outcome is unknown"
+                                "Linear mutation session was lost; outcome is unknown", code="session_lost", http_status=404
                             )
-                        raise _MCPSessionLost("Linear MCP HTTP 404: session was lost")
+                        raise _MCPSessionLost("Linear MCP HTTP 404: session was lost", code="http_status", http_status=response.status)
                     elif response.status == 429 or response.status >= 500:
                         if mutation:
                             raise MCPOutcomeUnknown(
-                                f"Linear mutation HTTP {response.status}; outcome is unknown"
+                                f"Linear mutation HTTP {response.status}; outcome is unknown", code="http_status", http_status=response.status
                             )
                         if read_retry_available:
                             retry_after = response.headers.get("Retry-After")
@@ -731,13 +782,13 @@ class LinearMCPClient:
                                 retry_delay = 0.2
                             read_retry_available = False
                         else:
-                            raise LinearMCPError("Linear MCP read failed after retry")
+                            raise LinearMCPError("Linear MCP read failed after retry", code="http_status", http_status=response.status)
                     elif response.status < 200 or response.status >= 300:
                         if mutation:
                             raise MCPOutcomeUnknown(
-                                f"Linear mutation HTTP {response.status}; outcome is unknown"
+                                f"Linear mutation HTTP {response.status}; outcome is unknown", code="http_status", http_status=response.status
                             )
-                        raise LinearMCPError(f"Linear MCP HTTP {response.status}")
+                        raise LinearMCPError(f"Linear MCP HTTP {response.status}", code="http_status", http_status=response.status)
                     else:
                         response_session_headers = response.headers.getall(
                             "Mcp-Session-Id", []
@@ -753,18 +804,18 @@ class LinearMCPClient:
                             except ValueError as exc:
                                 if mutation:
                                     raise MCPOutcomeUnknown(
-                                        "Linear mutation returned an invalid session id; outcome is unknown"
+                                        "Linear mutation returned an invalid session id; outcome is unknown", code="response_contract"
                                     ) from exc
                                 raise LinearMCPError(
-                                    "Linear MCP returned an invalid session id"
+                                    "Linear MCP returned an invalid session id", code="response_contract"
                                 ) from exc
                             if not accept_session_id:
                                 if mutation:
                                     raise MCPOutcomeUnknown(
-                                        "Linear mutation returned an unexpected session id; outcome is unknown"
+                                        "Linear mutation returned an unexpected session id; outcome is unknown", code="response_contract"
                                     )
                                 raise LinearMCPError(
-                                    "Linear MCP returned an unexpected session id"
+                                    "Linear MCP returned an unexpected session id", code="response_contract"
                                 )
                             response_session_id = validated_session_id
                             self._provisional_session_id = validated_session_id
@@ -784,17 +835,17 @@ class LinearMCPClient:
         except asyncio.CancelledError as exc:
             if mutation and dispatched:
                 raise MCPOutcomeUnknown(
-                    "Linear mutation was cancelled after dispatch; outcome is unknown"
+                    "Linear mutation was cancelled after dispatch; outcome is unknown", code="cancelled"
                 ) from exc
             raise
         except asyncio.TimeoutError as exc:
             if mutation:
-                raise MCPOutcomeUnknown("Linear mutation timed out; outcome is unknown") from exc
-            raise LinearMCPError("Linear MCP read timed out") from exc
+                raise MCPOutcomeUnknown("Linear mutation timed out; outcome is unknown", code="http_timeout") from exc
+            raise LinearMCPError("Linear MCP read timed out", code="http_timeout") from exc
         except aiohttp.ClientError as exc:
             if mutation:
-                raise MCPOutcomeUnknown("Linear mutation transport failed; outcome is unknown") from exc
-            raise LinearMCPError("Linear MCP transport failed") from exc
+                raise MCPOutcomeUnknown("Linear mutation transport failed; outcome is unknown", code="http_transport") from exc
+            raise LinearMCPError("Linear MCP transport failed", code="http_transport") from exc
 
     async def call_tool(
         self,
@@ -804,7 +855,13 @@ class LinearMCPClient:
         mutation: bool = False,
     ) -> dict[str, Any]:
         async with self._state_lock:
-            return await self._call_tool_unlocked(name, arguments, mutation=mutation)
+            try:
+                return await self._call_tool_unlocked(name, arguments, mutation=mutation)
+            except LinearMCPError as exc:
+                if exc.stage == "unknown":
+                    exc.stage = "identity" if name == "get_user" else "vendor_operation"
+                    exc.tool = _diagnostic_value(name, EXECUTABLE_VENDOR_TOOLS, None)
+                raise
 
     async def _discard_ambiguous_session_unlocked(self) -> None:
         try:
@@ -820,12 +877,12 @@ class LinearMCPClient:
         mutation: bool = False,
     ) -> dict[str, Any]:
         if name not in EXECUTABLE_VENDOR_TOOLS:
-            raise LinearMCPError(f"Linear MCP tool is not authorized for execution: {name}")
+            raise LinearMCPError(f"Linear MCP tool is not authorized for execution: {name}", code="tool_contract")
         if name not in self.tool_schemas:
-            raise LinearMCPError(f"Linear MCP tool is not in the negotiated contract: {name}")
+            raise LinearMCPError(f"Linear MCP tool is not in the negotiated contract: {name}", code="tool_contract")
         derived_mutation = name in MUTATION_VENDOR_TOOLS
         if mutation and not derived_mutation:
-            raise LinearMCPError(f"Linear MCP read tool cannot be classified as mutation: {name}")
+            raise LinearMCPError(f"Linear MCP read tool cannot be classified as mutation: {name}", code="tool_contract")
         call_params = {"name": name, "arguments": arguments}
         try:
             result, _response_session_id = await self._send_rpc(
@@ -856,9 +913,9 @@ class LinearMCPClient:
                 except BaseException:
                     pass
                 raise MCPOutcomeUnknown(
-                    f"Linear MCP tool {name} returned an invalid isError value; outcome is unknown"
+                    f"Linear MCP tool {name} returned an invalid isError value; outcome is unknown", code="vendor_contract"
                 )
-            raise LinearMCPError(f"Linear MCP tool {name} returned an invalid isError value")
+            raise LinearMCPError(f"Linear MCP tool {name} returned an invalid isError value", code="vendor_contract")
         if is_error:
             if derived_mutation:
                 try:
@@ -866,9 +923,9 @@ class LinearMCPClient:
                 except BaseException:
                     pass
                 raise MCPOutcomeUnknown(
-                    f"Linear MCP tool {name} reported an error; outcome is unknown"
+                    f"Linear MCP tool {name} reported an error; outcome is unknown", code="vendor_error"
                 )
-            raise LinearMCPToolError(f"Linear MCP tool {name} reported an error")
+            raise LinearMCPToolError(f"Linear MCP tool {name} reported an error", code="vendor_error")
         content = result.get("content")
         valid_content = (
             isinstance(content, list)
@@ -885,9 +942,9 @@ class LinearMCPClient:
             if derived_mutation:
                 await self._discard_ambiguous_session_unlocked()
                 raise MCPOutcomeUnknown(
-                    f"Linear MCP tool {name} returned an invalid result contract; outcome is unknown"
+                    f"Linear MCP tool {name} returned an invalid result contract; outcome is unknown", code="vendor_contract"
                 )
-            raise LinearMCPError(f"Linear MCP tool {name} returned an invalid result contract")
+            raise LinearMCPError(f"Linear MCP tool {name} returned an invalid result contract", code="vendor_contract")
         assert isinstance(content, list)
         if derived_mutation:
             try:
@@ -897,6 +954,6 @@ class LinearMCPClient:
             if not isinstance(parsed, dict) or not isinstance(parsed.get("id"), str) or not parsed["id"]:
                 await self._discard_ambiguous_session_unlocked()
                 raise MCPOutcomeUnknown(
-                    f"Linear MCP tool {name} returned no authoritative result id; outcome is unknown"
+                    f"Linear MCP tool {name} returned no authoritative result id; outcome is unknown", code="vendor_contract"
                 )
         return result

@@ -34,6 +34,7 @@ try:
         LinearMCPError,
         LinearMCPToolError,
         MCPOutcomeUnknown,
+        safe_mcp_diagnostic,
     )
     from .oauth_store import LinearOAuthStore
     from .ledger import DeliveryLedger
@@ -58,6 +59,7 @@ except ImportError:  # Direct module loading in standalone tests/scripts.
         LinearMCPError,
         LinearMCPToolError,
         MCPOutcomeUnknown,
+        safe_mcp_diagnostic,
     )
     from oauth_store import LinearOAuthStore
     from ledger import DeliveryLedger
@@ -1617,23 +1619,32 @@ async def execute_with_clients(
             operation_key,
             error_code="mcp_outcome_unknown",
         )
-        return {"error": "linear_outcome_unknown", "reason": str(exc)}
-    except LinearMCPToolError:
+        return {
+            "error": "linear_outcome_unknown", "reason": str(exc),
+            "diagnostic": safe_mcp_diagnostic(exc, stage="vendor_operation"),
+        }
+    except LinearMCPToolError as exc:
         persist_ambiguous_create_fence()
         await asyncio.to_thread(
             ledger.mark_unknown,
             operation_key,
             error_code="vendor_is_error",
         )
-        return {"error": "linear_mutation_outcome_unknown", "reason": "vendor_is_error"}
-    except LinearMCPError:
+        return {
+            "error": "linear_mutation_outcome_unknown", "reason": "vendor_is_error",
+            "diagnostic": safe_mcp_diagnostic(exc, stage="vendor_operation"),
+        }
+    except LinearMCPError as exc:
         persist_ambiguous_create_fence()
         await asyncio.to_thread(
             ledger.mark_unknown,
             operation_key,
             error_code="mcp_protocol_error",
         )
-        return {"error": "linear_outcome_unknown", "reason": "mcp_protocol_error"}
+        return {
+            "error": "linear_outcome_unknown", "reason": "mcp_protocol_error",
+            "diagnostic": safe_mcp_diagnostic(exc, stage="vendor_operation"),
+        }
 
     if lifecycle_transition is not None:
         try:
@@ -1934,6 +1945,7 @@ def register_outbound_tools(
             ledger: OutboundLedger | None = None
             direct_ledger: DeliveryLedger | None = None
             quota_admission_lock: FleetGlobalLock | None = None
+            diagnostic_stage = "execution"
             try:
                 if mutation:
                     ledger = await asyncio.to_thread(OutboundLedger, outbound_ledger_path)
@@ -1942,8 +1954,11 @@ def register_outbound_tools(
                         quota_admission_lock = FleetGlobalLock(quota_admission_lock_path)
                     except FleetGlobalLockError:
                         quota_admission_lock = None
+                diagnostic_stage = "graphql_connect"
                 await graphql.connect()
+                diagnostic_stage = "connect"
                 await mcp.connect()
+                diagnostic_stage = "execution"
                 direct_context = None
                 if (
                     vendor_tool == "save_issue"
@@ -2047,7 +2062,10 @@ def register_outbound_tools(
                         )
                 return result
             except Exception as exc:
-                return {"error": "linear_tool_failed", "reason": type(exc).__name__}
+                return {
+                    "error": "linear_tool_failed", "reason": type(exc).__name__,
+                    "diagnostic": safe_mcp_diagnostic(exc, stage=diagnostic_stage),
+                }
             finally:
                 await mcp.close()
                 await graphql.close()
