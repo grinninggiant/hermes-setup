@@ -136,6 +136,7 @@ _CONTINUATION_REASON_CODES = frozenset(
         "unverified",
         "native_goal_not_rejudged",
         "native_goal_paused",
+        "native_goal_paused_without_question",
         "late_clarify_unverified",
     }
 )
@@ -871,7 +872,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.36",
+                "version": "0.8.37",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -4027,6 +4028,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             str(state.status) == "paused"
             and getattr(event, "_linear_verified_normal_prompt", False)
         ):
+            if self._ledger.latest_clarify_timeout(session_id) is None:
+                return await self._visible_ingress_veto(
+                    event, "native_goal_paused_without_question"
+                )
             if not await self._resume_late_clarify_goal(event, hermes_session_id, state):
                 return await self._visible_ingress_veto(event, "late_clarify_unverified")
         return False
@@ -4207,6 +4212,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         pause_details = {
             "native_goal_not_rejudged": "Yeni yanıt turu için goal değerlendirmesi yapılmadı; önceki turun paused kararı kaldı.",
             "native_goal_paused": "Native goal paused durumda; bu tur otomatik devam kararı üretmedi.",
+            "native_goal_paused_without_question": "Görev duraklatılmış; bu oturumda timeout sonrası yanıt bekleyen soru kaydı yok. Bu durum eksik veya geç verilmiş insan yanıtı olarak yorumlanmamalıdır.",
             "late_clarify_unverified": "Geç yanıtın aynı timeout sorusuna ve mevcut insan sahibine güvenli bağı doğrulanamadı; goal yeniden açılmadı.",
         }
         if reason_code in pause_details:
@@ -4511,8 +4517,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     and live_outcome in {"continue", "success"}
                     and live_reason == "native_goal_paused"
                     and isinstance(turn_result, Mapping)
-                    and turn_result.get("completed") is True
-                    and not failed_or_interrupted
+                    # The classifier already admitted only a completed turn or
+                    # a structured iteration-budget exit. Neither permits resume
+                    # here: the fresh blocked judge still produces one error.
+                    and not turn_result.get("failed")
+                    and not turn_result.get("interrupted")
                     and isinstance(response, str)
                     and started
                     and isinstance(last_turn, (int, float))

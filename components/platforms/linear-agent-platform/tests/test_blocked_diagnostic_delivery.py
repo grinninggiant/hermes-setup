@@ -17,6 +17,12 @@ class BlockedDiagnosticDeliveryTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = base.NativeContinuationTests.asyncTearDown
 
     async def test_fresh_blocked_judge_preserves_explanation_in_one_error(self):
+        await self._assert_fresh_blocked_error(completed=True)
+
+    async def test_budget_exit_keeps_fresh_blocked_explanation_without_resuming(self):
+        await self._assert_fresh_blocked_error(completed=False)
+
+    async def _assert_fresh_blocked_error(self, *, completed):
         from gateway.run import GatewayRunner
 
         store = base.FakeSessionStore()
@@ -38,10 +44,10 @@ class BlockedDiagnosticDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "reason": "PRIVATE_JUDGE_REASON_NOT_FOR_DELIVERY", "message": "",
         }
         explanation = "Teşhis kısmi: tarihsel ilk ret nedeni bilinmiyor; izole test sınırı doğrulandı."
-        event = base.turn_event()
+        event: Any = base.turn_event()
         event._gateway_turn_result = MappingProxyType({
-            **dict(event._gateway_turn_result), "completed": True,
-            "turn_exit_reason": "completed",
+            **dict(event._gateway_turn_result), "completed": completed,
+            "turn_exit_reason": "completed" if completed else "max_iterations_reached(90)",
         })
         await self.adapter.on_processing_start(event)
         await self.adapter.prepare_turn_delivery(event, explanation, event._gateway_turn_result)
@@ -74,7 +80,7 @@ class BlockedDiagnosticDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_diagnostic_explanation_never_overrides_negative_gates(self):
         cases = ("stop", "cancel", "done", "approval", "input", "delegate",
-                 "owner", "blocker", "terminal", "failed", "budget", "stale", "rotation")
+                 "owner", "blocker", "terminal", "failed", "unknown_exit", "stale", "rotation")
         original_context = await self.adapter._linear.get_agent_turn_context("linear-session")
         for ordinal, case in enumerate(cases, 1):
             with self.subTest(case=case):
@@ -96,7 +102,7 @@ class BlockedDiagnosticDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 if case == "blocker": context["open_blockers"] = ["fixture"]
                 if case == "terminal": context["status"] = "complete"
                 if case == "failed": result["failed"] = True
-                if case == "budget": result["completed"] = False; result["turn_exit_reason"] = "max_iterations_reached(90)"
+                if case == "unknown_exit": result["completed"] = False; result["turn_exit_reason"] = "unknown_incomplete"
                 if case == "stale": state.last_turn_at = 1.0
                 if case == "rotation": self.adapter.gateway_runner.async_session_store.entry.session_id = "rotated"
                 self.adapter.gateway_runner.goal_state_for_source = mock.AsyncMock(return_value=state)
