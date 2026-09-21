@@ -117,7 +117,7 @@ Verify the Notion plane separately with `NOTION_KEYRING=0 NOTION_HOME=/Users/YOU
 
 ## Optional extras done
 
-- [x] **Web dashboard (migrated 2026-07-24)** — fleet console at `http://127.0.0.1:9119`, persistent under launchd `ai.hermes.dashboard`. Backend and frontend now come from the stable managed Quicksilver runtime (`hermes-agent` `0.19.0`, Python `3.13`); `HERMES_WEB_DIST` points inside that runtime and the plist no longer executes Homebrew Hermes. One console serves all profiles (in-UI profile switcher + unified sessions); localhost-only — Tailscale for remote, never `--insecure` ([docs/06 §8.2.1](06-networking.md)).
+- [x] **Web dashboard** — console at `http://127.0.0.1:9119`, persistent under launchd `ai.hermes.dashboard`. Its executable, web assets and prebuilt TUI are pinned to one tested managed Agent commit; a shared runtime symlink or a Homebrew package is not runtime-provenance proof. Named-profile launches use `--isolated --skip-build` to prevent routing to the independent SDK listener. Desktop and gateway lifecycles remain separate. Localhost-only; preserve token/Host guards. Build, read-back and rollback contract: [docs/06 §8.2.1](06-networking.md).
 
 ## Deferred — don't build at first
 

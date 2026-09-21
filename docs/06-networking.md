@@ -38,7 +38,7 @@ You only need Tailscale if you turn on a feature that **listens** and you want t
 - the **Hermes web dashboard** (a browser fleet console — see 8.2.1)
 - the **HTTP API server** for an external (non-Telegram) client
 
-Hermes has no auth on these by default, so any port reachable from the public internet is a complete-access port. If you enable one, **do not expose it publicly** — put it behind Tailscale. Nous Research's own guidance: *"Do not expose application ports publicly; use SSH tunnels, Caddy with HTTPS, or Tailscale."*
+These are privileged administration surfaces. Current dashboard releases enforce session-token and Host/peer checks on loopback and require an auth provider for a non-loopback bind. Preserve those controls; **do not expose the studio dashboard publicly**. Any remote-access change needs its own approved authentication and network design.
 
 If you never enable the dashboard or HTTP API, skip their Tailscale setup below. The approved Linear Cloudflare ingress is independent of those optional human/admin surfaces.
 
@@ -46,33 +46,38 @@ If you never enable the dashboard or HTTP API, skip their Tailscale setup below.
 
 The dashboard is **one console for the whole fleet**, not one-per-agent: the UI has a profile **list + switcher** (`/api/profiles`, `/api/profiles/active`) and a **unified sessions view aggregated across all profiles**, plus per-profile config / API-key editing and create/delete. The `-p <slug>` flag only sets which profile is *selected on load*. Config/keys stay *stored* per-profile (that's the isolation); the dashboard is just one window onto all of them. (Cross-*agent* activity is the kanban board's job — separate, and CLI/TUI only.)
 
-The production dashboard runs from the same managed Hermes source/runtime as the gateways. Do not point launchd at the Homebrew wrapper or at a separate dashboard checkout: that creates an independently versioned backend/frontend surface. Build the frontend inside the staged managed runtime so `HERMES_WEB_DIST` and the dashboard executable move together:
+Pin the dashboard executable and its web/TUI assets to the **same tested source commit**. The dashboard is separate from Desktop's backend, the SDK server and the messaging gateways; repairing it does not require moving their runtime selectors or restarting them. A managed-looking symlink is not proof of Python provenance: verify the console-script shebang, `sys.prefix` and imported `hermes_cli`/`tools.skills_sync` paths at the final release path. Do not execute the Homebrew wrapper or serve a mutable development checkout.
+
+For a sealed release that lacks frontend bundles, build from a detached worktree of that exact commit using its lockfile and a Node/npm version satisfying its engines. Do not install dependencies into the sealed Python release or regenerate pins:
 
 ```bash
-RUNTIME=/Users/mutlupolatcan/.hermes/runtime/hermes-agent
-env -u HERMES_WEB_DIST HERMES_HOME=/Users/mutlupolatcan/.hermes/profiles/general \
-  "$RUNTIME/venv/bin/hermes" -p general dashboard \
-  --no-open --host 127.0.0.1 --port 9120
-# First start installs/builds web/ and writes hermes_cli/web_dist/. Smoke-test
-# http://127.0.0.1:9120/, then stop the canary before reloading the live job.
+# From the exact-commit build worktree, with compatible node/npm on PATH:
+npm ci --workspace web --workspace ui-tui --workspace ui-tui/packages/hermes-ink \
+  --include-workspace-root --no-audit --no-fund
+npm run build --workspace web
+npm run build --workspace ui-tui
+npm test --workspace web
 ```
 
-Run it persistently under launchd (`~/Library/LaunchAgents/ai.hermes.dashboard.plist`, `RunAtLoad`+`KeepAlive`, bound `127.0.0.1:9119`). Use absolute managed paths in the plist:
+Copy and byte-verify `hermes_cli/web_dist/` into a commit-addressed managed asset directory, and `ui-tui/dist/entry.js` into its `tui/dist/entry.js`. Keep the build worktree out of production paths. Preserve a manifest binding source commit, asset hashes, compatible toolchain and the exact Python release. `HERMES_WEB_DIST` names the directory containing `index.html`; `HERMES_TUI_DIR` names the directory containing `dist/entry.js`.
+
+For the candidate, choose an **actually free loopback port**. `9120` may already belong to the independent SDK server. Pass `--isolated`: current named-profile launches otherwise route to an already-listening machine dashboard and may exit successfully without starting the intended candidate.
 
 ```bash
-# plist ProgramArguments[0]:
-#   /Users/mutlupolatcan/.hermes/runtime/hermes-agent/venv/bin/hermes
-# plist EnvironmentVariables.HERMES_WEB_DIST:
-#   /Users/mutlupolatcan/.hermes/runtime/hermes-agent/hermes_cli/web_dist
-# args: -p general dashboard --no-open --host 127.0.0.1 --port 9119
-
-launchctl bootout gui/$(id -u)/ai.hermes.dashboard
-sleep 3  # launchd drain; immediate bootstrap can fail with exit 5
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.dashboard.plist
-curl -fsS http://127.0.0.1:9119/ >/dev/null
+# RUNTIME, ASSETS and NODE_BIN are already-verified absolute managed paths;
+# CANARY_PORT is a checked-free port, not the SDK or Desktop backend port.
+env HERMES_HOME="$HOME/.hermes/profiles/general" \
+  HERMES_WEB_DIST="$ASSETS" HERMES_TUI_DIR="$ASSETS/tui" \
+  PATH="$NODE_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
+  "$RUNTIME/venv/bin/hermes" -p general dashboard --isolated --skip-build \
+  --no-open --host 127.0.0.1 --port "$CANARY_PORT"
 ```
 
-On a Hermes upgrade, build and smoke-test the candidate runtime on port `9120` before promoting it. After promotion, confirm that both plist paths still resolve under the stable managed runtime, reload only the dashboard job, and verify HTTP `200`. Homebrew may remain installed for rollback, but it is not a production dashboard dependency.
+`--isolated` controls launch routing, not a new security boundary; the UI still provides the profile switcher. Keep requests explicitly scoped with `?profile=general`. Preserve existing auth and credential policy; do not add `--insecure`, expose a public listener or edit other profiles as part of the repair.
+
+After candidate checks, retain the exact original plist and runtime/assets for rollback. Update only `~/Library/LaunchAgents/ai.hermes.dashboard.plist`: absolute commit-pinned `ProgramArguments[0]`, `-p general dashboard --isolated --skip-build --no-open --host 127.0.0.1 --port 9119`, and explicit `HERMES_HOME`, `HERMES_WEB_DIST`, `HERMES_TUI_DIR`, compatible `PATH`. Preserve `RunAtLoad`, `KeepAlive`, log destinations and login-session policy. Lint the plist, reload only `ai.hermes.dashboard` through launchd, and inspect registration/readiness rather than relying on a blind drain sleep. Stop the session-owned canary after production verification.
+
+Required read-back is more than HTTP 200: launchd PID and executable identity; actual `127.0.0.1:9119` listener; root HTML and referenced asset bytes; authenticated profile API; missing/invalid session-token rejection; hostile Host-header rejection; rendered UI and Chat/PTY startup as applicable; stable process identity and no new error/retry loop. Do not persist session tokens. Report dashboard component health separately from the custom gateway/SDK health. On regression restore the retained plist, reload only this job and verify recovery. Future upgrades move the dashboard's runtime and matching asset coordinates together, not an unrelated shared symlink.
 
 ### 8.3 If you do enable a listener — bind it to Tailscale
 
