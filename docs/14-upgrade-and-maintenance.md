@@ -35,13 +35,11 @@ test "$(git -C "$CANDIDATE" rev-parse HEAD)" = "$TARGET_SHA"
 # 2. Run a non-production gateway canary and the adapter compatibility suite.
 #    Do not modify the stable runtime or production launchd jobs yet.
 
-# 3. Build and start the candidate dashboard on 9120 in terminal A.
-env -u HERMES_WEB_DIST \
-  "$CANDIDATE/venv/bin/hermes" -p general dashboard \
-  --no-open --host 127.0.0.1 --port 9120
-
-# In terminal B, smoke-test it, then stop the terminal-A canary.
-curl -fsS http://127.0.0.1:9120/ >/dev/null
+# 3. Follow docs/06-networking.md §8.2.1: build web + TUI assets from the
+#    exact candidate commit, choose a checked-free loopback port (9120 may
+#    be the SDK), and start with --isolated --skip-build and explicit asset
+#    paths. Require process provenance, HTTP/static/auth/UI checks. Do not
+#    mistake successful routing to an existing server for candidate startup.
 
 # 4. Take an independent native quick backup and require its manifest. Then
 #    fetch again and require origin/main to be the same tested commit. If it
@@ -70,12 +68,10 @@ fi
 # 5. Migrate all nine configs, then restart the eight auxiliary gateways in
 #    sequence. Restart general separately only after explicit approval.
 
-# 6. Point HERMES_WEB_DIST at the promoted runtime, lint the dashboard plist,
-#    then reload only the dashboard job. launchd needs a drain interval.
-plutil -lint /Users/mutlupolatcan/Library/LaunchAgents/ai.hermes.dashboard.plist
-launchctl bootout gui/501/ai.hermes.dashboard
-sleep 3
-launchctl bootstrap gui/501 /Users/mutlupolatcan/Library/LaunchAgents/ai.hermes.dashboard.plist
+# 6. Move the dashboard executable and matching web/TUI asset coordinates
+#    together through docs/06-networking.md §8.2.1. Retain the old plist,
+#    lint the candidate, reload only ai.hermes.dashboard and verify its
+#    actual PID, listener, authenticated UI and negative auth checks.
 
 # 7. Verify disk package, live processes, ports, HTTP, and the global CLI as
 #    separate surfaces. All nine gateway commands must resolve below the
