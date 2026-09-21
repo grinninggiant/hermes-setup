@@ -957,6 +957,7 @@ class RetentionCliTests(unittest.TestCase):
             oauth.chmod(0o600)
             attest = root / "successors.json"
             attest.write_text(json.dumps(attestations()), encoding="utf-8")
+            attest.chmod(0o600)
             output = root / "manifest.json"
             factory = mock.Mock()
             client = mock.AsyncMock()
@@ -1014,6 +1015,7 @@ class RetentionCliTests(unittest.TestCase):
             root = Path(td)
             attest = root / "successors.json"
             attest.write_text(json.dumps(attestations()), encoding="utf-8")
+            attest.chmod(0o600)
             base = [
                 "--oauth-file", str(root / "oauth.json"),
                 "--team-id", "team-ops",

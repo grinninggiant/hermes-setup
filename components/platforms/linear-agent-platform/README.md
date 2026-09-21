@@ -2,6 +2,22 @@
 
 A native Linear Agent Session platform plugin for Hermes Gateway. Linear is the human-facing task and discussion surface; Hermes remains the conversation and execution layer. The same tracked adapter code runs as nine isolated profile-local instances. No separate bridge daemon or Hermes built-in webhook route is used.
 
+## Paused-goal diagnostic delivery (0.8.37)
+
+A structured iteration-budget exit followed by a fresh `blocked` goal judgment
+preserves the staged technical explanation in the single terminal `error` activity.
+It never produces success or resumes the goal. Stop, approval/input, owner/delegate,
+blocker, freshness, unknown-exit and session-rotation gates still veto delivery.
+A paused normal prompt with no durable timeout-question marker reports
+`native_goal_paused_without_question`, not a misleading late-answer identity error.
+
+Offline regression coverage includes a thirteen-hour answer delay and ledger reopen,
+exact vendor question/answer timestamps, same-owner checks, and idempotent rearming.
+These tests do not replace a live delayed-answer acceptance run. No timeout, retention,
+credential scope, policy or human-owned completion control changes in this release.
+The retention CLI test fixtures explicitly use private file modes; production mode
+validation is unchanged.
+
 ## Evidence-only Direct reconciliation (0.8.36)
 
 The explicitly approved general-only canary uses `direct_reconciliation.py` from the

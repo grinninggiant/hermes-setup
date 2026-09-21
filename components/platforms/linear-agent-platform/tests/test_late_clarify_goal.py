@@ -3,6 +3,7 @@
 Vendor I/O is an isolated fixture, never a fabricated production webhook.
 """
 from copy import deepcopy
+from datetime import datetime, timedelta
 from types import MappingProxyType, SimpleNamespace
 from unittest import mock
 import time
@@ -18,6 +19,7 @@ class LateReplyVendorTests(unittest.IsolatedAsyncioTestCase):
                 "content": {"__typename": kind, "body": body}}
         q = activity("q", 1, "AgentActivityElicitationContent", "app-user", "Choice?")
         a = activity("a", 3, "AgentActivityPromptContent", "human-1", "1")
+        a["createdAt"] = (datetime.fromisoformat(q["createdAt"]) + timedelta(hours=13)).isoformat()
         client = base.LinearClient(oauth_file="unused")
         client.actor_id = "app-user"
         async def check(rows):
@@ -90,6 +92,44 @@ class LateClarifyGoalTests(base.NativeContinuationTests):
         reply._gateway_turn_result = MappingProxyType({**dict(reply._gateway_turn_result),
             "completed": True, "turn_exit_reason": "completed"})
         return reply
+
+    async def test_paused_goal_without_timeout_marker_is_not_a_late_answer(self):
+        reply = await self.timeout_fixture()
+        self.adapter._ledger.update_outbox_payload_metadata(
+            "activity:clarify:timeout-q",
+            {"clarify_timeout_goal": None, "clarify_resolved": True},
+        )
+        self.assertTrue(await self.adapter._prepare_bound_linear_ingress(reply))
+        items = self.adapter._ledger._db.execute(
+            "SELECT payload_json FROM outbox WHERE id LIKE 'activity:ingress-veto:%'"
+        ).fetchall()
+        self.assertEqual(len(items), 1)
+        payload = base.json.loads(items[0][0])
+        self.assertEqual(payload["activity_type"], "error")
+        self.assertIn("native_goal_paused_without_question", payload["body"])
+        self.assertNotIn("late_clarify_unverified", payload["body"])
+        self.assertEqual(self.state.status, "paused")
+        self.adapter.gateway_runner.resume_goal_for_source.assert_not_awaited()
+        self.adapter._linear.verify_late_clarify_reply.assert_not_awaited()
+        self.assertEqual(self.admitted, [])
+
+    async def test_late_answer_after_thirteen_hours_and_ledger_reopen(self):
+        reply = await self.timeout_fixture()
+        paused = deepcopy(self.state)
+        ledger_path = str(base.Path(self.temp.name) / "ledger.sqlite3")
+        self.adapter._ledger.close()
+        later = time.time() + 13 * 60 * 60
+        with mock.patch.object(base.ledger_mod.time, "time", return_value=later):
+            self.adapter._ledger = base.DeliveryLedger(ledger_path, startup_recovery=False)
+            self.assertFalse(await self.adapter._prepare_bound_linear_ingress(reply))
+            self.assertFalse(await self.adapter._prepare_bound_linear_ingress(reply))
+        self.adapter.gateway_runner.resume_goal_for_source.assert_awaited_once()
+        self.assertEqual(self.state.status, "active")
+        self.assertEqual(self.state.created_at, paused.created_at)
+        self.assertEqual(self.state.turns_used, paused.turns_used)
+        item = self.adapter._ledger.latest_clarify_timeout("linear-session")
+        self.assertEqual(item["payload"]["late_reply_id"], "answer-id")
+        self.assertTrue(item["payload"]["late_reply_rearmed"])
 
     async def test_late_answer_must_not_inherit_timeout_goal_verdict(self):
         reply = await self.timeout_fixture()
