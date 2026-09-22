@@ -2962,6 +2962,7 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
 
         async def capture(event):
             self.events.append(event)
+            event._gateway_accepted = True
 
         self.adapter.handle_message = capture
 

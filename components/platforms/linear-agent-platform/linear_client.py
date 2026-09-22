@@ -636,20 +636,18 @@ query LinearChannelRoutingContext($id: String!, $after: String) {
             after = cursor
         raise LinearAPIError("Channel routing pagination exceeded the policy limit")
 
-    async def verify_late_clarify_reply(
-        self, session_id: str, question_id: str, answer_id: str, owner_id: str, body: str
-    ) -> bool:
-        """Verify exact question/answer and no intervening control or newer prompt."""
+    async def _agent_activity_evidence(self, session_id: str) -> dict[str, Any] | None:
+        """Read complete, timestamped activity evidence; malformed pages fail closed."""
         from datetime import datetime
-        if not all((session_id, question_id, answer_id, owner_id, body)) or question_id == answer_id:
-            return False
+
         query = """
-query LinearLateClarifyEvidence($id: String!, $after: String) {
+query LinearAgentActivityEvidence($id: String!, $after: String) {
   agentSession(id: $id) {
     id
     activities(first: 50, after: $after) {
       nodes { id createdAt signal user { id app }
-        content { __typename ... on AgentActivityPromptContent { body } }
+        content { __typename ... on AgentActivityPromptContent { body }
+          ... on AgentActivityElicitationContent { body } }
       }
       pageInfo { hasNextPage endCursor }
     }
@@ -663,31 +661,77 @@ query LinearLateClarifyEvidence($id: String!, $after: String) {
             data = await self.graphql(query, {"id": session_id, "after": after})
             session = data.get("agentSession")
             if not isinstance(session, dict) or session.get("id") != session_id:
-                return False
+                return None
             connection = session.get("activities") or {}
             nodes, page = connection.get("nodes"), connection.get("pageInfo")
             if not isinstance(nodes, list) or not isinstance(page, dict):
-                return False
+                return None
             for row in nodes:
                 if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"] or row["id"] in rows:
-                    return False
+                    return None
                 try:
                     stamp = datetime.fromisoformat(row["createdAt"])
                 except (ValueError, TypeError, KeyError):
-                    return False
+                    return None
                 if stamp.tzinfo is None or not isinstance(row.get("content"), dict) or "signal" not in row:
-                    return False
+                    return None
                 rows[row["id"]] = (stamp, row)
             more, cursor = page.get("hasNextPage"), page.get("endCursor")
             if type(more) is not bool:
-                return False
+                return None
             if not more:
                 break
             if not isinstance(cursor, str) or not cursor or cursor in seen:
-                return False
+                return None
             seen.add(cursor)
             after = cursor
         else:
+            return None
+        return rows
+
+    async def verify_dependency_wait(
+        self, session_id: str, question_ids: set[str],
+        *, admission_veto: tuple[str, str] | None = None,
+    ) -> bool:
+        """Only an owned dependency question with no later control can progress."""
+        rows = await self._agent_activity_evidence(session_id)
+        if rows is None or not self.actor_id:
+            return False
+        if admission_veto is not None and admission_veto[0] not in rows:
+            return False
+        questions = question_ids.intersection(rows)
+        if len(questions) != 1:
+            return False
+        question_id = next(iter(questions))
+        stamp, question = rows[question_id]
+        if (
+            question.get("signal")
+            or question["content"].get("__typename") != "AgentActivityElicitationContent"
+            or (question.get("user") or {}).get("id") != self.actor_id
+        ):
+            return False
+        return all(
+            row_id == question_id or at < stamp or (
+                at > stamp and not row.get("signal")
+                and (
+                    row["content"].get("__typename") == "AgentActivityThoughtContent"
+                    or (admission_veto is not None and row_id == admission_veto[0]
+                        and row["content"].get("__typename") == "AgentActivityElicitationContent"
+                        and row["content"].get("body") == admission_veto[1])
+                )
+                and (row.get("user") or {}).get("id") == self.actor_id
+            )
+            for row_id, (at, row) in rows.items()
+        )
+
+    async def verify_late_clarify_reply(
+        self, session_id: str, question_id: str, answer_id: str, owner_id: str, body: str
+    ) -> bool:
+        """Verify exact question/answer and no intervening control or newer prompt."""
+        if not all((session_id, question_id, answer_id, owner_id, body)) or question_id == answer_id:
+            return False
+        rows = await self._agent_activity_evidence(session_id)
+        if rows is None:
             return False
         if question_id not in rows or answer_id not in rows:
             return False
