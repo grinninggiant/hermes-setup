@@ -40,6 +40,7 @@ EXPECTED_VENDOR_TOOL_NAMES = frozenset(
         "save_milestone", "save_project", "save_project_label", "save_release", "save_release_note",
         "save_status_update", "search_documentation", "share_issue", "submit_diff_review", "unshare_issue",
         "update_diff",  # Catalog recognition only; never executable through this adapter.
+        "list_custom_views",  # Catalog recognition only; never executable through this adapter.
     }
 )
 REQUIRED_TOOL_INPUT_FIELDS = {
@@ -68,7 +69,7 @@ LIVE_TOOL_PROPERTY_FIELDS = {
         {"id", "includeRelations", "includeCustomerNeeds", "includeReleases"}
     ),
     "list_issues": REQUIRED_TOOL_INPUT_FIELDS["list_issues"]
-    | frozenset({"fields", "parentId", "priority", "release"}),
+    | frozenset({"customView", "fields", "parentId", "priority", "release"}),
     "save_issue": REQUIRED_TOOL_INPUT_FIELDS["save_issue"]
     | frozenset(
         {

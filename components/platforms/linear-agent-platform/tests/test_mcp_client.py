@@ -71,7 +71,7 @@ class LinearMCPClientTests(unittest.IsolatedAsyncioTestCase):
             "list_issues": {
                 "team", "limit", "cursor", "orderBy", "query", "state", "assignee",
                 "delegate", "project", "cycle", "label", "createdAt", "updatedAt",
-                "includeArchived", "fields", "parentId", "priority", "release",
+                "includeArchived", "fields", "parentId", "priority", "release", "customView",
             },
             "save_issue": {
                 "id", "title", "description", "team", "state", "assignee", "delegate",
@@ -664,12 +664,39 @@ class LinearMCPClientTests(unittest.IsolatedAsyncioTestCase):
                 await self.asyncTearDown()
                 await self.asyncSetUp()
 
+    async def test_custom_view_catalog_does_not_grant_execution(self):
+        from mcp_client import REQUIRED_TOOL_INPUT_FIELDS
+
+        if not any(tool['name'] == 'list_custom_views' for tool in self.tools):
+            self.tools.append({
+                'name': 'list_custom_views',
+                'inputSchema': {'$schema': 'https://json-schema.org/draft/2020-12/schema'},
+            })
+        issue_schema = next(t for t in self.tools if t['name'] == 'list_issues')['inputSchema']
+        issue_schema['properties']['customView'] = {'type': 'string'}
+        client = self.client()
+        try:
+            await client.connect()
+            self.assertNotIn('customView', REQUIRED_TOOL_INPUT_FIELDS['list_issues'])
+            from outbound_policy import OutboundPolicy
+            policy = OutboundPolicy(expected_actor_id='actor', expected_organization_id='org',
+                                    allowed_team_ids=['team'])
+            decision = policy.preflight('list_issues', {'team': 'team', 'customView': 'view'})
+            self.assertEqual((decision.action, decision.reason), ('deny', 'field_not_allowed'))
+            with self.assertRaisesRegex(LinearMCPError, 'not authorized for execution'):
+                await client.call_tool('list_custom_views', {})
+            self.assertFalse(any(r.get('method') == 'tools/call' for r in self.requests))
+        finally:
+            await client.close()
+
     def test_vendor_tool_contract_tracks_update_diff_without_execution_grant(self):
         from mcp_client import EXECUTABLE_VENDOR_TOOLS, MUTATION_VENDOR_TOOLS
         self.assertIn("update_diff", EXPECTED_VENDOR_TOOL_NAMES)
         self.assertNotIn("update_diff", EXECUTABLE_VENDOR_TOOLS)
         self.assertNotIn("update_diff", MUTATION_VENDOR_TOOLS)
-        self.assertEqual(len(EXPECTED_VENDOR_TOOL_NAMES), 66)
+        self.assertIn("list_custom_views", EXPECTED_VENDOR_TOOL_NAMES)
+        self.assertNotIn("list_custom_views", EXECUTABLE_VENDOR_TOOLS)
+        self.assertNotIn("list_custom_views", MUTATION_VENDOR_TOOLS)
         self.assertIn("get_template", EXPECTED_VENDOR_TOOL_NAMES)
         self.assertIn("list_templates", EXPECTED_VENDOR_TOOL_NAMES)
         self.assertIn("template", LIVE_TOOL_PROPERTY_FIELDS["save_issue"])
