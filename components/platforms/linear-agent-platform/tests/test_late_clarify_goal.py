@@ -103,11 +103,7 @@ class LateClarifyGoalTests(base.NativeContinuationTests):
         items = self.adapter._ledger._db.execute(
             "SELECT payload_json FROM outbox WHERE id LIKE 'activity:ingress-veto:%'"
         ).fetchall()
-        self.assertEqual(len(items), 1)
-        payload = base.json.loads(items[0][0])
-        self.assertEqual(payload["activity_type"], "error")
-        self.assertIn("native_goal_paused_without_question", payload["body"])
-        self.assertNotIn("late_clarify_unverified", payload["body"])
+        self.assertEqual(items, [])
         self.assertEqual(self.state.status, "paused")
         self.adapter.gateway_runner.resume_goal_for_source.assert_not_awaited()
         self.adapter._linear.verify_late_clarify_reply.assert_not_awaited()
