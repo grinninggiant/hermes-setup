@@ -9,7 +9,9 @@ import unittest
 from unittest.mock import patch
 
 TARGET = Path(os.environ.get('WRAPPER_TARGET', str(Path(__file__).with_name('hermes-gateway-keychain.sh'))))
-RELEASE = 'b7013cf0a9bbb87b6b672e5f997832b9ddd73399'
+RELEASE = 'fd5d65e8b272480176f66d52907135500bdb5302'
+FLEET_RELEASE = 'd25b0bc3d9e884ddde6550c6d1fd250e98b97a09-baseline-deps'
+ROLLED_OUT = {'assistant'}
 PROFILES = ('general', 'assistant', 'researcher', 'coder', 'writer', 'producer', 'marketing', 'health', 'finance')
 LOOKUP = 'token=$(/usr/bin/security find-generic-password -s "$service" -a "$profile" -w)'
 ROOT = 'bootstrap_root="/Users/mutlupolatcan/.hermes/runtime/hermes-gateway-sdk-bootstrap"'
@@ -42,7 +44,8 @@ class WrapperContract(unittest.TestCase):
             with self.subTest(profile=profile):
                 result = invoke(TARGET.read_text(), profile)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                executable = f'/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-{RELEASE}/venv/bin/hermes' if profile == 'general' else '/Users/mutlupolatcan/.local/bin/hermes'
+                release = RELEASE if profile == 'general' else FLEET_RELEASE if profile in ROLLED_OUT else 'def2cf0ca4e941cb9799a74786f1c8c4a41065d8'
+                executable = f'/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-{release}/venv/bin/hermes'
                 self.assertEqual(json.loads(result.stdout), [profile, '--hermes-executable', executable])
     def test_unsupported_profile(self):
         self.assertEqual(invoke(TARGET.read_text(), 'not-a-profile').returncode, 64)
