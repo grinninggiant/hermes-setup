@@ -1893,12 +1893,14 @@ class DeliveryLedger:
             ).fetchone()
         return self._decode_wait(row) if row else None
 
-    def list_waiting(self) -> list[dict[str, Any]]:
+    def list_waiting(self, *, state: str = "waiting") -> list[dict[str, Any]]:
+        if state not in {"waiting", "resumed"}:
+            raise ValueError("Unsupported dependency wait state")
         with self._lock:
             rows = self._db.execute(
                 "SELECT session_id, issue_id, delivery_key, prompt_json, blockers_json, state, "
                 "revision, last_error, created_at, updated_at, resumed_at "
-                "FROM waiting_executions WHERE state = 'waiting' ORDER BY created_at"
+                "FROM waiting_executions WHERE state = ? ORDER BY created_at", (state,),
             ).fetchall()
         return [self._decode_wait(row) for row in rows]
 
@@ -1929,6 +1931,18 @@ class DeliveryLedger:
                 "UPDATE waiting_executions SET state = 'resuming', revision = revision + 1, "
                 "updated_at = ? WHERE session_id = ? AND state = 'waiting'",
                 (now, session_id),
+            )
+            self._db.commit()
+            return bool(cur.rowcount)
+
+    def requeue_unadmitted_wait(self, session_id: str, revision: int) -> bool:
+        """CAS only the exact legacy false-admission record verified by the adapter."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE waiting_executions SET state='waiting', updated_at=?, resumed_at=NULL, "
+                "last_error='verified_ingress_not_admitted', revision=revision+1 "
+                "WHERE session_id=? AND state='resumed' AND revision=?",
+                (int(time.time()), session_id, revision),
             )
             self._db.commit()
             return bool(cur.rowcount)

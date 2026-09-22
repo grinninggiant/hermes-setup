@@ -872,7 +872,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.38",
+                "version": "0.8.39",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -2825,16 +2825,17 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     "dependency-resume",
                     dependency_resume=True,
                 )
-                self._schedule_thought(
-                    session_id,
-                    wait["issue_id"],
-                    wait["delivery_key"],
-                    include_queued=False,
-                    body="All blocking issues are complete; Hermes resumed the task automatically.",
-                )
+                if not self._native_goal_continuation_enabled:
+                    self._schedule_thought(
+                        session_id,
+                        wait["issue_id"],
+                        wait["delivery_key"],
+                        include_queued=False,
+                        body="All blocking issues are complete; Hermes is preparing automatic admission.",
+                    )
                 if self._ledger.has_session_closure(session_id):
                     return False
-                await self.handle_message(event)
+                await self._admit_turn_event(event)
                 if self._ledger.mark_direct_activation_dispatched(
                     wait["issue_id"], session_id
                 ):
@@ -2979,6 +2980,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     for pending in self._ledger.list_direct_activation_events():
                         await self._reconcile_direct_activation_event(pending["issue_id"])
                     if self._dependency_wait_enabled:
+                        if self._native_goal_continuation_enabled:
+                            for wait in self._ledger.list_waiting(state="resumed"):
+                                await self._recover_unadmitted_dependency_wait(wait["session_id"])
                         for wait in self._ledger.list_waiting():
                             await self._reconcile_wait(wait["session_id"])
                 await asyncio.sleep(self._dependency_poll_seconds)
@@ -3462,6 +3466,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             item.aggregate_key,
                         )
                         return True
+                    if "dependency_resume_revision" in item.payload:
+                        wait = self._ledger.get_wait(item.aggregate_key)
+                        if (
+                            not wait or wait["revision"] != item.payload["dependency_resume_revision"]
+                            or not await self._dependency_wait_is_live(wait)
+                        ):
+                            self._ledger.dead_letter_outbox(item.id, "dependency_resume_no_longer_authorized")
+                            return True
                     await self._linear.create_activity(
                         item.payload["agent_session_id"],
                         item.payload["activity_type"],
@@ -3831,9 +3843,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
 
     async def _admit_turn_event(self, event: MessageEvent) -> bool:
         """Schedule through Hermes' public, receipt-bearing wake boundary."""
-        from gateway.wake import admit_internal_event
+        from gateway.wake import WakeNotAccepted, admit_internal_event
 
         await admit_internal_event(self, event)
+        if getattr(event, "_linear_ingress_vetoed", False):
+            raise WakeNotAccepted("Linear ingress vetoed execution")
         return True
 
     async def _cancel_linear_session_processing(self, session_id: str) -> None:
@@ -3901,6 +3915,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         """
         if self._native_goal_continuation_enabled:
             vetoed = await self._prepare_bound_linear_ingress(event)
+            event._linear_ingress_vetoed = vetoed
             if vetoed:
                 event._gateway_accepted = True
                 return
@@ -3997,6 +4012,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             "session_id": hermes_session_id,
         }
         outcome = self._classify_turn_outcome(event, probe, context)
+        if event.metadata.get("linear_dependency_resume"):
+            if outcome not in {"continue", "awaiting_input"} or context.get("open_blockers"):
+                return await self._visible_ingress_veto(event, outcome)
+            if not await self._progress_dependency_wait(event):
+                return await self._visible_ingress_veto(event, "dependency_resume_unverified")
+            # Native activity progression, never an in-memory status override.
+            context = await self._linear.get_agent_turn_context(session_id)
+            outcome = self._classify_turn_outcome(event, probe, context)
         # Core owns approval waiter lookup and resolution.  When the native
         # session is waiting for model execution, let only /approve and /deny
         # reach that non-model command path.  All lifecycle, issue, delegate,
@@ -4006,6 +4029,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return False
         issue = context.get("issue")
         state = await self._goal_state_for_source(event.source, hermes_session_id)
+        if event.metadata.get("linear_dependency_resume") and self._dependency_resume_claim(event) is None:
+            return await self._visible_ingress_veto(event, "dependency_resume_fenced")
+        if event.metadata.get("linear_dependency_resume") and state is not None:
+            return await self._visible_ingress_veto(event, "dependency_resume_goal_exists")
         if event.internal:
             if state is None or str(state.status) != "active":
                 outcome = "stopped"
@@ -4034,7 +4061,143 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 )
             if not await self._resume_late_clarify_goal(event, hermes_session_id, state):
                 return await self._visible_ingress_veto(event, "late_clarify_unverified")
+        if event.metadata.get("linear_dependency_resume") and self._dependency_resume_claim(event) is None:
+            return await self._visible_ingress_veto(event, "dependency_resume_fenced")
         return False
+
+    def _dependency_resume_claim(self, event: MessageEvent) -> dict[str, Any] | None:
+        """Fence the exact claim after awaits, including the last pre-handler hook."""
+        if self._ledger is None:
+            return None
+        session_id = event.metadata["linear_agent_session_id"]
+        wait = self._ledger.get_wait(session_id)
+        from tools import approval, clarify_gateway
+        key = event.metadata["gateway_session_key"]
+        if (not wait or wait["state"] not in {"resuming", "resumed"}
+            or wait["revision"] != getattr(event, "_linear_dependency_revision", None)
+            or wait["issue_id"] != event.metadata["linear_issue_id"]
+            or wait["delivery_key"] != event.metadata["linear_delivery_key"]
+            or wait["prompt"] != event.raw_message
+            or self._ledger.has_session_closure(session_id)
+            or approval.get_pending_gateway_approval(key) is not None
+            or clarify_gateway.get_pending_for_session(key, include_choice_prompts=True) is not None):
+            return None
+        return wait
+
+    def _dependency_admission_veto(self, wait: dict[str, Any]) -> tuple[str, str] | None:
+        if self._ledger is None:
+            return None
+        event = self._message_event(wait["prompt"], wait["delivery_key"], "dependency-resume", dependency_resume=True)
+        digest = hashlib.sha256(f"{event.source.chat_id}\0{event.message_id or event.text}".encode()).hexdigest()[:24]
+        key = f"ingress-veto:{digest}"
+        item = self._ledger.get_outbox_item(f"activity:{key}")
+        body = self._continuation_blocker_notice("awaiting_input", step="giriş")[:4000]
+        if (item and item["state"] == "delivered"
+            and item["payload"].get("agent_session_id") == wait["session_id"]
+            and item["payload"].get("activity_type") == "elicitation"
+            and item["payload"].get("body") == body):
+            return self._activity_uuid(key), body
+        return None
+
+    async def _recover_unadmitted_dependency_wait(self, session_id: str) -> bool:
+        """Requeue a proven legacy ingress veto, never a paused or executed goal."""
+        if self._ledger is None or self._linear is None:
+            return False
+        try:
+            async with self._session_lock(session_id):
+                wait = self._ledger.get_wait(session_id)
+                if (not wait or wait["state"] != "resumed"
+                    or wait["last_error"] == "verified_ingress_not_admitted"
+                    or self._ledger.has_session_closure(session_id)
+                    or self._dependency_admission_veto(wait) is None):
+                    return False
+                event = self._message_event(wait["prompt"], wait["delivery_key"], "dependency-resume", dependency_resume=True)
+                extra = getattr(self.config, "extra", None) or {}
+                key = build_session_key(event.source,
+                    group_sessions_per_user=extra.get("group_sessions_per_user", True),
+                    thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+                    profile=self._session_key_profile(event.source))
+                store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
+                if store is None:
+                    return False
+                from tools import approval, clarify_gateway
+                if (approval.get_pending_gateway_approval(key) is not None
+                    or clarify_gateway.get_pending_for_session(key, include_choice_prompts=True) is not None):
+                    return False
+                entry = await store.lookup_by_session_key(key)
+                if (entry is None or entry.session_key != key or not entry.session_id
+                    or await self._goal_state_for_source(event.source, entry.session_id) is not None
+                    or await store.load_transcript(entry.session_id) != []
+                    or not await self._dependency_wait_is_live(wait)):
+                    return False
+                return self._ledger.requeue_unadmitted_wait(session_id, wait["revision"])
+        except Exception:
+            logger.warning("[linear] Unadmitted wait verification failed session=%s", session_id, exc_info=True)
+            return False
+
+    async def _dependency_wait_is_live(self, wait: dict[str, Any]) -> bool:
+        """Recheck a claimed dependency notice at admission and outbox delivery."""
+        if self._ledger is None or self._linear is None or wait["state"] not in {"resuming", "resumed"}:
+            return False
+        event = self._message_event(wait["prompt"], wait["delivery_key"], "dependency-resume", dependency_resume=True)
+        context = await self._linear.get_agent_turn_context(wait["session_id"])
+        probe = {"completed": False, "failed": False, "interrupted": False,
+                 "turn_exit_reason": "max_iterations_reached(ingress)", "session_id": ""}
+        if self._classify_turn_outcome(event, probe, context) not in {"continue", "awaiting_input"} or context.get("open_blockers"):
+            return False
+        verified = await self._linear.verify_dependency_wait(wait["session_id"], {
+            self._activity_uuid(f"waiting:{wait['delivery_key']}"),
+            self._activity_uuid(f"direct-waiting:{wait['delivery_key']}"),
+        }, admission_veto=self._dependency_admission_veto(wait))
+        current = self._ledger.get_wait(wait["session_id"])
+        # Core may acknowledge this same claim while the final read is in flight.
+        return bool(verified and current and current["state"] in {"resuming", "resumed"}
+                    and current["revision"] == wait["revision"]
+                    and not self._ledger.has_session_closure(wait["session_id"]))
+
+    async def _progress_dependency_wait(self, event: MessageEvent) -> bool:
+        """Progress only a claimed, never-started dependency wait before admission."""
+        if self._ledger is None or self._linear is None:
+            return False
+        session_id = event.metadata["linear_agent_session_id"]
+        issue_id = event.metadata["linear_issue_id"]
+        delivery_key = event.metadata["linear_delivery_key"]
+        wait = self._ledger.get_wait(session_id)
+        if (
+            not wait or wait["state"] != "resuming" or wait["issue_id"] != issue_id
+            or wait["delivery_key"] != delivery_key or wait["prompt"] != event.raw_message
+        ):
+            return False
+        # The two existing wait producers use deterministic activity identities;
+        # local outbox retention must not erase the authoritative native evidence.
+        if not await self._dependency_wait_is_live(wait):
+            return False
+        state = await self._goal_state_for_source(event.source, event.metadata["gateway_session_id"])
+        from tools import approval, clarify_gateway
+
+        key = event.metadata["gateway_session_key"]
+        if (
+            state is not None
+            or approval.get_pending_gateway_approval(key) is not None
+            or clarify_gateway.get_pending_for_session(key, include_choice_prompts=True) is not None
+            or self._ledger.get_wait(session_id) != wait
+            or self._ledger.has_session_closure(session_id)
+        ):
+            return False
+        progress_key = f"dependency-resume:{delivery_key}:{wait['revision']}"
+        self._enqueue_activity(
+            session_id, "thought",
+            "All blocking issues are complete; Hermes is preparing automatic admission.",
+            item_key=progress_key,
+            ephemeral=True,
+            metadata={"dependency_resume_revision": wait["revision"]},
+        )
+        await self._post_thought(session_id)
+        item = self._ledger.get_outbox_item(f"activity:{progress_key}")
+        verified = bool(item and item["state"] == "delivered" and await self._dependency_wait_is_live(wait))
+        if verified:
+            event._linear_dependency_revision = wait["revision"]
+        return verified
 
     async def _visible_ingress_veto(self, event: MessageEvent, reason: str) -> bool:
         decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
@@ -5797,6 +5960,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._active_turn_events[event.source.chat_id] = event
 
     async def on_processing_start(self, event: MessageEvent) -> bool | None:
+        if self._native_goal_continuation_enabled and event.metadata.get("linear_dependency_resume"):
+            wait = self._dependency_resume_claim(event)
+            if (wait is None or not await self._dependency_wait_is_live(wait)
+                or self._dependency_resume_claim(event) is None):
+                raise asyncio.CancelledError("Dependency resume fenced before execution")
         event._linear_processing_started_at = time.time()
         self._bind_active_turn(event)
         decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
