@@ -28,6 +28,7 @@ EXPECTED_VENDOR_TOOL_NAMES = frozenset(
         "delete_attachment", "delete_comment", "delete_diff_comment",
         "delete_status_update", "extract_images", "get_agent_skill", "get_attachment",
         "get_diff", "get_diff_threads", "get_document", "get_issue", "get_issue_status",
+        "get_triage_responsibility",  # Catalog recognition only; never executable.
         "get_milestone", "get_notifications", "get_project", "get_release", "get_release_note",
         "get_status_updates", "get_team", "get_template", "get_user", "get_workspace", "list_agent_skills",
         "list_comments", "list_cycles", "list_diffs", "list_documents",
@@ -69,7 +70,7 @@ LIVE_TOOL_PROPERTY_FIELDS = {
         {"id", "includeRelations", "includeCustomerNeeds", "includeReleases"}
     ),
     "list_issues": REQUIRED_TOOL_INPUT_FIELDS["list_issues"]
-    | frozenset({"customView", "fields", "parentId", "priority", "release"}),
+    | frozenset({"customView", "fields", "parentId", "priority", "release", "triagedAt"}),
     "save_issue": REQUIRED_TOOL_INPUT_FIELDS["save_issue"]
     | frozenset(
         {

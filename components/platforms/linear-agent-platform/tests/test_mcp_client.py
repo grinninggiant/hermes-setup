@@ -71,7 +71,7 @@ class LinearMCPClientTests(unittest.IsolatedAsyncioTestCase):
             "list_issues": {
                 "team", "limit", "cursor", "orderBy", "query", "state", "assignee",
                 "delegate", "project", "cycle", "label", "createdAt", "updatedAt",
-                "includeArchived", "fields", "parentId", "priority", "release", "customView",
+                "includeArchived", "fields", "parentId", "priority", "release", "customView", "triagedAt",
             },
             "save_issue": {
                 "id", "title", "description", "team", "state", "assignee", "delegate",
@@ -663,6 +663,28 @@ class LinearMCPClientTests(unittest.IsolatedAsyncioTestCase):
                     await client.close()
                 await self.asyncTearDown()
                 await self.asyncSetUp()
+
+    async def test_triage_catalog_additions_are_recognized_without_execution_grants(self):
+        from mcp_client import EXECUTABLE_VENDOR_TOOLS, REQUIRED_TOOL_INPUT_FIELDS
+        from outbound_policy import OutboundPolicy
+
+        self.assertIn("get_triage_responsibility", EXPECTED_VENDOR_TOOL_NAMES)
+        issue_schema = next(tool for tool in self.tools if tool["name"] == "list_issues")["inputSchema"]
+        self.assertIn("triagedAt", issue_schema["properties"])
+        client = self.client()
+        try:
+            await client.connect()
+            self.assertNotIn("get_triage_responsibility", EXECUTABLE_VENDOR_TOOLS)
+            self.assertNotIn("triagedAt", REQUIRED_TOOL_INPUT_FIELDS["list_issues"])
+            policy = OutboundPolicy(expected_actor_id="actor", expected_organization_id="org",
+                                    allowed_team_ids=["team"])
+            self.assertEqual(policy.preflight("list_issues", {"team": "team", "triagedAt": "now"}).reason,
+                             "field_not_allowed")
+            with self.assertRaisesRegex(LinearMCPError, "not authorized for execution"):
+                await client.call_tool("get_triage_responsibility", {})
+            self.assertFalse(any(request.get("method") == "tools/call" for request in self.requests))
+        finally:
+            await client.close()
 
     async def test_custom_view_catalog_does_not_grant_execution(self):
         from mcp_client import REQUIRED_TOOL_INPUT_FIELDS
