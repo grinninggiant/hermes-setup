@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -534,7 +535,7 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("issue-164", body)
         self.assertNotIn("acceptance evidence missing", body)
 
-    async def test_verified_stopped_dispatches_closed_session_notice(self):
+    async def test_verified_stopped_fences_without_error_activity(self):
         row = self.adapter._ledger.reserve_turn_decision(
             "linear-session", "issue-164", "hermes-session", 1, 1, "continue"
         )
@@ -548,12 +549,28 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         activity = self.adapter._ledger.get_outbox_item(
             f"activity:turn-decision:{row['decision_id']}"
         )
-        body = activity["payload"]["body"]
-        self.assertIn("Etkilenen adım: devam teslimi.", body)
-        self.assertIn("kesin terminal nedeni doğrulanamadı", body)
-        self.assertIn("Gerekli işlem:", body)
-        self.assertNotIn("İnsan", body)
-        self.assertNotIn("issue-164", body)
+        self.assertIsNone(activity)
+        self.assertEqual(self.adapter._ledger.get_turn_decision(row["decision_id"])["dispatch_state"], "fenced")
+        self.assertFalse(self.adapter._ledger.progress_is_allowed("linear-session"))
+
+    async def test_proven_turn_failure_remains_visible_error(self):
+        row = self.adapter._ledger.reserve_turn_decision(
+            "linear-session", "issue-164", "hermes-session", 1, 1, "blocked"
+        )
+        self.assertTrue(self.adapter._enqueue_turn_terminal_activity(
+            row, "blocked", reason_code="turn_failed", expected_state="pending"
+        ))
+        item = self.adapter._ledger.get_outbox_item(f"activity:turn-decision:{row['decision_id']}")
+        self.assertEqual(item["payload"]["activity_type"], "error")
+        self.assertIn("turn_failed", item["payload"]["body"])
+
+    async def test_stopped_or_paused_ingress_without_decision_stays_silent(self):
+        for reason in ("stopped", "native_goal_paused", "native_goal_not_rejudged"):
+            with self.subTest(reason=reason):
+                self.assertTrue(await self.adapter._visible_ingress_veto(turn_event(), reason))
+        self.assertEqual(self.adapter._ledger._db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE operation='activity.create'"
+        ).fetchone()[0], 0)
 
     async def test_unknown_blocker_code_is_unverified_without_invented_details(self):
         event = turn_event()
@@ -1658,7 +1675,7 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         row = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
         self.assertEqual(row["outcome"], "blocked")
 
-    async def test_goal_pause_blocks_and_emits_visible_error_without_admission(self):
+    async def test_goal_pause_fences_without_false_error_or_admission(self):
         FakeGoalManager.existing = True
         FakeGoalManager.existing_status = "paused"
         FakeGoalManager.existing_paused_reason = "judged unachievable: blocked"
@@ -1671,7 +1688,9 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         activity = self.adapter._ledger.get_outbox_item(
             f"activity:turn-decision:{rows[-1]['decision_id']}"
         )
-        self.assertEqual(activity["payload"]["activity_type"], "error")
+        self.assertIsNone(activity)
+        self.assertEqual(rows[-1]["dispatch_state"], "fenced")
+        self.assertFalse(self.adapter._ledger.progress_is_allowed("linear-session"))
 
     async def test_budget_pause_rolls_over_same_native_goal_after_fresh_linear_gates(self):
         FakeGoalManager.existing = True
@@ -1731,6 +1750,38 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(FakeGoalManager.background_snapshots, [])
         await self.adapter._recover_turn_decisions()
 
+        self.assertEqual(self.admitted, [])
+
+    async def test_fresh_native_pause_does_not_demote_proven_final_response(self):
+        self.adapter._linear = FakeLinear(
+            description="## Acceptance\n- [x] tests pass\n- [X] restart is safe"
+        )
+        event = turn_event()
+        event._gateway_turn_result = MappingProxyType(
+            {**dict(event._gateway_turn_result), "completed": True}
+        )
+        event._linear_processing_started_at = time.time() - 1
+        self.adapter._goal_state_for_source = mock.AsyncMock(return_value=SimpleNamespace(
+            status="paused", created_at=123.0, turns_used=3, max_turns=20,
+            paused_reason="judged unachievable", last_verdict="blocked",
+            last_turn_at=time.time(),
+        ))
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "final evidence", event._gateway_turn_result
+        )
+        decision = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+        self.assertEqual((decision["outcome"], decision["dispatch_state"]),
+                         ("success", "completed"))
+        self.assertEqual(self.adapter._ledger.get_outbox_item(
+            f"activity:turn-success:{decision['decision_id']}"
+        )["payload"]["body"], "final evidence")
+        self.assertIsNone(self.adapter._ledger.get_outbox_item(
+            f"activity:turn-decision:{decision['decision_id']}"
+        ))
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "final evidence", event._gateway_turn_result
+        )
+        self.assertEqual(len(self.adapter._ledger.list_turn_decisions("linear-session")), 1)
         self.assertEqual(self.admitted, [])
 
     async def test_completed_turn_with_checked_acceptance_allows_true_final_response(self):
@@ -1894,6 +1945,35 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         row = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
         self.assertEqual(row["dispatch_state"], "fenced")
         self.assertNotEqual(row["outcome"], "success")
+        self.assertEqual(self.adapter._ledger._db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"error\"%'"
+        ).fetchone()[0], 0)
+
+    async def test_delayed_success_real_session_failure_retains_error_activity(self):
+        FakeGoalManager.existing = True
+        FakeGoalManager.existing_status = "done"
+        self.adapter._linear.create_activity = mock.AsyncMock()
+        checked = await FakeLinear(
+            description="## Acceptance\n- [x] tests pass\n- [X] restart is safe"
+        ).get_agent_turn_context("linear-session")
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(
+            side_effect=[checked, checked]
+        )
+        event = turn_event()
+        event._gateway_turn_result = MappingProxyType(
+            {**dict(event._gateway_turn_result), "completed": True}
+        )
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "accepted evidence", event._gateway_turn_result
+        )
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(
+            return_value={**checked, "status": "error"}
+        )
+        self.assertTrue(await LinearPlatformAdapter._drain_outbox_once(self.adapter))
+        self.adapter._linear.create_activity.assert_not_awaited()
+        self.assertEqual(self.adapter._ledger._db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"error\"%'"
+        ).fetchone()[0], 1)
 
     async def test_delayed_success_revalidation_read_failure_retains_retry(self):
         FakeGoalManager.existing = True

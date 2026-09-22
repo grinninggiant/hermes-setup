@@ -16,13 +16,13 @@ class BlockedDiagnosticDeliveryTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = base.NativeContinuationTests.asyncSetUp
     asyncTearDown = base.NativeContinuationTests.asyncTearDown
 
-    async def test_fresh_blocked_judge_preserves_explanation_in_one_error(self):
-        await self._assert_fresh_blocked_error(completed=True)
+    async def test_fresh_blocked_judge_fences_without_false_error(self):
+        await self._assert_fresh_blocked_fence(completed=True)
 
-    async def test_budget_exit_keeps_fresh_blocked_explanation_without_resuming(self):
-        await self._assert_fresh_blocked_error(completed=False)
+    async def test_budget_exit_keeps_fresh_blocked_fence_without_resuming(self):
+        await self._assert_fresh_blocked_fence(completed=False)
 
-    async def _assert_fresh_blocked_error(self, *, completed):
+    async def _assert_fresh_blocked_fence(self, *, completed):
         from gateway.run import GatewayRunner
 
         store = base.FakeSessionStore()
@@ -61,19 +61,16 @@ class BlockedDiagnosticDeliveryTests(unittest.IsolatedAsyncioTestCase):
         manager.state.last_verdict = "blocked"
         await self.adapter.on_processing_complete(event, base.ProcessingOutcome.SUCCESS)
         row = self.adapter._ledger.list_turn_decisions("linear-session")[-1]
-        self.assertEqual((row["outcome"], row["dispatch_state"]), ("blocked", "completed"))
+        self.assertEqual((row["outcome"], row["dispatch_state"]), ("blocked", "fenced"))
         item = self.adapter._ledger.get_outbox_item(f"activity:turn-decision:{row['decision_id']}")
-        self.assertEqual(item["payload"]["activity_type"], "error")
-        self.assertIn(explanation, item["payload"]["body"])
-        self.assertNotIn("PRIVATE_JUDGE_REASON_NOT_FOR_DELIVERY", item["payload"]["body"])
+        self.assertIsNone(item)
+        self.assertFalse(self.adapter._ledger.progress_is_allowed("linear-session"))
         self.assertEqual(base.FakeGoalManager.resume_calls, 0)
         self.assertEqual(self.admitted, [])
         self.adapter._validate_activity_target = mock.AsyncMock(return_value=None)
         self.adapter._linear.create_activity = mock.AsyncMock(return_value="fixture-activity")
-        await base.LinearPlatformAdapter._drain_outbox_once(self.adapter)
-        self.adapter._linear.create_activity.assert_awaited_once()
-        self.assertEqual(self.adapter._linear.create_activity.await_args.args,
-                         ("linear-session", "error", item["payload"]["body"]))
+        self.assertFalse(await base.LinearPlatformAdapter._drain_outbox_once(self.adapter))
+        self.adapter._linear.create_activity.assert_not_awaited()
         await self.adapter.on_processing_complete(event, base.ProcessingOutcome.SUCCESS)
         self.assertFalse(await base.LinearPlatformAdapter._drain_outbox_once(self.adapter))
         self.assertEqual(manager.state.status, "paused")
@@ -110,12 +107,15 @@ class BlockedDiagnosticDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 await self.adapter._prepare_native_owned_turn_delivery(event, "DO_NOT_EXPOSE", result)
                 row = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
                 item = self.adapter._ledger.get_outbox_item(f"activity:turn-decision:{row['decision_id']}")
-                self.assertNotIn("DO_NOT_EXPOSE", item["payload"]["body"])
-                self.assertNotEqual(item["payload"]["activity_type"], "response")
+                if item is not None:
+                    self.assertNotIn("DO_NOT_EXPOSE", item["payload"]["body"])
+                    self.assertNotEqual(item["payload"]["activity_type"], "response")
+                if case in {"stop", "cancel", "done", "stale", "rotation"}:
+                    self.assertIsNone(item)
                 self.assertEqual(self.admitted, [])
                 self.assertEqual(base.FakeGoalManager.resume_calls, 0)
 
-    async def test_error_explanation_survives_ledger_reopen_without_duplicate(self):
+    async def test_pause_fence_survives_ledger_reopen_without_activity(self):
         event = base.turn_event()
         await self.adapter.on_processing_start(event)
         state = SimpleNamespace(status="paused", created_at=123.0,
@@ -129,9 +129,9 @@ class BlockedDiagnosticDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._ledger = base.DeliveryLedger(path, startup_recovery=False)
         self.adapter._linear.get_agent_session_delivery_context = mock.AsyncMock(return_value={"app_user_id": "app-user"})
         self.adapter._linear.create_activity = mock.AsyncMock(return_value="fixture")
-        self.assertTrue(await base.LinearPlatformAdapter._drain_outbox_once(self.adapter))
         self.assertFalse(await base.LinearPlatformAdapter._drain_outbox_once(self.adapter))
-        call = self.adapter._linear.create_activity.await_args
-        self.assertEqual(call.args[1], "error")
-        self.assertIn("RECOVERABLE_EXPLANATION", call.args[2])
+        self.assertFalse(await base.LinearPlatformAdapter._drain_outbox_once(self.adapter))
+        self.adapter._linear.create_activity.assert_not_awaited()
+        self.assertEqual(self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)["dispatch_state"], "fenced")
+        self.assertFalse(self.adapter._ledger.progress_is_allowed("linear-session"))
         self.assertEqual(self.admitted, [])
