@@ -156,6 +156,195 @@ class DependencyResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(kind == "elicitation" for kind, _ in self.adapter._linear.created))
         self.assertFalse(await self.adapter._reconcile_wait("linear-session"))
 
+    async def startup_queue(self, *, recovered=False):
+        from gateway.run_inbound import GatewayInboundMixin
+        from gateway.run_startup import GatewayStartupMixin
+        from types import MethodType
+
+        if recovered:
+            await self.old_false_resume()
+            self.assertTrue(await self.adapter._recover_unadmitted_dependency_wait("linear-session"))
+        else:
+            self.fixture()
+        runner = self.adapter.gateway_runner
+        runner.config = base.SimpleNamespace(multiplex_profiles=False)
+        runner._startup_restore_in_progress = True
+        runner._startup_restore_queue = []
+        runner._queue_startup_restore_event = MethodType(GatewayStartupMixin._queue_startup_restore_event, runner)
+        runner._adapter_for_source = lambda _source: self.adapter
+        self.goal = None
+        ensure = runner.ensure_goal_for_source
+
+        async def persistent_ensure(*args, **kwargs):
+            if self.goal is None:
+                self.goal = await ensure(*args, **kwargs)
+                self.goal.created_at = base.adapter_mod.time.time()
+                self.goal.last_turn_at = 0
+            return self.goal
+
+        async def goal_read(*args, **kwargs):
+            return self.goal
+
+        async def handler(event):
+            if not getattr(event, "_hermes_startup_restore_replay", False):
+                self.assertIsNone(await GatewayInboundMixin._hm_admit_event(runner, event))
+            else:
+                self.reached_handler.append(event)
+
+        runner.ensure_goal_for_source = persistent_ensure
+        runner.goal_state_for_source = goal_read
+        self.adapter.set_message_handler(handler)
+        self.assertTrue(await self.adapter._reconcile_wait("linear-session"))
+        await self.settle()
+        self.assertEqual(len(runner._startup_restore_queue), 1)
+        self.assertEqual(self.reached_handler, [])
+        return runner, MethodType(GatewayStartupMixin._drain_startup_restore_queue, runner)
+
+    async def test_startup_restore_replays_same_admission_not_a_new_goal(self):
+        runner, drain = await self.startup_queue()
+        event = runner._startup_restore_queue[0]
+        goal = self.goal
+        self.assertEqual(await drain(), 1)
+        await self.settle()
+        self.assertEqual(self.reached_handler, [event])
+        self.assertIs(self.goal, goal)
+        self.assertEqual(len(self.adapter._linear.created), 1)
+        self.assertFalse(await self.adapter._reconcile_wait("linear-session"))
+        self.assertEqual(await drain(), 0)
+
+    async def test_startup_replay_preserves_controls_and_goal_ownership(self):
+        from tools import approval
+
+        for case in ("stop", "question", "paused", "replaced", "executed", "approval", "revision"):
+            with self.subTest(case=case):
+                runner, drain = await self.startup_queue()
+                event = runner._startup_restore_queue[0]
+                assert self.goal is not None
+                if case == "stop":
+                    self.adapter._linear.activity("native-stop", "prompt", "", "stop")
+                    self.adapter._ledger.cancel_wait("linear-session")
+                elif case == "question":
+                    self.adapter._linear.activity("new-question", "elicitation", "Approval required")
+                elif case == "paused":
+                    self.goal.status = "paused"
+                elif case == "replaced":
+                    self.goal.created_at += 1
+                elif case == "executed":
+                    self.goal.turns_used = 1
+                elif case == "revision":
+                    self.adapter._ledger.requeue_unadmitted_wait("linear-session", event._linear_dependency_revision)
+                with mock.patch.object(approval, "get_pending_gateway_approval",
+                                       return_value={} if case == "approval" else None):
+                    await drain()
+                await self.settle()
+                self.assertEqual(self.reached_handler, [])
+            await self.asyncTearDown()
+            await self.asyncSetUp()
+
+    async def stranded_goal(self):
+        runner, _drain = await self.startup_queue(recovered=True)
+        runner._startup_restore_queue.clear()  # Lost process-local queue, as on restart.
+        runner._startup_restore_in_progress = False
+        runner._is_session_running = lambda _key: False
+        self.adapter._active_turn_events.clear()
+        self.adapter._linear.status = "stale"
+
+        async def handler(event):
+            self.reached_handler.append(event)
+
+        self.adapter.set_message_handler(handler)
+        return runner
+
+    async def test_zero_execution_recovery_uses_same_goal_and_durable_once_claim(self):
+        await self.stranded_goal()
+        goal = self.goal
+        self.assertTrue(await self.adapter._recover_unadmitted_dependency_wait("linear-session"))
+        await self.settle()
+        self.assertEqual(len(self.reached_handler), 1)
+        event = self.reached_handler[0]
+        self.assertTrue(event.internal)
+        self.assertTrue(event.metadata["linear_dependency_resume"])
+        self.assertIs(self.goal, goal)
+        decision = self.adapter._ledger.get_turn_decision(event.metadata["linear_continuation_decision_id"])
+        self.assertEqual(decision["dispatch_state"], "completed")
+        self.adapter._active_turn_events.clear()
+        self.assertFalse(await self.adapter._recover_unadmitted_dependency_wait("linear-session"))
+        await self.adapter._recover_turn_decisions()
+        await self.settle()
+        self.assertEqual(len(self.reached_handler), 1)
+
+    async def test_zero_execution_recovery_never_claims_started_or_unverified_work(self):
+        for case in ("history", "last_turn", "paused", "owner", "startup", "progress_missing",
+                     "stop", "question", "binding", "revision_race", "goal_race"):
+            with self.subTest(case=case):
+                runner = await self.stranded_goal()
+                assert self.goal is not None
+                linear = self.adapter._linear
+                if case == "history":
+                    runner.async_session_store.load_transcript.return_value = [{"role": "user", "content": "Started"}]
+                elif case == "last_turn":
+                    self.goal.last_turn_at = 1
+                elif case == "paused":
+                    self.goal.status = "paused"
+                elif case == "owner":
+                    runner._is_session_running = lambda _key: True
+                elif case == "startup":
+                    runner._startup_restore_in_progress = True
+                elif case == "progress_missing":
+                    original = self.adapter._ledger.get_outbox_item
+                    self.adapter._ledger.get_outbox_item = lambda key: None if key.startswith("activity:dependency-resume:") else original(key)
+                elif case in {"stop", "question"}:
+                    linear.activity("new-control", "prompt" if case == "stop" else "elicitation", "Real input", "stop" if case == "stop" else None)
+                elif case == "binding":
+                    runner.async_session_store.entry.session_key = "wrong"
+                elif case in {"revision_race", "goal_race"}:
+                    original = linear.verify_dependency_wait
+                    async def race(*args, **kwargs):
+                        result = await original(*args, **kwargs)
+                        if case == "goal_race":
+                            self.goal.created_at += 10
+                        else:
+                            wait = self.adapter._ledger.get_wait("linear-session")
+                            self.adapter._ledger.requeue_unadmitted_wait("linear-session", wait["revision"])
+                        return result
+                    linear.verify_dependency_wait = race
+                self.assertFalse(await self.adapter._recover_unadmitted_dependency_wait("linear-session"))
+                await self.settle()
+                self.assertEqual(self.reached_handler, [])
+            await self.asyncTearDown()
+            await self.asyncSetUp()
+
+    async def test_zero_execution_retry_cannot_escape_into_generic_goal_recovery(self):
+        await self.stranded_goal()
+        admit = self.adapter._admit_turn_event
+        self.adapter._admit_turn_event = mock.AsyncMock(side_effect=RuntimeError("transport unavailable"))
+        self.assertFalse(await self.adapter._recover_unadmitted_dependency_wait("linear-session"))
+        await self.adapter._recover_turn_decisions()
+        self.assertEqual(self.adapter._admit_turn_event.await_count, 1)
+        self.adapter._admit_turn_event = admit
+        self.assertTrue(await self.adapter._recover_unadmitted_dependency_wait("linear-session"))
+        await self.settle()
+        self.assertEqual(len(self.reached_handler), 1)
+
+    async def test_processing_hook_read_failure_cannot_skip_durable_running_claim(self):
+        await self.stranded_goal()
+        start = self.adapter.on_processing_start
+        starts = []
+
+        async def failing_start(event):
+            starts.append(event)
+            with mock.patch.object(self.adapter._linear, "verify_dependency_wait",
+                                   side_effect=RuntimeError("history read unavailable")):
+                return await start(event)
+
+        self.adapter.on_processing_start = failing_start
+        self.assertTrue(await self.adapter._recover_unadmitted_dependency_wait("linear-session"))
+        await self.settle()
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(self.reached_handler, [])
+        decision = self.adapter._ledger.get_turn_decision(starts[0].metadata["linear_continuation_decision_id"])
+        self.assertEqual(decision["dispatch_state"], "enqueued")
+
     async def test_real_gates_and_missing_admission_never_mark_resumed(self):
         from tools import approval, clarify_gateway
 

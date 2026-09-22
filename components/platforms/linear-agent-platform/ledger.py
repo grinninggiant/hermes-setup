@@ -1673,7 +1673,7 @@ class DeliveryLedger:
         with self._lock:
             row = self._db.execute(
                 "SELECT id, aggregate_key, sequence, operation, payload_json, state, attempts, "
-                "next_attempt_at, last_error FROM outbox WHERE id = ?",
+                "next_attempt_at, last_error, created_at FROM outbox WHERE id = ?",
                 (item_id,),
             ).fetchone()
         if row is None:
@@ -1688,6 +1688,7 @@ class DeliveryLedger:
             "attempts": int(row[6]),
             "next_attempt_at": float(row[7]),
             "last_error": row[8],
+            "created_at": int(row[9]),
         }
 
     def latest_clarify_timeout(self, session_id: str) -> dict[str, Any] | None:

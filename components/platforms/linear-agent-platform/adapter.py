@@ -872,7 +872,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.39",
+                "version": "0.8.40",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -3713,6 +3713,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if context.get("open_blockers"):
             return blocked("open_blockers")
         if status == "stale":
+            if event.metadata.get("linear_dependency_resume"):
+                # A dependency wake must prove its untouched native wait and
+                # deliver progress before stale can become executable again.
+                return "awaiting_input", "dependency_stale"
             return "stopped", "stopped"
         if status == "complete":
             return blocked("status_invalid")
@@ -3927,6 +3931,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return True
         if await self._prepare_bound_linear_ingress(event):
             return False
+        decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
+        if decision_id:
+            decision = self._ledger.get_turn_decision(decision_id) if self._ledger else None
+            # Core logs and swallows ordinary processing-start exceptions.
+            # Only the event that acquired the running claim may reach a model.
+            if (not decision or decision["dispatch_state"] != "running" or event.source is None
+                or self._active_turn_events.get(event.source.chat_id) is not event):
+                return False
         # Native FIFO wakes bypass handle_message and arrive metadata-light:
         # core processing-start precedes this admission callback. Only now has
         # the exact live session binding passed every authoritative gate.
@@ -4031,7 +4043,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         state = await self._goal_state_for_source(event.source, hermes_session_id)
         if event.metadata.get("linear_dependency_resume") and self._dependency_resume_claim(event) is None:
             return await self._visible_ingress_veto(event, "dependency_resume_fenced")
-        if event.metadata.get("linear_dependency_resume") and state is not None:
+        if event.metadata.get("linear_dependency_resume") and state is not None and not (
+            state.status == "active" and state.turns_used == 0
+            and getattr(state, "last_turn_at", 0) == 0
+            and state.created_at == getattr(event, "_linear_dependency_goal_generation", None)
+        ):
             return await self._visible_ingress_veto(event, "dependency_resume_goal_exists")
         if event.internal:
             if state is None or str(state.status) != "active":
@@ -4048,9 +4064,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if not isinstance(issue, dict):
                 return await self._visible_ingress_veto(event, "issue_missing")
             goal, contract = self._bounded_goal_contract(issue)
-            await self._ensure_goal_for_source(
+            state = await self._ensure_goal_for_source(
                 event.source, hermes_session_id, goal, contract
             )
+            if event.metadata.get("linear_dependency_resume"):
+                event._linear_dependency_goal_generation = state.created_at
         elif (
             str(state.status) == "paused"
             and getattr(event, "_linear_verified_normal_prompt", False)
@@ -4100,14 +4118,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         return None
 
     async def _recover_unadmitted_dependency_wait(self, session_id: str) -> bool:
-        """Requeue a proven legacy ingress veto, never a paused or executed goal."""
+        """Recover proven non-execution, never a paused or executed goal."""
         if self._ledger is None or self._linear is None:
             return False
         try:
             async with self._session_lock(session_id):
                 wait = self._ledger.get_wait(session_id)
                 if (not wait or wait["state"] != "resumed"
-                    or wait["last_error"] == "verified_ingress_not_admitted"
                     or self._ledger.has_session_closure(session_id)
                     or self._dependency_admission_veto(wait) is None):
                     return False
@@ -4126,14 +4143,76 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     return False
                 entry = await store.lookup_by_session_key(key)
                 if (entry is None or entry.session_key != key or not entry.session_id
-                    or await self._goal_state_for_source(event.source, entry.session_id) is not None
                     or await store.load_transcript(entry.session_id) != []
                     or not await self._dependency_wait_is_live(wait)):
+                    return False
+                state = await self._goal_state_for_source(event.source, entry.session_id)
+                if state is not None:
+                    return await self._recover_unstarted_dependency_goal(event, wait, entry, state)
+                if wait["last_error"] == "verified_ingress_not_admitted":
                     return False
                 return self._ledger.requeue_unadmitted_wait(session_id, wait["revision"])
         except Exception:
             logger.warning("[linear] Unadmitted wait verification failed session=%s", session_id, exc_info=True)
             return False
+
+    async def _recover_unstarted_dependency_goal(self, event, wait, entry, state) -> bool:
+        """Resume the zero-turn startup loss using the existing durable decision CAS."""
+        assert self._ledger is not None
+        runner = self.gateway_runner
+        key, session_id = entry.session_key, wait["session_id"]
+
+        def idle():
+            return not (runner._startup_restore_in_progress
+                        or key in self._active_sessions or key in self._pending_messages
+                        or runner._is_session_running(key))
+
+        progress = self._ledger.get_outbox_item(
+            f"activity:dependency-resume:{wait['delivery_key']}:{wait['revision']}"
+        )
+        if (wait["last_error"] != "verified_ingress_not_admitted"
+            or state.status != "active" or state.turns_used != 0 or state.last_turn_at != 0
+            or not idle() or not progress or progress["state"] != "delivered"
+            or progress["payload"].get("agent_session_id") != session_id
+            or progress["payload"].get("dependency_resume_revision") != wait["revision"]
+            or not progress["created_at"] <= state.created_at < wait["resumed_at"] + 1):
+            return False
+        generation, _ = self._decision_generation_and_ordinal(state)
+        # A source marker keeps generic goal recovery from dropping the
+        # dependency history/Stop proof if this process dies before dispatch.
+        decision = self._ledger.reserve_turn_decision(
+            session_id, wait["issue_id"], entry.session_id, generation, 0,
+            "continue", source={**self._source_snapshot(event.source),
+                                "dependency_resume_revision": wait["revision"]},
+        )
+        if decision["dispatch_state"] not in {"pending", "enqueued"}:
+            return False
+        if decision["dispatch_state"] == "pending" and not self._ledger.transition_turn_decision(
+            decision["decision_id"], "pending", "enqueued"
+        ):
+            return False
+        if not self._ledger.claim_turn_admission_attempt(decision["decision_id"], _TURN_ADMISSION_MAX_ATTEMPTS):
+            return False
+        event.internal = True
+        event.metadata.update({
+            "gateway_session_key": key, "gateway_session_id": entry.session_id,
+            "gateway_session_strict": True,
+            "linear_continuation_decision_id": decision["decision_id"],
+        })
+        event._linear_dependency_revision = wait["revision"]
+        event._linear_dependency_goal_generation = state.created_at
+        if self._dependency_resume_claim(event) is None or not idle():
+            return False
+        self._enqueue_activity(
+            session_id, "thought", "Verified unstarted dependency admission; recovering the same native session.",
+            item_key=f"dependency-recovery:{decision['decision_id']}", ephemeral=True,
+            metadata={"dependency_resume_revision": wait["revision"]},
+        )
+        await self._post_thought(session_id)
+        item = self._ledger.get_outbox_item(f"activity:dependency-recovery:{decision['decision_id']}")
+        if not item or item["state"] != "delivered" or not idle():
+            return False
+        return await self._admit_turn_event(event)
 
     async def _dependency_wait_is_live(self, wait: dict[str, Any]) -> bool:
         """Recheck a claimed dependency notice at admission and outbox delivery."""
@@ -4163,6 +4242,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         issue_id = event.metadata["linear_issue_id"]
         delivery_key = event.metadata["linear_delivery_key"]
         wait = self._ledger.get_wait(session_id)
+        # Core startup restore re-enters the same event after acknowledging it.
+        # Revalidate its exact claim; do not create another progress/goal.
+        claim = self._dependency_resume_claim(event)
+        if claim is not None:
+            return await self._dependency_wait_is_live(claim)
         if (
             not wait or wait["state"] != "resuming" or wait["issue_id"] != issue_id
             or wait["delivery_key"] != delivery_key or wait["prompt"] != event.raw_message
@@ -4889,6 +4973,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             for row in rows:
                 await asyncio.sleep(0)
+                if "dependency_resume_revision" in (row.get("source") or {}):
+                    continue  # The dependency loop owns the stricter recovery proof.
                 async with self._session_lock(row["agent_session_id"]):
                     if row["outcome"] == "success":
                         retry_needed = await self._recover_orphan_success(row) or retry_needed
