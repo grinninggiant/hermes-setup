@@ -8,10 +8,7 @@ case "$profile" in
   *) print -u2 -- "Unsupported Hermes profile: $profile"; exit 64 ;;
 esac
 
-hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-def2cf0ca4e941cb9799a74786f1c8c4a41065d8/venv/bin/hermes"
-if [[ "$profile" == "assistant" ]]; then
-  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-d25b0bc3d9e884ddde6550c6d1fd250e98b97a09-baseline-deps/venv/bin/hermes"
-fi
+hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-d25b0bc3d9e884ddde6550c6d1fd250e98b97a09-baseline-deps/venv/bin/hermes"
 if [[ "$profile" == "general" ]]; then
   hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-fd5d65e8b272480176f66d52907135500bdb5302/venv/bin/hermes"
 fi
