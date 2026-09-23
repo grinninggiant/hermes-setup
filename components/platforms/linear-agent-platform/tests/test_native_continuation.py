@@ -114,6 +114,15 @@ class FakeLinear:
             for call in getattr(create, "await_args_list", ())
         )
 
+    async def get_agent_session_delivery_context(self, session_id: str) -> dict:
+        context = await self.get_agent_turn_context(session_id)
+        issue = context["issue"]
+        return {
+            "id": session_id, "app_user_id": context["app_user_id"],
+            "issue_id": issue["id"], "updated_at": issue["updatedAt"],
+            "description": issue["description"], "delegate_id": issue["delegate"]["id"],
+        }
+
     async def get_agent_turn_context(self, session_id: str) -> dict:
         return {
             "id": session_id,
@@ -123,6 +132,7 @@ class FakeLinear:
                 "id": "issue-164",
                 "identifier": "OPS-164",
                 "title": "Native continuation",
+                "updatedAt": "2026-08-30T20:00:00.000Z",
                 "description": self.description,
                 "state": {"id": "started", "name": "In Progress", "type": self.state_type},
                 "delegate": {"id": self.actor_id},
@@ -458,6 +468,20 @@ class DecisionLedgerTests(unittest.TestCase):
         self.assertIsNotNone(self.ledger.get_turn_decision(row["decision_id"]))
 
 
+def record_acceptance_fixture(adapter, description=None):
+    """Offline PASS metadata for the verified-delivery fixtures, never live evidence."""
+    description = description or "## Acceptance\n- [x] tests pass\n- [x] restart is safe"
+    for criterion in adapter_mod.acceptance_criteria(description):
+        adapter._ledger.record_acceptance_evidence(
+            issue_id="issue-164", actor_id="app-user", criterion_hash=criterion.criterion_hash,
+            test_class="integration", evidence_digest="b" * 64,
+            evidence_pointer="artifact://offline-test-fixture",
+            observed_revision="2026-08-30T20:00:00.000Z",
+            accepted_revision="2026-08-30T20:00:00.000Z",
+            timestamp="2026-08-30T20:00:00.000Z", result="PASS",
+        )
+
+
 class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         FakeGoalManager.instances.clear()
@@ -494,6 +518,7 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.adapter._ledger = DeliveryLedger(path)
         self.adapter._linear = FakeLinear()
+        record_acceptance_fixture(self.adapter)
         self.adapter._running = True
         self.admitted: list[MessageEvent] = []
 
@@ -512,6 +537,15 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.drain_patch.stop()
         self.adapter._ledger.close()
         self.temp.cleanup()
+
+    async def test_checked_native_success_requires_current_delegate_evidence(self):
+        self.adapter._ledger._db.execute("DELETE FROM acceptance_evidence")
+        self.adapter._ledger._db.commit()
+        self.adapter._linear.description = "## Acceptance\n- [x] tests pass\n- [x] restart is safe"
+        event = turn_event()
+        result = {**dict(event._gateway_turn_result), "completed": True}
+        context = await self.adapter._linear.get_agent_turn_context("linear-session")
+        self.assertNotEqual(self.adapter._classify_turn_outcome(event, result, context), "success")
 
     async def test_verified_blocker_dispatches_turkish_structured_notice(self):
         row = self.adapter._ledger.reserve_turn_decision(
@@ -2041,7 +2075,6 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
             return_value=checked
         )
         self.adapter._linear.create_activity = mock.AsyncMock(return_value="activity")
-        self.adapter._validate_activity_target = mock.AsyncMock(return_value=None)
         store = self.adapter.gateway_runner.async_session_store
         event = turn_event()
         event._gateway_turn_result = MappingProxyType(
@@ -2072,7 +2105,6 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
             return_value=checked
         )
         self.adapter._linear.create_activity = mock.AsyncMock(return_value="activity")
-        self.adapter._validate_activity_target = mock.AsyncMock(return_value=None)
         event = turn_event()
         event._gateway_turn_result = MappingProxyType(
             {**dict(event._gateway_turn_result), "completed": True}

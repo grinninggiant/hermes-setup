@@ -302,8 +302,17 @@ class OutboundPolicyTests(unittest.TestCase):
                 )
                 self.assertEqual((denied.action, denied.reason), ("deny", reason))
 
-    def test_mark_acceptance_requires_exact_revision_and_description_only(self):
+    def test_mark_acceptance_requires_exact_revision_description_and_evidence(self):
         policy = self.standard()
+        evidence = [{
+            "criterion_hash": "a" * 64,
+            "test_class": "integration",
+            "evidence_digest": "b" * 64,
+            "evidence_pointer": "linear://activity/evidence-1",
+            "observed_revision": "2026-08-09T18:00:00.000Z",
+            "result": "PASS",
+            "timestamp": "2026-08-09T18:00:01.000Z",
+        }]
         allowed = policy.evaluate(
             "save_issue",
             {
@@ -312,6 +321,7 @@ class OutboundPolicyTests(unittest.TestCase):
                 "lifecycle_action": "mark_acceptance",
                 "expected_updated_at": "2026-08-09T18:00:00.000Z",
                 "description": "- [x] Proven criterion",
+                "acceptance_evidence": evidence,
             },
             live_actor_id="actor-1",
             live_organization_id="org-1",
@@ -324,6 +334,7 @@ class OutboundPolicyTests(unittest.TestCase):
                     "target_team_id": "ops-1",
                     "lifecycle_action": "mark_acceptance",
                     "description": "- [x] Proven criterion",
+                    "acceptance_evidence": evidence,
                 },
                 "expected_updated_at_required",
             ),
@@ -334,6 +345,7 @@ class OutboundPolicyTests(unittest.TestCase):
                     "lifecycle_action": "mark_acceptance",
                     "expected_updated_at": "revision",
                     "description": "- [x] Proven criterion",
+                    "acceptance_evidence": evidence,
                     "priority": 1,
                 },
                 "lifecycle_fields_not_allowed",
@@ -415,7 +427,8 @@ class OutboundPolicyTests(unittest.TestCase):
             metadata_acceptance_descriptions=[description],
         )
         base = {"target_team_id": "ops-1", "id": "OPS-1",
-                "expected_updated_at": "2026-09-23T00:00:00Z", "description": description}
+                "expected_updated_at": "2026-09-23T00:00:00Z", "description": description,
+                "acceptance_evidence": [{"criterion_hash": "a" * 64}]}
         def decide(tool, arguments):
             return policy.evaluate(tool, arguments, live_actor_id="actor-1",
                                    live_organization_id="org-1").action
@@ -440,7 +453,8 @@ class OutboundPolicyTests(unittest.TestCase):
         base = {"expected_actor_id": "actor-1", "expected_organization_id": "org-1",
                 "allowed_team_ids": ["ops-1"], "sensitive_mode": "metadata_only"}
         args = {"target_team_id": "ops-1", "id": "OPS-1", "lifecycle_action": "mark_acceptance",
-                "expected_updated_at": "2026-09-23T00:00:00Z", "description": description}
+                "expected_updated_at": "2026-09-23T00:00:00Z", "description": description,
+                "acceptance_evidence": [{"criterion_hash": "a" * 64}]}
         def allowed(config):
             return _policy_from_outbound(config).evaluate(
                 "save_issue", args, live_actor_id="actor-1", live_organization_id="org-1"
