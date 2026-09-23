@@ -388,7 +388,9 @@ def validate_command(command: Sequence[str]) -> list[str]:
         return args
     relative = endpoint.removeprefix(f"{repo_root}/")
     allowed_fields: set[str]
-    if method == "POST" and relative == "pulls":
+    if method == "POST" and repo_root == f"repos/{ALLOWED_OWNER}/hermes-agent" and relative == "pulls/17/ready_for_review":
+        allowed_fields = set()
+    elif method == "POST" and relative == "pulls":
         allowed_fields = {"base", "body", "draft", "head", "title"}
         if not {"base", "head", "title"}.issubset(raw_fields):
             raise BrokerError("pull request creation fields are incomplete")
