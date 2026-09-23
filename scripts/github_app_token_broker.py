@@ -303,8 +303,10 @@ def validate_command(command: Sequence[str]) -> list[str]:
         raise BrokerError("only the pinned gh binary is allowed")
     if args[1:] == ["auth", "status"]:
         return args
+    if args[1:] == ["pr", "ready", "17", "-R", f"{ALLOWED_OWNER}/hermes-agent"]:
+        return args
     if len(args) < 3 or args[1] != "api":
-        raise BrokerError("only gh auth status and pinned gh api routes are allowed")
+        raise BrokerError("only gh auth status, exact PR 17 ready, and pinned gh api routes are allowed")
     endpoint = args[2]
     if (
         not re.fullmatch(r"[A-Za-z0-9._~!$&'()*+,;=:@/-]+", endpoint)
@@ -388,9 +390,7 @@ def validate_command(command: Sequence[str]) -> list[str]:
         return args
     relative = endpoint.removeprefix(f"{repo_root}/")
     allowed_fields: set[str]
-    if method == "POST" and repo_root == f"repos/{ALLOWED_OWNER}/hermes-agent" and relative == "pulls/17/ready_for_review":
-        allowed_fields = set()
-    elif method == "POST" and relative == "pulls":
+    if method == "POST" and relative == "pulls":
         allowed_fields = {"base", "body", "draft", "head", "title"}
         if not {"base", "head", "title"}.issubset(raw_fields):
             raise BrokerError("pull request creation fields are incomplete")

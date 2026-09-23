@@ -47,18 +47,16 @@ class BrokerTests(unittest.TestCase):
         with self.assertRaises(BROKER.BrokerError):
             BROKER.validate_command([BROKER.GH_BINARY, 'api', 'repos/grinninggiant/hermes-setup/issues/1/comments', '-X', 'POST', '-f', 'body=fixture', '-F', 'draft=false'])
 
-    def test_ready_for_review_is_exact_pr17_post_without_fields(self):
-        allowed = [BROKER.GH_BINARY, "api", "repos/grinninggiant/hermes-agent/pulls/17/ready_for_review", "-X", "POST"]
+    def test_ready_for_review_is_exact_pr17_cli(self):
+        allowed = [BROKER.GH_BINARY, "pr", "ready", "17", "-R", "grinninggiant/hermes-agent"]
         self.assertEqual(BROKER.validate_command(allowed), allowed)
         for command in (
-            [BROKER.GH_BINARY, "api", "repos/grinninggiant/hermes-agent/pulls/18/ready_for_review", "-X", "POST"],
-            [BROKER.GH_BINARY, "api", "repos/grinninggiant/hermes-setup/pulls/17/ready_for_review", "-X", "POST"],
-            allowed[:-1] + ["PATCH"],
-            allowed[:-1] + ["PUT"],
-            allowed[:-1] + ["DELETE"],
-            [BROKER.GH_BINARY, "api", "repos/grinninggiant/hermes-agent/pulls/017/ready_for_review", "-X", "POST"],
-            allowed + ["-f", "body=unexpected"],
-            allowed + ["-F", "draft=false"],
+            [BROKER.GH_BINARY, "api", "repos/grinninggiant/hermes-agent/pulls/17/ready_for_review", "-X", "POST"],
+            [BROKER.GH_BINARY, "pr", "ready", "18", "-R", "grinninggiant/hermes-agent"],
+            [BROKER.GH_BINARY, "pr", "ready", "17", "-R", "grinninggiant/hermes-setup"],
+            [BROKER.GH_BINARY, "pr", "ready", "017", "-R", "grinninggiant/hermes-agent"],
+            allowed + ["--undo"],
+            allowed + ["--repo", "grinninggiant/hermes-agent"],
         ):
             with self.subTest(command=command), self.assertRaises(BROKER.BrokerError):
                 BROKER.validate_command(command)
