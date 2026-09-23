@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -406,6 +408,22 @@ class DeployPluginTests(unittest.TestCase):
         self.assertEqual("old-runtime\n", (rollback / "old.py").read_text(encoding="utf-8"))
         self.assertEqual(self.commit, result["commit"])
         self.assertTrue(result["rollback_digest"])
+
+    def test_reinstall_keeps_only_active_manifest_in_discovery(self) -> None:
+        helper = load_helper()
+        first = helper.deploy_reviewed(repo_root=self.repo, profiles_root=self.profiles, profile="general")
+        second = helper.deploy_reviewed(repo_root=self.repo, profiles_root=self.profiles, profile="general")
+        backup_root = self.profiles / "general" / "plugin-backups" / "linear"
+        self.assertEqual(backup_root.resolve(), Path(second["rollback_path"]).parent)
+        self.assertEqual(0o700, backup_root.stat().st_mode & 0o777)
+        self.assertEqual(os.getuid(), backup_root.stat().st_uid)
+        self.assertEqual(0o700, backup_root.parent.stat().st_mode & 0o777)
+        self.assertTrue((Path(second["rollback_path"]) / "plugin.yaml").is_file())
+        self.assertTrue(Path(first["rollback_path"]).is_dir())
+        self.assertEqual([self.target / "plugin.yaml"], list(self.target.parent.rglob("plugin.yaml")))
+        record = json.loads(Path(second["record_path"]).read_text())
+        self.assertEqual(second["rollback_path"], record["rollback_path"])
+        self.assertEqual(second["rollback_digest"], record["rollback_digest"])
     def test_interruption_after_backup_rename_restores_original_target(self) -> None:
         helper = load_helper()
         helper.REVIEWED_MANIFESTS = {self.commit: self.manifest}
@@ -424,6 +442,56 @@ class DeployPluginTests(unittest.TestCase):
 
         self.assertTrue(self.target.is_dir())
         self.assertEqual("old-runtime\n", (self.target / "old.py").read_text(encoding="utf-8"))
+        self.assertEqual([], list(self.target.parent.glob(".linear-rollback-*")))
+
+    def test_backup_root_symlink_and_unsafe_mode_are_rejected(self) -> None:
+        helper = load_helper()
+        backup_parent = self.profiles / "general" / "plugin-backups"
+        backup_parent.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(helper.DeploymentError):
+            helper.deploy_reviewed(repo_root=self.repo, profiles_root=self.profiles, profile="general")
+        backup_parent.unlink()
+        backup_parent.mkdir(mode=0o700)
+        backup_parent.chmod(0o777)
+        with self.assertRaisesRegex(helper.DeploymentError, "mode"):
+            helper.deploy_reviewed(repo_root=self.repo, profiles_root=self.profiles, profile="general")
+        self.assertTrue((self.target / "old.py").is_file())
+
+    def test_sigterm_after_backup_recovers_from_outside_discovery(self) -> None:
+        helper = load_helper()
+        with self.assertRaisesRegex(helper.DeploymentError, "signal"):
+            helper.deploy_reviewed(
+                repo_root=self.repo, profiles_root=self.profiles, profile="general",
+                _after_backup_hook=lambda: os.kill(os.getpid(), signal.SIGTERM),
+            )
+        self.assertEqual("old-runtime\n", (self.target / "old.py").read_text())
+        self.assertEqual([], list(self.target.parent.glob(".linear-*")))
+        self.assertEqual([], list((self.profiles / "general" / "plugin-backups" / "linear").glob(".linear-stage-*")))
+
+    def test_signal_between_backup_rename_and_chmod_restores_original_mode(self) -> None:
+        helper = load_helper()
+        self.target.chmod(0o755)
+        original_inode = self.target.stat().st_ino
+        original_rename = helper.os.rename
+        interrupted = False
+
+        def interrupt_after_rename(source, destination, *args, **kwargs):
+            nonlocal interrupted
+            result = original_rename(source, destination, *args, **kwargs)
+            if source == "linear" and str(destination).startswith(".linear-rollback-") and not interrupted:
+                interrupted = True
+                os.kill(os.getpid(), signal.SIGTERM)
+            return result
+
+        with mock.patch.object(helper.os, "rename", side_effect=interrupt_after_rename):
+            with self.assertRaisesRegex(helper.DeploymentError, "signal"):
+                helper.deploy_reviewed(repo_root=self.repo, profiles_root=self.profiles, profile="general")
+
+        self.assertTrue(interrupted)
+        self.assertEqual(original_inode, self.target.stat().st_ino)
+        self.assertEqual(0o755, self.target.stat().st_mode & 0o777)
+        self.assertEqual("old-runtime\n", (self.target / "old.py").read_text())
+
     def test_dirty_repository_is_rejected_before_mutation(self) -> None:
         helper = load_helper()
         helper.REVIEWED_MANIFESTS = {self.commit: self.manifest}
@@ -546,9 +614,10 @@ class DeployPluginTests(unittest.TestCase):
             )
 
         self.assertEqual("old-runtime\n", (self.target / "old.py").read_text(encoding="utf-8"))
-        failed = list((self.target.parent).glob(".linear-failed-*"))
+        failed = list((self.profiles / "general" / "plugin-backups" / "linear").glob(".linear-failed-*"))
         self.assertEqual(1, len(failed))
         self.assertEqual(set(ALLOWLIST), {path.name for path in failed[0].iterdir()})
+        self.assertEqual([], list(self.target.parent.rglob("plugin.yaml")))
 
     def test_exact_rollback_restores_old_tree_and_preserves_failed_current(self) -> None:
         helper = load_helper()
@@ -570,7 +639,52 @@ class DeployPluginTests(unittest.TestCase):
         self.assertEqual("rolled_back", result["status"])
         self.assertEqual("old-runtime\n", (self.target / "old.py").read_text(encoding="utf-8"))
         failed = Path(result["failed_path"])
+        self.assertEqual(Path(deployed["rollback_path"]).parent, failed.parent)
         self.assertEqual(set(ALLOWLIST), {path.name for path in failed.iterdir()})
+        self.assertEqual([], list(self.target.parent.rglob("plugin.yaml")))
+
+    def test_legacy_rollback_coordinates_fail_closed_without_mutation(self) -> None:
+        helper = load_helper()
+        old = self.target.parent / ".linear-rollback-historical"
+        old.mkdir(mode=0o700)
+        (old / "plugin.yaml").write_text("old manifest\n")
+        with self.assertRaisesRegex(helper.DeploymentError, "outside the named profile"):
+            helper.rollback_exact(profiles_root=self.profiles, profile="general",
+                                  rollback_path=old, rollback_digest="0" * 64)
+        self.assertTrue(old.is_dir())
+        self.assertTrue((self.target / "old.py").is_file())
+
+    def test_rollback_slot_symlink_and_owner_guard(self) -> None:
+        helper = load_helper()
+        deployed = helper.deploy_reviewed(repo_root=self.repo, profiles_root=self.profiles, profile="general")
+        slot = Path(deployed["rollback_path"])
+        original = slot.with_name("saved-rollback")
+        slot.rename(original)
+        slot.symlink_to(original, target_is_directory=True)
+        with self.assertRaisesRegex(helper.DeploymentError, "non-symlink"):
+            helper.rollback_exact(profiles_root=self.profiles, profile="general",
+                                  rollback_path=slot, rollback_digest=deployed["rollback_digest"])
+        slot.unlink()
+        original.rename(slot)
+        info = os.stat(slot)
+        foreign = list(info)
+        foreign[4] = os.getuid() + 1
+        with self.assertRaisesRegex(helper.DeploymentError, "owner"):
+            helper._validate_dir_info(os.stat_result(foreign), "rollback slot", exact_mode=0o700)
+        self.assertTrue((self.target / "plugin.yaml").is_file())
+
+    def test_cli_rollback_accepts_new_record_coordinates(self) -> None:
+        helper = load_helper()
+        deployed = helper.deploy_reviewed(repo_root=self.repo, profiles_root=self.profiles, profile="general")
+        record = json.loads(Path(deployed["record_path"]).read_text())
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "rollback", "--profiles-root", str(self.profiles),
+             "--profile", "general", "--rollback-path", record["rollback_path"],
+             "--rollback-digest", record["rollback_digest"]],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual("rolled_back", json.loads(result.stdout)["status"])
+        self.assertTrue((self.target / "old.py").is_file())
 
     def test_wrong_rollback_digest_causes_no_mutation(self) -> None:
         helper = load_helper()
@@ -693,7 +807,7 @@ class DeployPluginTests(unittest.TestCase):
             )
 
         self.assertEqual(set(ALLOWLIST), {path.name for path in self.target.iterdir()})
-        rejected = list(self.target.parent.glob(".linear-rollback-failed-*"))
+        rejected = list(Path(deployed["rollback_path"]).parent.glob(".linear-rollback-failed-*"))
         self.assertEqual(1, len(rejected))
         self.assertEqual("corrupted-rollback\n", (rejected[0] / "old.py").read_text(encoding="utf-8"))
     def test_sigterm_after_verified_does_not_roll_back(self) -> None:

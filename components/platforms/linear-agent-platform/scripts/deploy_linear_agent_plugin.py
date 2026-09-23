@@ -639,8 +639,10 @@ def _tree_records_fd(directory_fd: int, prefix: str = "") -> list[str]:
                 raise DeploymentError("Plugin tree file is unavailable") from exc
             try:
                 pinned = os.fstat(file_fd)
-                if pinned.st_dev != info.st_dev or pinned.st_ino != info.st_ino:
-                    raise DeploymentError("Plugin tree entry changed during verification")
+                if (pinned.st_dev != info.st_dev or pinned.st_ino != info.st_ino
+                        or pinned.st_uid != os.getuid() or info.st_uid != os.getuid()
+                        or pinned.st_mode & 0o777 != mode):
+                    raise DeploymentError("Plugin tree entry changed or has unsafe ownership")
                 records.append(f"f\0{relative}\0{mode:o}\0{_sha256(_read_all(file_fd))}")
             finally:
                 os.close(file_fd)
@@ -716,6 +718,28 @@ def _mkdir_private(parent_fd: int, name: str) -> int:
     except OSError as exc:
         raise DeploymentError("Private deployment directory could not be created") from exc
 
+
+def _open_or_create_private(parent_fd: int, name: str, label: str) -> int:
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise DeploymentError(f"Private directory could not be created: {label}") from exc
+    fd = _open_child_dir(parent_fd, name, label, exact_mode=0o700)
+    os.fsync(parent_fd)
+    return fd
+
+def _open_backup_root(profile_fd: int, plugins_fd: int) -> int:
+    parent_fd = _open_or_create_private(profile_fd, "plugin-backups", "backup parent")
+    try:
+        backup_fd = _open_or_create_private(parent_fd, "linear", "backup root")
+    finally:
+        os.close(parent_fd)
+    if os.fstat(backup_fd).st_dev != os.fstat(plugins_fd).st_dev:
+        os.close(backup_fd)
+        raise DeploymentError("Backup root is not on the plugins filesystem")
+    return backup_fd
 
 def _remove_tree_fd(parent_fd: int, name: str) -> None:
     try:
@@ -846,6 +870,7 @@ def deploy_reviewed(
     repo_root = repo_root.resolve(strict=True)
     _, profiles_fd, profile_fd, plugins_fd, state_fd = _open_profile_roots(profiles_root, profile)
     lock_fd: int | None = None
+    backup_fd: int | None = None
     stage_fd: int | None = None
     target_fd: int | None = None
     stage_name: str | None = None
@@ -868,6 +893,7 @@ def deploy_reviewed(
         lock_fd = _acquire_lock(state_fd, lock_timeout)
         target_fd = _open_child_dir(plugins_fd, "linear", "linear target")
         pinned_target = os.fstat(target_fd)
+        backup_fd = _open_backup_root(profile_fd, plugins_fd)
 
         def recover(_signum: int = 0) -> bool:
             nonlocal recovering, failed_name, state
@@ -878,19 +904,33 @@ def deploy_reviewed(
             recovering = True
             old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _HANDLED_SIGNALS)
             try:
-                names = set(os.listdir(plugins_fd))
+                names = set(os.listdir(backup_fd))
                 if rollback_name and rollback_name in names:
-                    if "linear" in names:
+                    rollback_fd = _open_child_dir(backup_fd, rollback_name, "rollback slot")
+                    try:
+                        pinned = os.fstat(rollback_fd)
+                        if (stat.S_IMODE(pinned.st_mode) not in {stat.S_IMODE(pinned_target.st_mode), 0o700}
+                                or (pinned.st_dev, pinned.st_ino) != (pinned_target.st_dev, pinned_target.st_ino)
+                                or _tree_digest_fd(rollback_fd) != rollback_digest):
+                            raise DeploymentError("Pinned rollback changed during recovery")
+                    finally:
+                        os.close(rollback_fd)
+                    if "linear" in set(os.listdir(plugins_fd)):
                         failed_name = _unique_name(".linear-failed-")
-                        os.rename("linear", failed_name, src_dir_fd=plugins_fd, dst_dir_fd=plugins_fd)
+                        os.rename("linear", failed_name, src_dir_fd=plugins_fd, dst_dir_fd=backup_fd)
                         os.fsync(plugins_fd)
-                    os.rename(rollback_name, "linear", src_dir_fd=plugins_fd, dst_dir_fd=plugins_fd)
+                        os.fsync(backup_fd)
+                    os.rename(rollback_name, "linear", src_dir_fd=backup_fd, dst_dir_fd=plugins_fd)
+                    os.fsync(backup_fd)
                     os.fsync(plugins_fd)
                     restored_fd = _open_child_dir(plugins_fd, "linear", "restored target")
                     try:
                         restored = os.fstat(restored_fd)
                         if restored.st_dev != pinned_target.st_dev or restored.st_ino != pinned_target.st_ino:
                             raise DeploymentError("Recovered target inode does not match pinned rollback")
+                        if stat.S_IMODE(restored.st_mode) != stat.S_IMODE(pinned_target.st_mode):
+                            os.fchmod(restored_fd, stat.S_IMODE(pinned_target.st_mode))
+                            os.fsync(restored_fd)
                     finally:
                         os.close(restored_fd)
                     state = "recovered"
@@ -901,7 +941,7 @@ def deploy_reviewed(
 
         previous_handlers = _install_signal_guards(recover)
         stage_name = _unique_name(".linear-stage-")
-        stage_fd = _mkdir_private(plugins_fd, stage_name)
+        stage_fd = _mkdir_private(backup_fd, stage_name)
         for name in ALLOWLIST:
             data = _run_git(
                 repo_root,
@@ -925,10 +965,10 @@ def deploy_reviewed(
         state = "staged"
 
         rollback_name = _unique_name(".linear-rollback-")
-        if rollback_name in set(os.listdir(plugins_fd)):
+        if rollback_name in set(os.listdir(backup_fd)):
             raise DeploymentError("Rollback slot already exists")
         rollback_digest = _tree_digest_fd(target_fd)
-        rollback_path = str(profiles_root.resolve(strict=True) / profile / "plugins" / rollback_name)
+        rollback_path = str(profiles_root.resolve(strict=True) / profile / "plugin-backups" / "linear" / rollback_name)
         record_name = f"linear-plugin-deploy-{rollback_name.removeprefix('.linear-rollback-')}.json"
         coordinates = {
             "status": "prepared",
@@ -942,9 +982,10 @@ def deploy_reviewed(
         if announce is not None:
             announce(dict(coordinates))
 
-        os.rename("linear", rollback_name, src_dir_fd=plugins_fd, dst_dir_fd=plugins_fd)
+        os.rename("linear", rollback_name, src_dir_fd=plugins_fd, dst_dir_fd=backup_fd)
         os.fsync(plugins_fd)
-        rollback_fd = _open_child_dir(plugins_fd, rollback_name, "rollback slot")
+        os.fsync(backup_fd)
+        rollback_fd = _open_child_dir(backup_fd, rollback_name, "rollback slot")
         try:
             moved = os.fstat(rollback_fd)
             if moved.st_dev != pinned_target.st_dev or moved.st_ino != pinned_target.st_ino:
@@ -953,12 +994,13 @@ def deploy_reviewed(
             os.fsync(rollback_fd)
         finally:
             os.close(rollback_fd)
-        os.fsync(plugins_fd)
+        os.fsync(backup_fd)
         state = "backed_up"
         if _after_backup_hook is not None:
             _after_backup_hook()
 
-        os.rename(stage_name, "linear", src_dir_fd=plugins_fd, dst_dir_fd=plugins_fd)
+        os.rename(stage_name, "linear", src_dir_fd=backup_fd, dst_dir_fd=plugins_fd)
+        os.fsync(backup_fd)
         os.fsync(plugins_fd)
         state = "promoted"
         os.close(stage_fd)
@@ -992,8 +1034,10 @@ def deploy_reviewed(
             os.close(stage_fd)
         if target_fd is not None:
             os.close(target_fd)
-        if stage_name is not None and stage_name in set(os.listdir(plugins_fd)):
-            _remove_tree_fd(plugins_fd, stage_name)
+        if backup_fd is not None:
+            if stage_name is not None and stage_name in set(os.listdir(backup_fd)):
+                _remove_tree_fd(backup_fd, stage_name)
+            os.close(backup_fd)
         if lock_fd is not None:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
@@ -1013,6 +1057,7 @@ def rollback_exact(
 ) -> dict[str, str]:
     canonical, profiles_fd, profile_fd, plugins_fd, state_fd = _open_profile_roots(profiles_root, profile)
     lock_fd: int | None = None
+    backup_fd: int | None = None
     rollback_fd: int | None = None
     target_fd: int | None = None
     failed_name: str | None = None
@@ -1022,12 +1067,14 @@ def rollback_exact(
     try:
         lock_fd = _acquire_lock(state_fd, lock_timeout)
         expected_parent = canonical / profile / "plugins"
+        expected_backup = canonical / profile / "plugin-backups" / "linear"
         supplied = rollback_path.absolute()
-        if supplied.parent != expected_parent or not supplied.name.startswith(".linear-rollback-"):
+        if supplied.parent != expected_backup or not supplied.name.startswith(".linear-rollback-"):
             raise DeploymentError("Rollback coordinates are outside the named profile")
         if not re.fullmatch(r"[0-9a-f]{64}", rollback_digest):
             raise DeploymentError("Rollback digest is invalid")
-        rollback_fd = _open_child_dir(plugins_fd, supplied.name, "rollback slot", exact_mode=0o700)
+        backup_fd = _open_backup_root(profile_fd, plugins_fd)
+        rollback_fd = _open_child_dir(backup_fd, supplied.name, "rollback slot", exact_mode=0o700)
         if _tree_digest_fd(rollback_fd) != rollback_digest:
             raise DeploymentError("Rollback tree digest does not match")
         pinned_rollback = os.fstat(rollback_fd)
@@ -1039,9 +1086,10 @@ def rollback_exact(
 
         previous_handlers = _install_signal_guards(interrupt_rollback)
         failed_name = _unique_name(".linear-failed-")
-        os.rename("linear", failed_name, src_dir_fd=plugins_fd, dst_dir_fd=plugins_fd)
+        os.rename("linear", failed_name, src_dir_fd=plugins_fd, dst_dir_fd=backup_fd)
         os.fsync(plugins_fd)
-        moved_current_fd = _open_child_dir(plugins_fd, failed_name, "preserved current")
+        os.fsync(backup_fd)
+        moved_current_fd = _open_child_dir(backup_fd, failed_name, "preserved current")
         try:
             moved = os.fstat(moved_current_fd)
             if moved.st_dev != pinned_target.st_dev or moved.st_ino != pinned_target.st_ino:
@@ -1051,7 +1099,8 @@ def rollback_exact(
         if _after_current_backup_hook is not None:
             _after_current_backup_hook()
 
-        os.rename(supplied.name, "linear", src_dir_fd=plugins_fd, dst_dir_fd=plugins_fd)
+        os.rename(supplied.name, "linear", src_dir_fd=backup_fd, dst_dir_fd=plugins_fd)
+        os.fsync(backup_fd)
         os.fsync(plugins_fd)
         restored_fd = _open_child_dir(plugins_fd, "linear", "restored rollback")
         try:
@@ -1069,22 +1118,24 @@ def rollback_exact(
             "status": "rolled_back",
             "profile": profile,
             "target_path": str(expected_parent / "linear"),
-            "failed_path": str(expected_parent / failed_name),
+            "failed_path": str(expected_backup / failed_name),
             "rollback_digest": rollback_digest,
         }
     except BaseException:
         recovering = True
         try:
             if failed_name is not None:
-                names = set(os.listdir(plugins_fd))
+                names = set(os.listdir(backup_fd))
                 if failed_name in names:
-                    if "linear" in names:
+                    if "linear" in set(os.listdir(plugins_fd)):
                         rejected = _unique_name(".linear-rollback-failed-")
-                        os.rename("linear", rejected, src_dir_fd=plugins_fd, dst_dir_fd=plugins_fd)
+                        os.rename("linear", rejected, src_dir_fd=plugins_fd, dst_dir_fd=backup_fd)
                         os.fsync(plugins_fd)
+                        os.fsync(backup_fd)
                     if _during_recovery_hook is not None:
                         _during_recovery_hook()
-                    os.rename(failed_name, "linear", src_dir_fd=plugins_fd, dst_dir_fd=plugins_fd)
+                    os.rename(failed_name, "linear", src_dir_fd=backup_fd, dst_dir_fd=plugins_fd)
+                    os.fsync(backup_fd)
                     os.fsync(plugins_fd)
         finally:
             recovering = False
@@ -1092,7 +1143,7 @@ def rollback_exact(
     finally:
         if previous_handlers:
             _restore_signal_guards(previous_handlers)
-        _close_many(target_fd, rollback_fd)
+        _close_many(target_fd, rollback_fd, backup_fd)
         if lock_fd is not None:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
