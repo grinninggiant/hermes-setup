@@ -7552,6 +7552,74 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             set(),
         )
 
+    async def test_queued_error_cannot_regress_completed_session(self):
+        session_id = "session-late-error"
+        item_id = "activity:late-error"
+        self.adapter._ledger.enqueue_outbox(
+            item_id, session_id, "activity.create",
+            {
+                "activity_id": self.adapter._activity_uuid(item_id),
+                "agent_session_id": session_id,
+                "activity_type": "error",
+                "body": "An earlier turn failed",
+            },
+        )
+        self.adapter._linear.delivery_contexts[session_id] = {
+            "id": session_id, "status": "complete", "app_user_id": "agent-derya",
+        }
+        await self.adapter._drain_outbox_once()
+        self.assertEqual(self.adapter._ledger.get_outbox_item(item_id)["state"], "delivered")
+        self.assertTrue(self.adapter._ledger.get_outbox_item(item_id)["payload"]["terminal_suppressed"])
+        self.assertEqual(self.adapter._linear.calls, [])
+
+        active = "session-active-error"
+        self.adapter._linear.delivery_contexts[active] = {
+            "id": active, "status": "active", "app_user_id": "agent-derya",
+        }
+        self.adapter._ledger.enqueue_outbox(
+            "activity:active-error", active, "activity.create",
+            {
+                "activity_id": self.adapter._activity_uuid("activity:active-error"),
+                "agent_session_id": active,
+                "activity_type": "error", "body": "Actual failure",
+            },
+        )
+        await self.adapter._drain_outbox_once()
+        self.assertEqual(self.adapter._linear.calls, [(active, "error", "Actual failure")])
+
+    async def test_closure_failure_warning_is_not_silenced_by_complete_status(self):
+        session_id = "session-closure-warning"
+        item_id = "activity:closure-error:failed-receipt"
+        self.adapter._linear.delivery_contexts[session_id] = {
+            "id": session_id, "status": "complete", "app_user_id": "agent-derya",
+        }
+        self.adapter._ledger.enqueue_outbox(
+            item_id, "closure-cleanup:failed-receipt", "activity.create",
+            {"activity_id": self.adapter._activity_uuid(item_id),
+             "agent_session_id": session_id, "activity_type": "error",
+             "body": "Closure receipt could not be verified"},
+        )
+        await self.adapter._drain_outbox_once()
+        self.assertEqual(self.adapter._linear.calls, [
+            (session_id, "error", "Closure receipt could not be verified")
+        ])
+
+    async def test_closure_failure_warning_keeps_app_owner_check(self):
+        session_id = "session-other-app"
+        item_id = "activity:closure-error:wrong-app"
+        self.adapter._linear.delivery_contexts[session_id] = {
+            "id": session_id, "status": "complete", "app_user_id": "different-app-owner",
+        }
+        self.adapter._ledger.enqueue_outbox(
+            item_id, "closure-cleanup:wrong-app", "activity.create",
+            {"activity_id": self.adapter._activity_uuid(item_id),
+             "agent_session_id": session_id, "activity_type": "error",
+             "body": "Closure receipt could not be verified"},
+        )
+        await self.adapter._drain_outbox_once()
+        self.assertEqual(self.adapter._linear.calls, [])
+        self.assertEqual(self.adapter._ledger.get_outbox_item(item_id)["state"], "dead")
+
     async def test_legacy_response_without_snapshot_cannot_bypass_acceptance(self):
         session_id = "session-legacy-response"
         item_id = f"activity:response:{session_id}:pre-upgrade"
@@ -8193,6 +8261,7 @@ class LinearClientBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_graphql(query, variables=None):
             self.assertIn("agentSession(id: $id)", query)
+            self.assertIn("id status appUser", " ".join(query.split()))
             self.assertIn("issue {", query)
             self.assertIn("description", query)
             self.assertIn("delegate { id }", query)
@@ -8216,6 +8285,7 @@ class LinearClientBehaviorTests(unittest.IsolatedAsyncioTestCase):
             await client.get_agent_session_delivery_context("session-1"),
             {
                 "id": "session-1",
+                "status": "active",
                 "app_user_id": "actor-1",
                 "issue_id": "issue-1",
                 "updated_at": "revision-1",
@@ -8255,6 +8325,7 @@ class LinearClientBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 client.graphql = mock.AsyncMock(return_value={
                     "agentSession": {
                         "id": "session-1",
+                        "status": "active",
                         "appUser": {"id": "actor-1"},
                         "issue": issue,
                     }

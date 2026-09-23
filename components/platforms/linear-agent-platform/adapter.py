@@ -3498,6 +3498,26 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         live_context = await self._validate_activity_target(
                             item.payload["agent_session_id"]
                         )
+                        if (
+                            live_context.get("status") == "complete"
+                            and not item.id.startswith("activity:closure-error:")
+                        ):
+                            if item.payload.get("activity_type") == "response":
+                                raise LinearAPIError(
+                                    "Completed session has no verified response receipt",
+                                    retryable=False,
+                                )
+                            suppression = {"terminal_suppressed": True, "terminal_session_status": "complete"}
+                            if item.id.startswith("activity:clarify:"):
+                                suppression.update(clarify_suppressed=True, clarify_suppression_reason="terminal_session")
+                            if not self._ledger.update_outbox_payload_metadata(item.id, suppression):
+                                raise LinearAPIError("Terminal suppression was not recorded", retryable=True)
+                            self._ledger.mark_outbox_delivered(item.id)
+                            logger.info(
+                                "[linear] suppressed stale post-terminal activity item=%s session=%s",
+                                item.id, item.aggregate_key,
+                            )
+                            return True
                         if item.payload.get("activity_type") == "response":
                             if (
                                 "acceptance_snapshot" in item.payload

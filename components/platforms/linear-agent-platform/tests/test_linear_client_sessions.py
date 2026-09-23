@@ -115,6 +115,7 @@ class AgentSessionPolicyEvidenceTests(unittest.IsolatedAsyncioTestCase):
         client.graphql = mock.AsyncMock(return_value={
             "agentSession": {
                 "id": "session-1",
+                "status": "active",
                 "appUser": {"id": "actor-1"},
                 "issue": {
                     "id": "issue-1",
@@ -129,6 +130,17 @@ class AgentSessionPolicyEvidenceTests(unittest.IsolatedAsyncioTestCase):
         result = await client.get_agent_session_delivery_context("session-1")
 
         self.assertEqual(result["description"], "")
+        self.assertEqual(result["status"], "active")
+
+    async def test_delivery_context_rejects_missing_status(self):
+        client = self.client()
+        client.graphql = mock.AsyncMock(return_value={"agentSession": {
+            "id": "session-1", "appUser": {"id": "actor-1"},
+            "issue": {"id": "issue-1", "updatedAt": "revision-1", "description": "",
+                      "delegate": {"id": "actor-1"}},
+        }})
+        with self.assertRaisesRegex(LinearAPIError, "delivery status was incomplete"):
+            await client.get_agent_session_delivery_context("session-1")
 
     async def test_complete_session_counts_nonempty_terminal_responses(self):
         client = self.client()
