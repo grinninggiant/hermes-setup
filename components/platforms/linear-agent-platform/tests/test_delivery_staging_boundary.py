@@ -299,7 +299,7 @@ class SilentOrphanStartupTests(NativeContinuationTests):
 
         from unittest import mock
         from test_native_continuation import LinearPlatformAdapter
-        self.adapter._validate_activity_target = mock.AsyncMock(return_value=None)
+        self.adapter._validate_activity_target = mock.AsyncMock(return_value={"status": "active"})
         self.adapter._linear.create_activity = mock.AsyncMock()
         await LinearPlatformAdapter._drain_outbox_once(self.adapter)
         await LinearPlatformAdapter._drain_outbox_once(self.adapter)

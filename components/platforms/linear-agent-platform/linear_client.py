@@ -871,7 +871,7 @@ query LinearPolicyAgentSessionResponses($id: String!, $after: String) {
             """
 query LinearAgentSessionDeliveryGuard($id: String!) {
   agentSession(id: $id) {
-    id
+    id status
     appUser { id }
     issue {
       id
@@ -888,6 +888,9 @@ query LinearAgentSessionDeliveryGuard($id: String!) {
         session = data.get("agentSession")
         if not isinstance(session, dict) or str(session.get("id") or "") != session_id:
             raise LinearAPIError("Agent Session delivery target could not be resolved")
+        status = session.get("status")
+        if status not in AGENT_SESSION_STATUSES:
+            raise LinearAPIError("Agent Session delivery status was incomplete")
         app_user = session.get("appUser")
         app_user_id = app_user.get("id") if isinstance(app_user, dict) else None
         if not isinstance(app_user_id, str) or not app_user_id:
@@ -911,6 +914,7 @@ query LinearAgentSessionDeliveryGuard($id: String!) {
         state = issue.get("state")
         return {
             "id": session_id,
+            "status": status,
             "app_user_id": app_user_id,
             "issue_id": str(issue["id"]),
             "updated_at": updated_at,

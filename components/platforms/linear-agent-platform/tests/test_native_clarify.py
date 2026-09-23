@@ -416,6 +416,28 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
             self.adapter._active_turn_events["linear-session-221"]
         ))
 
+    async def test_terminal_session_before_drain_suppresses_question_without_success(self):
+        clarify_gateway.register("terminal", self.key, "Target?", ["yes"])
+        reads = 0
+
+        async def delivery_context(session_id):
+            nonlocal reads
+            reads += 1
+            return {"id": session_id, "app_user_id": self.adapter._linear.actor_id,
+                    "status": "active" if reads == 1 else "complete"}
+
+        self.adapter._linear.get_agent_session_delivery_context = delivery_context
+        result = await self.adapter.send_clarify(
+            "linear-session-221", "Target?", ["yes"], "terminal", self.key
+        )
+        item = self.adapter._ledger.get_outbox_item("activity:clarify:terminal")
+        self.assertFalse(result.success)
+        self.assertTrue(item["payload"]["clarify_suppressed"])
+        self.assertEqual(self.transport.activities, [])
+        self.assertFalse(self.adapter._has_delivered_native_clarify(
+            self.adapter._active_turn_events["linear-session-221"]
+        ))
+
     async def test_timeout_fence_does_not_swallow_failure_in_real_completion_callback(self):
         clarify_gateway.register("timeout-failure", self.key, "Target?", ["yes"])
         await self.adapter.send_clarify(
@@ -547,7 +569,7 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
             if calls == 2:
                 entered.set()
                 await release.wait()
-            await original(session_id)
+            return await original(session_id)
 
         self.adapter._validate_activity_target = delayed_validation
         task = asyncio.create_task(
