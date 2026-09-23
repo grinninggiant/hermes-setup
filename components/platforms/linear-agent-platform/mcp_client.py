@@ -70,7 +70,7 @@ LIVE_TOOL_PROPERTY_FIELDS = {
         {"id", "includeRelations", "includeCustomerNeeds", "includeReleases"}
     ),
     "list_issues": REQUIRED_TOOL_INPUT_FIELDS["list_issues"]
-    | frozenset({"customView", "fields", "parentId", "priority", "release", "triagedAt"}),
+    | frozenset({"creator", "customView", "fields", "parentId", "priority", "release", "triagedAt"}),
     "save_issue": REQUIRED_TOOL_INPUT_FIELDS["save_issue"]
     | frozenset(
         {
@@ -439,6 +439,8 @@ class LinearMCPClient:
                 or set(properties) != LIVE_TOOL_PROPERTY_FIELDS[tool_name]
             ):
                 raise LinearMCPError(f"Linear MCP tool schema drift: {tool_name}", code="catalog_contract", stage="catalog_validation")
+            if tool_name == "list_issues" and _schema_without_descriptions(properties["creator"]) != {"type": "string"}:
+                raise LinearMCPError("Linear MCP tool schema drift: list_issues.creator", code="catalog_contract", stage="catalog_validation")
             for field in required_fields:
                 property_schema = properties[field]
                 if _schema_without_descriptions(property_schema) != _expected_forwarded_contract(

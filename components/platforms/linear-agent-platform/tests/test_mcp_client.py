@@ -71,7 +71,7 @@ class LinearMCPClientTests(unittest.IsolatedAsyncioTestCase):
             "list_issues": {
                 "team", "limit", "cursor", "orderBy", "query", "state", "assignee",
                 "delegate", "project", "cycle", "label", "createdAt", "updatedAt",
-                "includeArchived", "fields", "parentId", "priority", "release", "customView", "triagedAt",
+                "includeArchived", "fields", "parentId", "priority", "release", "customView", "triagedAt", "creator",
             },
             "save_issue": {
                 "id", "title", "description", "team", "state", "assignee", "delegate",
@@ -708,6 +708,33 @@ class LinearMCPClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(LinearMCPError, 'not authorized for execution'):
                 await client.call_tool('list_custom_views', {})
             self.assertFalse(any(r.get('method') == 'tools/call' for r in self.requests))
+        finally:
+            await client.close()
+
+    async def test_creator_catalog_does_not_grant_execution(self):
+        from mcp_client import REQUIRED_TOOL_INPUT_FIELDS
+        from outbound_policy import OutboundPolicy
+
+        client = self.client()
+        try:
+            await client.connect()
+            self.assertIn("creator", LIVE_TOOL_PROPERTY_FIELDS["list_issues"])
+            self.assertNotIn("creator", REQUIRED_TOOL_INPUT_FIELDS["list_issues"])
+            policy = OutboundPolicy(expected_actor_id="actor", expected_organization_id="org",
+                                    allowed_team_ids=["team"])
+            self.assertEqual(policy.preflight("list_issues", {"team": "team", "creator": "actor"}).reason,
+                             "field_not_allowed")
+            self.assertFalse(any(request.get("method") == "tools/call" for request in self.requests))
+        finally:
+            await client.close()
+
+    async def test_creator_schema_drift_fails_closed(self):
+        issue_schema = next(t for t in self.tools if t["name"] == "list_issues")["inputSchema"]
+        issue_schema["properties"]["creator"] = {"type": "number"}
+        client = self.client()
+        try:
+            with self.assertRaisesRegex(LinearMCPError, "list_issues.creator"):
+                await client.connect()
         finally:
             await client.close()
 
