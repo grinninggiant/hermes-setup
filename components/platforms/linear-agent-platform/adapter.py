@@ -141,6 +141,11 @@ _CONTINUATION_REASON_CODES = frozenset(
     }
 )
 
+_SILENT_CONTROL_REASONS = frozenset({
+    "stopped", "native_goal_paused", "native_goal_not_rejudged",
+    "native_goal_paused_without_question", "late_clarify_unverified",
+})
+
 
 def _normalize_terminal_reason_code(value: Any) -> str:
     code = str(value or "").strip()
@@ -3246,7 +3251,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 context = await self._linear.get_agent_turn_context(
                     str(decision["agent_session_id"])
                 )
-                live_outcome = self._classify_turn_outcome(
+                live_outcome, live_reason = self._classify_turn_outcome_with_reason(
                     probe, turn_result, context
                 )
                 if live_outcome == "success":
@@ -3257,24 +3262,30 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         decision, turn_result
                     ):
                         return True
-                    error = (
-                        "Delayed Linear success was fenced by authoritative "
-                        "Hermes session rotation"
-                    )
+                    live_outcome, live_reason = "stopped", "session_rotation"
+                if live_outcome == "stopped" or (
+                    live_outcome == "blocked" and live_reason in _SILENT_CONTROL_REASONS
+                ):
+                    error = f"Delayed Linear success was fenced by live gate: {live_reason}"
                     changed = self._ledger.fence_turn_success_without_activity(
                         decision_id,
                         error,
                         response_item_id=item.id,
                         aggregate_key=item.aggregate_key,
+                        progress_key=str(item.payload.get("terminal_progress_key") or ""),
                     )
                     if not changed:
                         raise LinearAPIError(
                             "Delayed Linear success could not be fenced atomically",
                             retryable=False,
                         )
+                    self._notify_terminal_progress_fence(
+                        item.aggregate_key,
+                        expected_turn_key=str(item.payload.get("terminal_progress_key") or ""),
+                    )
                     return False
                 outcome = live_outcome if live_outcome in {"blocked", "stopped"} else "blocked"
-                error = f"Delayed Linear success was fenced by live gate: {live_outcome}"
+                error = f"Delayed Linear success was fenced by live gate: {live_reason}"
             except LinearAPIError as exc:
                 if exc.retryable:
                     # The response has already been claimed by the outbox. A
@@ -4295,7 +4306,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 final_state="fenced",
                 reason_code=reason,
             )
-        elif self._ledger is not None and event.source is not None:
+        elif (self._ledger is not None and event.source is not None
+              and reason not in _SILENT_CONTROL_REASONS):
             digest = hashlib.sha256(
                 f"{event.source.chat_id}\0{event.message_id or event.text}".encode()
             ).hexdigest()[:24]
@@ -4389,7 +4401,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         final_state: str | None = None,
         orphan_success: bool = False,
         reason_code: str | None = None,
-        diagnostic_response: str = "",
     ) -> bool:
         if self._ledger is None:
             raise RuntimeError("Linear outbox is unavailable")
@@ -4403,6 +4414,16 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             turn_key = self._ledger.ensure_progress_turn(
                 session_id, f"terminal:{activity_id}"
             )
+        expected = expected_state or str(decision["dispatch_state"])
+        if normalized_reason in _SILENT_CONTROL_REASONS:
+            changed = self._ledger.fence_turn_without_activity(
+                str(decision["decision_id"]), expected, session_id, turn_key,
+                outcome=outcome if decision["outcome"] in {"continue", "success"} else None,
+                reason=normalized_reason,
+            )
+            if changed:
+                self._notify_terminal_progress_fence(session_id, expected_turn_key=turn_key)
+            return changed
         payload: dict[str, Any] = {
             "activity_id": activity_id,
             "agent_session_id": session_id,
@@ -4412,19 +4433,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 step="devam teslimi",
             )[:4000],
         }
-        # Only the staged model answer is eligible here, never ``message`` or
-        # raw judge prose. Keep one atomic error activity, not a success response
-        # or an ephemeral thought that the error would replace.
-        if diagnostic_response and outcome == "blocked" and normalized_reason == "native_goal_paused":
-            payload["body"] += (
-                "\n\nKısmi çalışma açıklaması — nihai kabul değildir:\n"
-                + diagnostic_response[:3000]
-            )
         if orphan_success:
             payload["orphan_success_decision_id"] = str(decision["decision_id"])
         if turn_key:
             payload["terminal_progress_key"] = turn_key
-        expected = expected_state or str(decision["dispatch_state"])
         final = final_state or (
             "completed" if decision["outcome"] != "continue" else "fenced"
         )
@@ -4663,9 +4675,20 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 generation = base_generation + rollovers
 
             native_status = str(getattr(state, "status", "") or "")
+            started = getattr(event, "_linear_processing_started_at", 0)
+            last_turn = getattr(state, "last_turn_at", None)
             exceptional = ""
             if live_outcome in {"stopped", "blocked", "approval", "awaiting_input"}:
                 outcome = live_outcome
+            elif (
+                live_outcome == "success"
+                and native_status == "paused"
+                and started
+                and isinstance(last_turn, (int, float))
+                and last_turn >= started
+            ):
+                # A fresh native pause does not revoke independently verified final evidence.
+                outcome = "success"
             elif native_status == "done":
                 if live_outcome == "success":
                     outcome = "success"
@@ -4756,30 +4779,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return None
 
             if outcome != "continue":
-                diagnostic_response = ""
-                started = getattr(event, "_linear_processing_started_at", 0)
-                last_turn = getattr(state, "last_turn_at", None)
-                if (
-                    outcome == "blocked"
-                    and live_outcome in {"continue", "success"}
-                    and live_reason == "native_goal_paused"
-                    and isinstance(turn_result, Mapping)
-                    # The classifier already admitted only a completed turn or
-                    # a structured iteration-budget exit. Neither permits resume
-                    # here: the fresh blocked judge still produces one error.
-                    and not turn_result.get("failed")
-                    and not turn_result.get("interrupted")
-                    and isinstance(response, str)
-                    and started
-                    and isinstance(last_turn, (int, float))
-                    and last_turn >= started
-                    and str(getattr(state, "last_verdict", "")) == "blocked"
-                    and await self._turn_success_session_matches(decision, turn_result)
-                ):
-                    diagnostic_response = response.strip()
                 self._enqueue_turn_terminal_activity(
                     decision, outcome, reason_code=live_reason,
-                    diagnostic_response=diagnostic_response,
                 )
                 return None
 

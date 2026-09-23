@@ -2345,6 +2345,54 @@ class DeliveryLedger:
             self._db.commit()
             return True
 
+    def fence_turn_without_activity(
+        self,
+        decision_id: str,
+        expected_state: str,
+        aggregate_key: str,
+        turn_key: str,
+        *,
+        outcome: str | None = None,
+        reason: str,
+        now: int | None = None,
+    ) -> bool:
+        """Fence a non-error control decision and its progress in one transaction."""
+        now = int(time.time()) if now is None else int(now)
+        with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute(
+                "SELECT agent_session_id, dispatch_state FROM turn_decisions WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            if row is None or str(row[0]) != aggregate_key:
+                self._db.rollback()
+                raise sqlite3.IntegrityError("Fenced Linear turn decision does not match")
+            if str(row[1]) in {"completed", "fenced"}:
+                self._db.commit()
+                return False
+            if str(row[1]) != expected_state:
+                self._db.rollback()
+                raise sqlite3.IntegrityError("Fenced Linear turn state does not match")
+            if self._db.execute(
+                "SELECT 1 FROM outbox WHERE id=?",
+                (f"activity:turn-success:{decision_id}",),
+            ).fetchone() is not None:
+                self._db.commit()
+                return False
+            self._db.execute(
+                "UPDATE turn_decisions SET dispatch_state='fenced', outcome=COALESCE(?, outcome), "
+                "error=?, updated_at=?, completed_at=? WHERE decision_id=? AND dispatch_state=?",
+                (outcome, reason[:1000], now, now, decision_id, expected_state),
+            )
+            if turn_key:
+                self._db.execute(
+                    "UPDATE progress_turns SET fenced=1, updated_at=? "
+                    "WHERE aggregate_key=? AND turn_key=?",
+                    (now, aggregate_key, turn_key),
+                )
+            self._db.commit()
+            return True
+
     def complete_turn_with_activity(
         self,
         decision_id: str,
@@ -2488,6 +2536,7 @@ class DeliveryLedger:
         *,
         response_item_id: str | None = None,
         aggregate_key: str | None = None,
+        progress_key: str | None = None,
         now: int | None = None,
     ) -> bool:
         """Fence a stale success without emitting any terminal activity."""
@@ -2542,6 +2591,12 @@ class DeliveryLedger:
             if changed != 1:
                 self._db.rollback()
                 return False
+            if aggregate_key and progress_key:
+                self._db.execute(
+                    "UPDATE progress_turns SET fenced=1, updated_at=? "
+                    "WHERE aggregate_key=? AND turn_key=?",
+                    (now, aggregate_key, progress_key),
+                )
             self._db.commit()
             return True
 

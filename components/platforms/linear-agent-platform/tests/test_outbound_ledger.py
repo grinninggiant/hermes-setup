@@ -32,6 +32,45 @@ def sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
             yield connection
 
 
+class DeliveryFenceTransactionTests(unittest.TestCase):
+    def test_progress_failure_rolls_back_decision_and_retry_survives_reopen(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "delivery.sqlite3"
+            ledger = DeliveryLedger(str(path), startup_recovery=False)
+            try:
+                decision = ledger.reserve_turn_decision(
+                    "session", "issue", "hermes", 1, 1, "continue"
+                )
+                key = ledger.ensure_progress_turn("session", "turn")
+                ledger._db.execute(
+                    "CREATE TRIGGER fail_progress BEFORE UPDATE ON progress_turns "
+                    "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+                )
+                args = (decision["decision_id"], "pending", "session", key)
+                with self.assertRaises(sqlite3.DatabaseError):
+                    ledger.fence_turn_without_activity(*args, reason="native_goal_paused")
+                self.assertFalse(ledger._db.in_transaction)
+                row = ledger.get_turn_decision(args[0])
+                assert row is not None
+                self.assertEqual(row["dispatch_state"], "pending")
+                self.assertTrue(ledger.progress_is_allowed("session", key))
+                ledger._db.execute("DROP TRIGGER fail_progress")
+                self.assertTrue(ledger.fence_turn_without_activity(*args, reason="native_goal_paused"))
+                self.assertFalse(ledger.progress_is_allowed("session", key))
+                self.assertEqual(ledger._db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
+            finally:
+                ledger.close()
+            reopened = DeliveryLedger(str(path), startup_recovery=False)
+            try:
+                row = reopened.get_turn_decision(args[0])
+                assert row is not None
+                self.assertEqual(row["dispatch_state"], "fenced")
+                self.assertFalse(reopened.progress_is_allowed("session", key))
+                self.assertEqual(reopened._db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
+            finally:
+                reopened.close()
+
+
 class OutboundLedgerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()

@@ -213,9 +213,10 @@ class StagedDeliveryBoundaryTests(NativeContinuationTests):
         self.assertEqual(self.adapter._staged_delivery_attempts, {})
 
     async def test_review_cancelled_result_survives_api_failure(self):
-        from test_native_continuation import LinearAPIError
-        for outcome in (ProcessingOutcome.CANCELLED, ProcessingOutcome.FAILURE):
+        from test_native_continuation import FakeGoalManager, LinearAPIError
+        for turn_index, outcome in enumerate((ProcessingOutcome.CANCELLED, ProcessingOutcome.FAILURE)):
             with self.subTest(outcome=outcome):
+                FakeGoalManager.existing_turns = 2 + turn_index
                 self.adapter._running = False
                 event = await self._stage_review_success(str(outcome))
                 original = self.adapter._linear.get_agent_turn_context
@@ -230,9 +231,14 @@ class StagedDeliveryBoundaryTests(NativeContinuationTests):
                 self.assertEqual(retained["interrupted"], outcome == ProcessingOutcome.CANCELLED)
                 self.adapter._linear.get_agent_turn_context = original
                 await self.adapter._recover_turn_decisions()
-                for row in self.adapter._ledger.list_turn_decisions("linear-session"):
-                    self.assertNotEqual(row["outcome"], "success")
-                    item = self.adapter._ledger.get_outbox_item(f"activity:turn-decision:{row['decision_id']}")
+                row = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+                self.assertIsNotNone(row)
+                self.assertNotEqual(row["outcome"], "success")
+                item = self.adapter._ledger.get_outbox_item(f"activity:turn-decision:{row['decision_id']}")
+                if outcome == ProcessingOutcome.CANCELLED:
+                    self.assertEqual(row["dispatch_state"], "fenced")
+                    self.assertIsNone(item)
+                else:
                     self.assertEqual(item["payload"]["activity_type"], "error")
 
     async def test_review_exhausted_success_has_blocked_metadata(self):
