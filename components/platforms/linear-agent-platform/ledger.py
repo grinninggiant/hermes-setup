@@ -2358,7 +2358,7 @@ class DeliveryLedger:
     ) -> bool:
         """Fence a non-error control decision and its progress in one transaction."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._lock, self._db:
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT agent_session_id, dispatch_state FROM turn_decisions WHERE decision_id=?",

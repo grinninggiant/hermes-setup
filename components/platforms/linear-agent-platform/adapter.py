@@ -3264,8 +3264,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         return True
                     live_outcome, live_reason = "stopped", "session_rotation"
                 if live_outcome == "stopped" or (
-                    live_outcome == "blocked"
-                    and live_reason not in {"turn_failed", "session_error", "error_exit_reason"}
+                    live_outcome == "blocked" and live_reason in _SILENT_CONTROL_REASONS
                 ):
                     error = f"Delayed Linear success was fenced by live gate: {live_reason}"
                     changed = self._ledger.fence_turn_success_without_activity(

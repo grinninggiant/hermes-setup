@@ -1975,6 +1975,30 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
             "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"error\"%'"
         ).fetchone()[0], 1)
 
+    async def test_delayed_success_unknown_blocked_reason_retains_error_activity(self):
+        FakeGoalManager.existing = True
+        FakeGoalManager.existing_status = "done"
+        checked = await FakeLinear(
+            description="## Acceptance\n- [x] tests pass\n- [X] restart is safe"
+        ).get_agent_turn_context("linear-session")
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=checked)
+        self.adapter._linear.create_activity = mock.AsyncMock()
+        event = turn_event()
+        event._gateway_turn_result = MappingProxyType(
+            {**dict(event._gateway_turn_result), "completed": True}
+        )
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "accepted evidence", event._gateway_turn_result
+        )
+        self.adapter._classify_turn_outcome_with_reason = mock.Mock(
+            return_value=("blocked", "unexpected_gate")
+        )
+        self.assertTrue(await LinearPlatformAdapter._drain_outbox_once(self.adapter))
+        self.adapter._linear.create_activity.assert_not_awaited()
+        self.assertEqual(self.adapter._ledger._db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"error\"%'"
+        ).fetchone()[0], 1)
+
     async def test_delayed_success_revalidation_read_failure_retains_retry(self):
         FakeGoalManager.existing = True
         FakeGoalManager.existing_status = "done"
