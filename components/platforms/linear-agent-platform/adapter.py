@@ -36,6 +36,7 @@ from gateway.platforms.base import (
 from gateway.session import SessionSource, build_session_key  # type: ignore[import-not-found]
 from hermes_cli.goals import GoalContract
 
+from .acceptance import acceptance_criteria, acceptance_gate
 from .ledger import DeliveryLedger, OutboxItem
 from .linear_client import LinearAPIError, LinearClient
 
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 _WEBHOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,200}$")
 _ALLOWED_ACTIONS = {"created", "prompted"}
+
 _CONTROL_EVENT_TYPES = {
     "Issue",
     "IssueRelation",
@@ -3049,18 +3051,19 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         item_key: str | None = None,
         ephemeral: bool = False,
         metadata: Mapping[str, Any] | None = None,
+        acceptance_snapshot: dict[str, Any] | None = None,
+        atomic_final_key: bool = False,
     ) -> str:
         if self._ledger is None:
             raise RuntimeError("Linear outbox is unavailable")
-        item_key = item_key or f"response:{uuid.uuid4()}"
-        activity_id = self._activity_uuid(item_key)
         if self._ledger.has_session_closure(agent_session_id):
+            suppressed_key = item_key or f"response:{uuid.uuid4()}"
             logger.info(
                 "[linear] suppressed post-closure activity session=%s key=%s",
                 agent_session_id,
-                item_key,
+                suppressed_key,
             )
-            return activity_id
+            return self._activity_uuid(suppressed_key)
         # A native question pauses visibility only while unresolved; it does
         # not finish the processing turn. Non-native elicitation stays sealed.
         native_question = activity_type == "elicitation" and bool((metadata or {}).get("clarify_id"))
@@ -3069,26 +3072,35 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if terminal_activity or native_question:
             self._progress_transition_lock.acquire()
             transition_locked = True
-        payload: dict[str, Any] = {
-            "activity_id": activity_id,
-            "agent_session_id": agent_session_id,
-            "activity_type": activity_type,
-            "body": body,
-        }
         turn_key = ""
         try:
             if terminal_activity:
                 turn_key = self._current_progress_turn_key(agent_session_id)
                 if not turn_key and self._ledger is not None:
                     turn_key = self._ledger.ensure_progress_turn(
-                        agent_session_id, f"terminal:{activity_id}"
+                        agent_session_id,
+                        f"terminal:{self._activity_uuid(item_key or agent_session_id)}",
                     )
-                if turn_key:
-                    payload["terminal_progress_key"] = turn_key
+            if atomic_final_key:
+                if activity_type != "response" or not turn_key or item_key is not None:
+                    raise RuntimeError("Atomic final activity metadata is invalid")
+                item_key = f"final:{agent_session_id}:{turn_key}"
+            item_key = item_key or f"response:{uuid.uuid4()}"
+            activity_id = self._activity_uuid(item_key)
+            payload: dict[str, Any] = {
+                "activity_id": activity_id,
+                "agent_session_id": agent_session_id,
+                "activity_type": activity_type,
+                "body": body,
+            }
+            if turn_key:
+                payload["terminal_progress_key"] = turn_key
             if ephemeral:
                 payload["ephemeral"] = True
             if metadata:
                 payload.update(dict(metadata))
+            if acceptance_snapshot is not None:
+                payload["acceptance_snapshot"] = acceptance_snapshot
             self._ledger.enqueue_outbox(
                 f"activity:{item_key}",
                 agent_session_id,
@@ -3110,6 +3122,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         decision: dict[str, Any],
         body: str,
         turn_result: Mapping[str, Any],
+        issue: Mapping[str, Any],
     ) -> str:
         """Atomically bind a classified success to its durable response activity."""
         if self._ledger is None:
@@ -3133,6 +3146,19 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 "body": body,
                 "linear_turn_decision_id": str(decision["decision_id"]),
                 "linear_issue_id": str(decision["issue_id"]),
+                "acceptance_snapshot": {
+                    "issue_id": str(issue.get("id") or ""),
+                    "updated_at": str(issue.get("updatedAt") or ""),
+                    "delegate_id": str((issue.get("delegate") or {}).get("id") or ""),
+                    "criterion_hashes": sorted(
+                        item.criterion_hash
+                        for item in acceptance_criteria(str(issue.get("description") or ""))
+                    ),
+                    "evidence_hashes": sorted(self._ledger.acceptance_evidence_hashes(
+                        str(issue.get("id") or ""), str(self._linear.actor_id or ""),
+                        accepted_revision=str(issue.get("updatedAt") or ""),
+                    )),
+                },
                 "linear_turn_result": {
                     key: turn_result[key]
                     for key in (
@@ -3255,9 +3281,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     probe, turn_result, context
                 )
                 if live_outcome == "success":
-                    await self._validate_activity_target(
+                    live_context = await self._validate_activity_target(
                         str(decision["agent_session_id"])
                     )
+                    self._validate_final_acceptance_snapshot(item.payload, live_context)
                     if await self._turn_success_session_matches(
                         decision, turn_result
                     ):
@@ -3459,9 +3486,56 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         not item.id.startswith("activity:closure:")
                         and not turn_success_item
                     ):
-                        await self._validate_activity_target(
+                        live_context = await self._validate_activity_target(
                             item.payload["agent_session_id"]
                         )
+                        if item.payload.get("activity_type") == "response":
+                            if (
+                                "acceptance_snapshot" in item.payload
+                                or item.id.startswith("activity:final:")
+                            ):
+                                self._validate_final_acceptance_snapshot(
+                                    item.payload, live_context
+                                )
+                            elif item.id.startswith("activity:creator-owned:"):
+                                issue_id = live_context.get("issue_id")
+                                issue = (
+                                    await self._linear.get_issue_closure_context(issue_id)
+                                    if isinstance(issue_id, str) and issue_id else {}
+                                )
+                                if not (
+                                    item.operation == "activity.create"
+                                    and item.aggregate_key == item.payload.get("agent_session_id")
+                                    and item.payload.get("activity_id") == self._activity_uuid(
+                                        item.id.removeprefix("activity:")
+                                    )
+                                    and item.payload.get("body") == (
+                                        "Creator-agent manages this child through the MCP lifecycle; "
+                                        "native session closed."
+                                    )
+                                    and issue.get("id") == issue_id
+                                    and (issue.get("parent") or {}).get("id")
+                                    and self._linear.actor_id
+                                    and hmac.compare_digest(
+                                        str((issue.get("creator") or {}).get("id") or ""),
+                                        self._linear.actor_id,
+                                    )
+                                ):
+                                    raise LinearAPIError(
+                                        "Creator-owned control response is no longer authorized",
+                                        retryable=False,
+                                    )
+                            elif (
+                                not isinstance(live_context.get("description"), str)
+                                or not all(
+                                    isinstance(live_context.get(key), str) and live_context[key]
+                                    for key in ("issue_id", "updated_at", "delegate_id")
+                                )
+                                or not acceptance_gate(
+                                    live_context["description"], set()
+                                ).allowed
+                            ):
+                                raise LinearAPIError("Final acceptance snapshot is missing", retryable=False)
                     # Recheck after the final awaited target validation and
                     # immediately before vendor create: the waiter or turn
                     # may disappear while that validation is in flight.
@@ -3561,7 +3635,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 self._ledger.mark_outbox_delivered(item.id)
             return True
 
-    async def _validate_activity_target(self, agent_session_id: str) -> None:
+    async def _validate_activity_target(self, agent_session_id: str) -> dict[str, Any]:
         """Fail closed when a normal activity target changed app-user owner."""
         if self._linear is None:
             raise LinearAPIError("Linear client is unavailable", retryable=True)
@@ -3573,6 +3647,59 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 "Linear Agent Session delivery target is owned by another app user",
                 retryable=False,
             )
+        return context
+
+    def _validate_final_acceptance_snapshot(
+        self,
+        payload: dict[str, Any],
+        live_context: dict[str, Any],
+    ) -> None:
+        """Revalidate one durable final against live issue acceptance state."""
+        snapshot = payload.get("acceptance_snapshot")
+        required = {
+            "issue_id", "updated_at", "delegate_id", "criterion_hashes", "evidence_hashes"
+        }
+        if not isinstance(snapshot, dict) or set(snapshot) != required:
+            raise LinearAPIError("Final acceptance snapshot is missing", retryable=False)
+        criterion_hashes = snapshot.get("criterion_hashes")
+        evidence_hashes = snapshot.get("evidence_hashes")
+        if (
+            not isinstance(criterion_hashes, list)
+            or not isinstance(evidence_hashes, list)
+            or any(not isinstance(value, str) or not value for value in criterion_hashes)
+            or any(not isinstance(value, str) or not value for value in evidence_hashes)
+            or criterion_hashes != sorted(set(criterion_hashes))
+            or evidence_hashes != sorted(set(evidence_hashes))
+        ):
+            raise LinearAPIError("Final acceptance snapshot is malformed", retryable=False)
+        live_issue_id = str(live_context.get("issue_id") or "")
+        live_revision = str(live_context.get("updated_at") or "")
+        live_delegate = str(live_context.get("delegate_id") or "")
+        live_criteria = acceptance_criteria(str(live_context.get("description") or ""))
+        live_criterion_hashes = sorted(item.criterion_hash for item in live_criteria)
+        actor_id = str(self._linear.actor_id or "") if self._linear is not None else ""
+        live_evidence_hashes = sorted(
+            self._ledger.acceptance_evidence_hashes(
+                live_issue_id,
+                actor_id,
+                accepted_revision=live_revision,
+            )
+        ) if self._ledger is not None else []
+        gate = acceptance_gate(
+            str(live_context.get("description") or ""),
+            set(live_evidence_hashes),
+        )
+        exact = (
+            hmac.compare_digest(str(snapshot.get("issue_id") or ""), live_issue_id)
+            and hmac.compare_digest(str(snapshot.get("updated_at") or ""), live_revision)
+            and hmac.compare_digest(str(snapshot.get("delegate_id") or ""), live_delegate)
+            and criterion_hashes == live_criterion_hashes
+            and evidence_hashes == live_evidence_hashes
+            and (not live_criteria or hmac.compare_digest(live_delegate, actor_id))
+            and gate.allowed
+        )
+        if not exact:
+            raise LinearAPIError("Final acceptance snapshot is stale", retryable=False)
 
     @classmethod
     def _bounded_goal_contract(cls, issue: dict[str, Any]) -> tuple[str, GoalContract]:
@@ -3734,7 +3861,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if status not in {"pending", "active"}:
             return blocked("status_invalid")
         if turn_result["completed"] and self._acceptance_is_fully_checked(issue):
-            return "success", "success"
+            evidence = self._ledger.acceptance_evidence_hashes(
+                issue_id, self._linear.actor_id,
+                accepted_revision=str(issue.get("updatedAt") or ""),
+            )
+            gate = acceptance_gate(str(issue.get("description") or ""), evidence)
+            if gate.criteria and gate.allowed:
+                return "success", "success"
         if not turn_result["completed"] and not reason.startswith(
             "max_iterations_reached("
         ):
@@ -4757,7 +4890,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 if fresh_outcome == "success":
                     if await self._turn_success_session_matches(decision, turn_result):
                         self._enqueue_turn_success(
-                            decision, str(response or ""), turn_result
+                            decision, str(response or ""), turn_result, fresh["issue"]
                         )
                     else:
                         if not self._ledger.fence_turn_success_without_activity(
@@ -5378,7 +5511,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 ),
             )
         try:
-            await self._validate_activity_target(chat_id)
+            delivery_context = await self._validate_activity_target(chat_id)
             if (
                 (long_running_heartbeat or trusted_ephemeral_notice)
                 and not self._progress_chat_is_allowed(chat_id)
@@ -5416,6 +5549,46 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 or content.startswith(_LINEAR_HOME_CHANNEL_NOTICE_PREFIX)
             ) else "response"
             item_key = None
+            acceptance_snapshot: dict[str, Any] | None = None
+            atomic_final_key = False
+            if activity_type == "response":
+                issue_id = str(delivery_context.get("issue_id") or "")
+                delegate_id = str(delivery_context.get("delegate_id") or "")
+                actor_id = str(self._linear.actor_id or "")
+                description = str(delivery_context.get("description") or "")
+                evidence_hashes = self._ledger.acceptance_evidence_hashes(
+                    issue_id,
+                    actor_id,
+                    accepted_revision=str(delivery_context.get("updated_at") or ""),
+                )
+                criteria = acceptance_criteria(description)
+                current_revision = str(delivery_context.get("updated_at") or "")
+                required_hashes = {item.criterion_hash for item in criteria}
+                gate = acceptance_gate(description, evidence_hashes)
+                gate_reason = gate.reason
+                if gate.criteria and (
+                    not delegate_id or not hmac.compare_digest(delegate_id, actor_id)
+                ):
+                    gate_reason = "acceptance_delegate_mismatch"
+                if gate_reason not in {"no_acceptance_criteria", "acceptance_complete"}:
+                    activity_type = "error"
+                    content = (
+                        "Acceptance final gate blocked the success response: "
+                        f"{gate_reason}. Unverified criteria remain open; no completion was delivered."
+                    )
+                    item_key = (
+                        f"acceptance-gate:{chat_id}:"
+                        f"{delivery_context.get('updated_at') or 'unknown'}:{gate_reason}"
+                    )
+                else:
+                    acceptance_snapshot = {
+                        "issue_id": issue_id,
+                        "updated_at": current_revision,
+                        "delegate_id": delegate_id,
+                        "criterion_hashes": sorted(required_hashes),
+                        "evidence_hashes": sorted(evidence_hashes),
+                    }
+                    atomic_final_key = True
             if transient_progress:
                 digest = hashlib.sha256(content.encode()).hexdigest()[:24]
                 item_key = f"progress:{chat_id}:{transient_progress_key}:{digest}"
@@ -5428,6 +5601,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 content,
                 item_key=item_key,
                 ephemeral=nonterminal_progress,
+                acceptance_snapshot=acceptance_snapshot,
+                atomic_final_key=atomic_final_key,
             )
 
             if nonterminal_progress and item_key is not None:
@@ -5450,6 +5625,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         "Transient Linear progress is dead-lettered",
                         retryable=False,
                     )
+            if activity_type == "error" and item_key and item_key.startswith("acceptance-gate:"):
+                return SendResult(
+                    success=False,
+                    message_id=activity_id,
+                    error="Acceptance final gate rejected the success response",
+                    retryable=False,
+                )
             # Success means durably accepted. The outbox owns transport retries.
             return SendResult(success=True, message_id=activity_id)
         except LinearAPIError as exc:

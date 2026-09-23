@@ -35,8 +35,8 @@ class ResponseReceiptBoundaryTests(base.NativeContinuationTests):
         checked = await base.FakeLinear(
             description="## Acceptance\n- [x] artifact verified"
         ).get_agent_turn_context("linear-session")
+        base.record_acceptance_fixture(self.adapter, checked["issue"]["description"])
         self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=checked)
-        self.adapter._validate_activity_target = mock.AsyncMock(return_value=None)
         self.adapter._linear.create_activity = mock.AsyncMock(return_value="activity")
         self.adapter._linear.verify_response_receipt = mock.AsyncMock(
             side_effect=base.LinearAPIError("receipt unavailable", retryable=True)

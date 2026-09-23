@@ -56,6 +56,7 @@ class LateClarifyGoalTests(base.NativeContinuationTests):
         self.adapter.gateway_runner.goal_state_for_source = read_state
         self.adapter.gateway_runner.resume_goal_for_source = mock.AsyncMock(side_effect=resume)
         self.adapter._linear.description = "## Acceptance\n- [x] verified plan"
+        base.record_acceptance_fixture(self.adapter, self.adapter._linear.description)
         original_context = self.adapter._linear.get_agent_turn_context
         async def context(sid):
             value = await original_context(sid)

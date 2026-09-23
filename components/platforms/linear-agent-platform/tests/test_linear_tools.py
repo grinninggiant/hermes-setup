@@ -8,21 +8,25 @@ import threading
 import unicodedata
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
+from acceptance import acceptance_criteria  # noqa: E402
+from ledger import DeliveryLedger  # noqa: E402
 from linear_tools import (  # noqa: E402
     _canonicalize_vendor_markdown,
     _direct_instruction_context,
+    _delegate_acceptance_reader_from_outbound,
     _evaluate_acceptance_context,
     _parse_plan_sections,
+    _revision_is_strict_successor,
     execute_with_clients,
     register_outbound_tools,
 )
-from ledger import DeliveryLedger  # noqa: E402
 from mcp_client import MCPOutcomeUnknown, LinearMCPToolError  # noqa: E402
 from oauth_store import LinearAPIError  # noqa: E402
 from outbound_ledger import (  # noqa: E402
@@ -114,12 +118,157 @@ class RegistrationTests(unittest.TestCase):
         self.assertIsInstance(result, str)
         self.assertEqual(json.loads(result), expected)
 
-    def test_mutation_flag_registers_narrow_four_tool_surface(self):
+    def test_acceptance_without_trusted_invocation_rejects_before_clients(self):
+        ctx = FakeContext()
+        register_outbound_tools(ctx, extra=self.extra(mutations=True))
+        handler = ctx.tools["linear_save_issue"]["handler"]
+        args = {
+            "operation_key": "test-op", "target_team_id": "ops-1", "id": "issue-1",
+            "lifecycle_action": "mark_acceptance",
+            "expected_updated_at": "2026-08-30T20:00:00.000Z",
+            "description": "## Kabul kriterleri\n- [x] Test only",
+            "acceptance_evidence": [{"result": "PASS"}],
+        }
+        with mock.patch("linear_tools.LinearOAuthStore", side_effect=AssertionError("client opened")):
+            result = asyncio.run(handler(args))
+        self.assertEqual(json.loads(result), {
+            "error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable",
+        })
+
+    def test_registered_acceptance_requires_current_linear_invocation(self):
+        ctx = FakeContext()
+        register_outbound_tools(ctx, extra=self.extra(mutations=True))
+        handler = ctx.tools["linear_save_issue"]["handler"]
+        args = {
+            "id": "issue-1", "target_team_id": "ops-1", "operation_key": "accept-1",
+            "lifecycle_action": "mark_acceptance", "expected_updated_at": "revision-1",
+            "description": "## Acceptance\n- [x] done", "acceptance_evidence": [{"result": "PASS"}],
+        }
+        env = {
+            "HERMES_SESSION_PLATFORM": "linear", "HERMES_SESSION_PROFILE": "general",
+            "HERMES_SESSION_ID": "hermes-1", "HERMES_SESSION_CHAT_ID": "agent-1",
+        }
+        context = {
+            "id": "agent-1", "status": "active", "app_user_id": "actor-1",
+            "issue": {"id": "issue-1", "delegate": {"id": "actor-1"}},
+        }
+        graphql = mock.MagicMock(actor_id="actor-1", organization_id="org-1")
+        graphql.connect = mock.AsyncMock()
+        graphql.close = mock.AsyncMock()
+        graphql.get_agent_turn_context = mock.AsyncMock(return_value=context)
+        mcp = mock.MagicMock()
+        mcp.connect = mock.AsyncMock()
+        mcp.close = mock.AsyncMock()
+        execute = mock.AsyncMock(return_value={"error": "linear_policy_denied", "reason": "acceptance_evidence_invalid"})
+        cases = (
+            ({}, env, context, None),
+            ({"session_id": "hermes-1"}, env, context, None),
+            ({"session_id": "hermes-1", "turn_id": ""}, env, context, None),
+            ({"session_id": "other", "turn_id": "turn-1"}, env, context, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, {**env, "HERMES_SESSION_ID": ""}, context, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, {**env, "HERMES_SESSION_PLATFORM": "telegram"}, context, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, {**env, "HERMES_SESSION_CHAT_ID": ""}, context, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, {**env, "HERMES_SESSION_PROFILE": "finance"}, context, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, env, {**context, "status": "error"}, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, env, {**context, "status": "pending"}, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, env, {**context, "id": "agent-old"}, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, env, {**context, "issue": {"id": "other", "delegate": {"id": "actor-1"}}}, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, env, {**context, "issue": {"id": "issue-1", "delegate": {"id": "other"}}}, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, env, {**context, "app_user_id": "other"}, None),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, env, context, RuntimeError("vendor unavailable")),
+            ({"session_id": "hermes-1", "turn_id": "turn-1"}, env, context, "bound"),
+        )
+        with (
+            mock.patch("linear_tools.LinearOAuthStore"),
+            mock.patch("linear_tools.LinearClient", return_value=graphql),
+            mock.patch("linear_tools.LinearMCPClient", return_value=mcp),
+            mock.patch("linear_tools.execute_with_clients", new=execute),
+        ):
+            for kwargs, session_env, vendor_context, expected in cases:
+                with self.subTest(kwargs=kwargs, env=session_env, context=vendor_context, expected=expected):
+                    execute.reset_mock()
+                    mcp.call_tool.reset_mock()
+                    graphql.get_agent_turn_context.reset_mock()
+                    graphql.get_agent_turn_context.return_value = vendor_context
+                    graphql.get_agent_turn_context.side_effect = expected if isinstance(expected, Exception) else None
+                    with mock.patch("gateway.session_context.get_session_env", side_effect=lambda key, default="": session_env.get(key, default)):
+                        result = json.loads(asyncio.run(handler(args, **kwargs)))
+                    if expected == "bound":
+                        self.assertEqual(result["reason"], "acceptance_evidence_invalid")
+                        self.assertIsNotNone(execute.await_args)
+                        self.assertEqual(execute.await_args.kwargs["expected_agent_session_id"], "agent-1")
+                        self.assertEqual(execute.await_args.kwargs["expected_hermes_turn_id"], "turn-1")
+                        self.assertTrue(callable(execute.await_args.kwargs["evidence_resolver"]))
+                        graphql.get_agent_turn_context.assert_awaited_once_with("agent-1")
+                    else:
+                        self.assertEqual(result, {"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"})
+                        execute.assert_not_awaited()
+                        mcp.call_tool.assert_not_called()
+
+    def test_general_manager_reads_exact_delegate_acceptance_ledger(self):
+        delegate_db = self.root / "delegate.sqlite3"
+        delegate_db.touch(mode=0o600)
+        ledger = DeliveryLedger(str(delegate_db), startup_recovery=False)
+        try:
+            ledger.persist_acceptance_batch(
+                "child-1",
+                "specialist-1",
+                from_revision="2026-08-30T20:00:00.000Z",
+                accepted_revision="2026-08-30T20:01:00.000Z",
+                evidence=[{
+                    "criterion_hash": "a" * 64,
+                    "test_class": "live",
+                    "evidence_digest": "b" * 64,
+                    "evidence_pointer": "linear://activity/specialist-proof",
+                    "observed_revision": "2026-08-30T20:00:00.000Z",
+                    "result": "PASS",
+                    "timestamp": "2026-08-30T20:01:00.000Z",
+                }],
+            )
+        finally:
+            ledger.close()
+        reader = _delegate_acceptance_reader_from_outbound(
+            {
+                "delegate_acceptance_ledgers": {
+                    "specialist-1": str(delegate_db),
+                }
+            },
+            profile_id="general",
+        )
+        self.assertIsNotNone(reader)
+        self.assertEqual(
+            reader("child-1", "specialist-1", "2026-08-30T20:01:00.000Z"),
+            {"a" * 64},
+        )
+        self.assertEqual(
+            reader("child-1", "other-specialist", "2026-08-30T20:01:00.000Z"),
+            set(),
+        )
+
+    def test_delegate_acceptance_reader_is_general_only_and_rejects_unsafe_mapping(self):
+        self.assertIsNone(
+            _delegate_acceptance_reader_from_outbound(
+                {"delegate_acceptance_ledgers": {"specialist-1": "relative.sqlite3"}},
+                profile_id="general",
+            )
+        )
+        self.assertIsNone(
+            _delegate_acceptance_reader_from_outbound(
+                {
+                    "delegate_acceptance_ledgers": {
+                        "specialist-1": str(self.root / "delegate.sqlite3"),
+                    }
+                },
+                profile_id="researcher",
+            )
+        )
+
+    def test_mutation_flag_registers_general_ops200_verifier(self):
         ctx = FakeContext()
         register_outbound_tools(ctx, extra=self.extra(mutations=True))
         self.assertEqual(
             set(ctx.tools),
-            {"linear_get_issue", "linear_list_issues", "linear_save_issue", "linear_save_comment"},
+            {"linear_get_issue", "linear_list_issues", "linear_save_issue", "linear_save_comment", "linear_verify_ops200_soul"},
         )
         issue_properties = ctx.tools["linear_save_issue"]["schema"]["parameters"]["properties"]
         self.assertEqual(issue_properties["priority"], {"type": "number"})
@@ -227,7 +376,7 @@ class RegistrationTests(unittest.TestCase):
         register_outbound_tools(ctx, extra=self.extra(mutations=True))
         self.assertEqual(
             set(ctx.tools),
-            {"linear_get_issue", "linear_list_issues", "linear_save_issue", "linear_save_comment"},
+            {"linear_get_issue", "linear_list_issues", "linear_save_issue", "linear_save_comment", "linear_verify_ops200_soul"},
         )
         self.assertEqual(ctx.hooks, {})
 
@@ -825,7 +974,11 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         root = Path(self.tempdir.name)
+        root.chmod(0o700)
         self.ledger = OutboundLedger(str(root / "db.sqlite3"))
+        self.acceptance_ledger = DeliveryLedger(
+            str(root / "inbound.sqlite3"), startup_recovery=False
+        )
         locks_root = root / "locks"
         locks_root.mkdir(mode=0o700)
         lock_path = locks_root / "linear-quota-admission.lock"
@@ -840,6 +993,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def asyncTearDown(self):
+        self.acceptance_ledger.close()
         self.ledger.close()
         self.tempdir.cleanup()
 
@@ -1535,6 +1689,9 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def child_terminal_context() -> dict:
         return {
+            "id": "child-1",
+            "updatedAt": "2026-08-30T20:01:00.000Z",
+            "description": "",
             "team": {"id": "ops-1"},
             "state": {"id": "progress-1", "type": "started"},
             "creator": {"id": "actor-1"},
@@ -1563,6 +1720,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         agent_sessions: list[dict] | None = None,
         agent_session_reads: list[list[dict]] | None = None,
         after_context: dict | None = None,
+        delegate_acceptance_reader=None,
     ) -> tuple[dict, FakeMCP]:
         mcp = FakeMCP()
         result = await execute_with_clients(
@@ -1577,6 +1735,8 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             mutation=True,
             policy=self.policy,
             ledger=self.ledger,
+            acceptance_ledger=self.acceptance_ledger,
+            delegate_acceptance_reader=delegate_acceptance_reader,
             graphql_client=FakeGraphQL(
                 child_terminal_contexts=(
                     [context, context, after_context]
@@ -1589,6 +1749,17 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             mcp_client=mcp,
         )
         return result, mcp
+
+    async def test_complete_child_denies_unchecked_acceptance_before_mutation(self):
+        context = self.child_terminal_context()
+        context["id"] = "child-1"
+        context["description"] = "## Kabul kriterleri\n- [ ] Live canary passes"
+        result, mcp = await self.run_child_terminal_action(
+            context=context,
+            operation_key="child-unchecked-acceptance",
+        )
+        self.assertEqual(result["reason"], "acceptance_unchecked")
+        self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
 
     @staticmethod
     def plan_description() -> str:
@@ -1653,9 +1824,46 @@ Stale human edit körlemesine ezilmez. Drift durumunda mutation fail-closed olur
         contexts: list[dict],
         description: str,
         expected_updated_at: str = "2026-08-09T18:00:00.000Z",
+        evidence: list[dict] | None = None,
+        evidence_resolver: Any = "auto",
+        expected_agent_session_id: str | None = "session-current",
+        expected_hermes_turn_id: str | None = "turn-current",
     ) -> tuple[dict, FakeMCP, FakeGraphQL]:
         mcp = FakeMCP()
         graphql = FakeGraphQL(plan_contexts=contexts)
+        if evidence is None:
+            before = {item.criterion_hash: item for item in acceptance_criteria(contexts[0]["description"])}
+            evidence = [
+                {
+                    "criterion_hash": item.criterion_hash,
+                    "test_class": "integration",
+                    "evidence_digest": "b" * 64,
+                    "evidence_pointer": f"linear://activity/{index}",
+                    "observed_revision": expected_updated_at,
+                    "result": "PASS",
+                    "timestamp": "2026-08-09T18:00:01.000Z",
+                }
+                for index, item in enumerate(acceptance_criteria(description), start=1)
+                if item.checked and not before.get(item.criterion_hash, item).checked
+            ]
+        if evidence_resolver == "auto":
+            # Fixture-only resolver: these claims are synthetic, not external PASS authority.
+            # Provenance is fixed by the test harness, never copied from evidence.
+            resolved_by_pointer = {
+                item["evidence_pointer"]: {
+                    "evidence_pointer": item["evidence_pointer"],
+                    "issue_id": "issue-1",
+                    "delegate_id": "actor-1",
+                    "agent_session_id": "session-current",
+                    "hermes_turn_id": "turn-current",
+                    "criterion_hash": item["criterion_hash"],
+                    "evidence_digest": item["evidence_digest"],
+                    "observed_revision": item["observed_revision"],
+                    "timestamp": item["timestamp"],
+                }
+                for item in evidence
+            }
+            evidence_resolver = resolved_by_pointer.get
         result = await execute_with_clients(
             profile_id="general",
             vendor_tool="save_issue",
@@ -1666,14 +1874,122 @@ Stale human edit körlemesine ezilmez. Drift durumunda mutation fail-closed olur
                 "lifecycle_action": "mark_acceptance",
                 "expected_updated_at": expected_updated_at,
                 "description": description,
+                "acceptance_evidence": evidence,
             },
             mutation=True,
             policy=self.policy,
             ledger=self.ledger,
+            acceptance_ledger=self.acceptance_ledger,
+            evidence_resolver=evidence_resolver,
+            expected_agent_session_id=expected_agent_session_id,
+            expected_hermes_turn_id=expected_hermes_turn_id,
             graphql_client=graphql,
             mcp_client=mcp,
         )
         return result, mcp, graphql
+
+    async def test_mark_acceptance_rejects_old_turn_with_identical_metadata_without_trusted_turn(self):
+        source = self.plan_description()
+        checked = source.replace("- [ ]", "- [x]", 1)
+        before = self.plan_context(description=source)
+        after = self.plan_context(updated_at="2026-08-09T18:01:00.000Z", description=checked)
+        # A previous turn can have the same criterion, digest and issue revision.
+        # The handler has no trusted current AgentSession/turn to compare against it.
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key="mark-acceptance-old-turn",
+            contexts=[before, before, after],
+            description=checked,
+            expected_agent_session_id=None,
+            expected_hermes_turn_id=None,
+        )
+        self.assertEqual(result, {
+            "error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable",
+        })
+        self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
+
+    async def test_mark_acceptance_rejects_resolved_old_turn_with_same_metadata(self):
+        source = self.plan_description()
+        checked = source.replace("- [ ]", "- [x]", 1)
+        criterion = next(item for item in acceptance_criteria(checked) if item.checked)
+        evidence = [{
+            "criterion_hash": criterion.criterion_hash,
+            "test_class": "integration",
+            "evidence_digest": "b" * 64,
+            "evidence_pointer": "linear://activity/old-turn",
+            "observed_revision": "2026-08-09T18:00:00.000Z",
+            "result": "PASS",
+            "timestamp": "2026-08-09T18:00:01.000Z",
+        }]
+        # Resolver metadata is independent of the model-provided envelope.
+        resolved = {
+            "evidence_pointer": evidence[0]["evidence_pointer"],
+            "issue_id": "issue-1",
+            "delegate_id": "actor-1",
+            "agent_session_id": "session-current",
+            "hermes_turn_id": "turn-previous",
+            "criterion_hash": criterion.criterion_hash,
+            "evidence_digest": evidence[0]["evidence_digest"],
+            "observed_revision": evidence[0]["observed_revision"],
+            "timestamp": evidence[0]["timestamp"],
+        }
+        for field, wrong in (("agent_session_id", "session-previous"),
+                             ("hermes_turn_id", "turn-previous")):
+            with self.subTest(field=field):
+                result, mcp, _graphql = await self.run_acceptance_action(
+                    operation_key=f"mark-acceptance-resolved-{field}",
+                    contexts=[self.plan_context(description=source)],
+                    description=checked,
+                    evidence=evidence,
+                    evidence_resolver=lambda _pointer, key=field, value=wrong: {
+                        **resolved, key: value,
+                    },
+                )
+                self.assertEqual(result["reason"], "acceptance_evidence_invalid")
+                self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
+
+    async def test_mark_acceptance_fails_closed_without_server_evidence_resolver(self):
+        source = self.plan_description()
+        checked = source.replace("- [ ]", "- [x]", 1)
+
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key="mark-acceptance-no-resolver",
+            contexts=[self.plan_context(description=source)],
+            description=checked,
+            evidence_resolver=None,
+        )
+
+        self.assertEqual(result["reason"], "acceptance_evidence_invalid")
+        self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
+
+    async def test_mark_acceptance_rejects_unresolved_digest_attestation(self):
+        source = self.plan_description()
+        checked = source.replace("- [ ]", "- [x]", 1)
+        criterion = next(item for item in acceptance_criteria(checked) if item.checked)
+        digest = "d" * 64
+        after = self.plan_context(
+            updated_at="2026-08-09T18:01:00.000Z",
+            description=checked,
+        )
+        evidence = [{
+            "criterion_hash": criterion.criterion_hash,
+            "test_class": "integration",
+            "evidence_digest": digest,
+            "evidence_pointer": f"sha256:{digest}",
+            "observed_revision": "2026-08-09T18:00:00.000Z",
+            "result": "PASS",
+            "timestamp": "2026-08-09T18:00:01.000Z",
+        }]
+
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key="mark-acceptance-builtin-attestation",
+            contexts=[self.plan_context(description=source)] * 2 + [after],
+            description=checked,
+            evidence=evidence,
+            evidence_resolver=None,
+        )
+
+        self.assertEqual(result["reason"], "acceptance_evidence_invalid")
+        self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
 
     async def test_mark_acceptance_updates_only_proven_checkboxes_with_conflict_guard(self):
         source = self.plan_description()
@@ -1683,17 +1999,139 @@ Stale human edit körlemesine ezilmez. Drift durumunda mutation fail-closed olur
             updated_at="2026-08-09T18:01:00.000Z",
             description=checked,
         )
+        source_by_hash = {item.criterion_hash: item for item in acceptance_criteria(source)}
+        evidence = [
+            {
+                "criterion_hash": item.criterion_hash,
+                "test_class": "integration",
+                "evidence_digest": "b" * 64,
+                "evidence_pointer": f"linear://activity/{index}",
+                "observed_revision": "2026-08-09T18:00:00.000Z",
+                "result": "PASS",
+                "timestamp": "2026-08-09T18:00:01.000Z",
+            }
+            for index, item in enumerate(acceptance_criteria(checked), start=1)
+            if item.checked and not source_by_hash[item.criterion_hash].checked
+        ]
         result, mcp, graphql = await self.run_acceptance_action(
             operation_key="mark-acceptance-positive",
             contexts=[before, before, after],
             description=checked,
+            evidence=evidence,
         )
         self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            self.acceptance_ledger.acceptance_evidence_hashes("issue-1", "actor-1"),
+            {item.criterion_hash for item in acceptance_criteria(checked)},
+        )
         self.assertEqual(graphql.plan_contexts, [after])
         self.assertEqual(
             [call for call in mcp.calls if call[0] == "save_issue"],
             [("save_issue", {"id": "OPS-105", "description": checked}, True)],
         )
+        replay, replay_mcp, _replay_graphql = await self.run_acceptance_action(
+            operation_key="mark-acceptance-positive",
+            contexts=[after],
+            description=checked,
+            evidence=evidence,
+        )
+        self.assertEqual(replay, {
+            "error": "linear_policy_denied", "reason": "acceptance_replay_provenance_unverified",
+        })
+        self.assertEqual([call for call in replay_mcp.calls if call[0] == "save_issue"], [])
+
+    async def test_mark_acceptance_does_not_attribute_external_matching_write_after_crash(self):
+        checked = "## Kabul kriterleri\n- [x] Live acceptance"
+        criterion = acceptance_criteria(checked)[0]
+        evidence = [{
+            "criterion_hash": criterion.criterion_hash,
+            "test_class": "integration",
+            "evidence_digest": "b" * 64,
+            "evidence_pointer": "linear://activity/recovery",
+            "observed_revision": "2026-08-09T18:00:00.000Z",
+            "result": "PASS",
+            "timestamp": "2026-08-09T18:00:01.000Z",
+        }]
+        operation_key = "mark-acceptance-crash-recovery"
+        payload = {
+            "id": "OPS-105",
+            "description": checked,
+            "lifecycle_action": "mark_acceptance",
+            "expected_updated_at": "2026-08-09T18:00:00.000Z",
+            "acceptance_evidence": evidence,
+        }
+        reservation = self.ledger.reserve(
+            operation_key=operation_key,
+            tool_name="save_issue",
+            payload=payload,
+            profile_id="general",
+            actor_id="actor-1",
+            team_id="ops-1",
+        )
+        self.assertTrue(reservation.dispatch)
+        after = self.plan_context(
+            description=checked,
+            updated_at="2026-08-09T18:00:02.000Z",
+        )
+
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key=operation_key,
+            contexts=[after],
+            description=checked,
+            evidence=evidence,
+        )
+
+        self.assertEqual(result, {
+            "error": "linear_policy_denied", "reason": "acceptance_replay_provenance_unverified",
+        })
+        self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
+        self.assertEqual(
+            self.acceptance_ledger.acceptance_evidence_hashes(
+                "issue-1",
+                "actor-1",
+                accepted_revision="2026-08-09T18:00:02.000Z",
+            ),
+            set(),
+        )
+
+    async def test_mark_acceptance_rejects_checkbox_mutation_outside_acceptance_section(self):
+        source = """## Tasks
+- [ ] Human-owned task
+
+## Kabul kriterleri
+- [ ] Live acceptance
+"""
+        target = source.replace("- [ ] Human-owned task", "- [x] Human-owned task").replace(
+            "- [ ] Live acceptance", "- [x] Live acceptance"
+        )
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key="mark-acceptance-outside-section",
+            contexts=[self.plan_context(description=source)],
+            description=target,
+        )
+        self.assertEqual(result["reason"], "acceptance_noncanonical_checkbox_change")
+        self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
+
+    async def test_mark_acceptance_partial_evidence_produces_zero_mutation(self):
+        source = self.plan_description()
+        checked = source.replace("- [ ]", "- [x]", 1)
+        criterion = next(item for item in acceptance_criteria(checked) if item.checked)
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key="mark-acceptance-partial",
+            contexts=[self.plan_context(description=source)],
+            description=checked,
+            evidence=[{
+                "criterion_hash": criterion.criterion_hash,
+                "test_class": "integration",
+                "evidence_digest": "b" * 64,
+                "evidence_pointer": "linear://activity/partial",
+                "observed_revision": "2026-08-09T18:00:00.000Z",
+                "result": "PARTIAL",
+                "timestamp": "2026-08-09T18:00:01.000Z",
+            }],
+        )
+        self.assertEqual(result["reason"], "acceptance_evidence_invalid")
+        self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
 
     async def test_mark_acceptance_accepts_vendor_checkbox_and_bullet_normalization(self):
         source = self.plan_description()
@@ -1833,6 +2271,26 @@ Stale human edit körlemesine ezilmez. Drift durumunda mutation fail-closed olur
                 )
                 self.assertIsNone(denied)
                 self.assertEqual(error["reason"], reason)
+
+    def test_mark_acceptance_rejects_duplicate_acceptance_sections(self):
+        source = "## Acceptance\n- [ ] Visible\n## Notes\nText\n## Kabul kriterleri\n- [ ] Hidden"
+        target = source.replace("- [ ] Visible", "- [x] Visible")
+        snapshot, error = _evaluate_acceptance_context(
+            self.plan_context(description=source),
+            target_team_id="ops-1",
+            actor_id="actor-1",
+            expected_updated_at="2026-08-09T18:00:00.000Z",
+            description=target,
+        )
+        self.assertIsNone(snapshot)
+        self.assertEqual(error["reason"], "acceptance_section_ambiguous")
+
+    def test_acceptance_readback_revision_must_strictly_advance(self):
+        source = "2026-08-09T18:00:00.000Z"
+        self.assertTrue(_revision_is_strict_successor(source, "2026-08-09T18:00:00.001Z"))
+        self.assertFalse(_revision_is_strict_successor(source, source))
+        self.assertFalse(_revision_is_strict_successor(source, "2026-08-09T17:59:59.999Z"))
+        self.assertFalse(_revision_is_strict_successor(source, "malformed"))
 
     def test_mark_acceptance_ignores_checkbox_syntax_inside_code_blocks(self):
         source = """## Kabul kriterleri
@@ -2562,6 +3020,9 @@ payload
 
     async def test_complete_child_requires_creator_owned_child_and_reads_back(self):
         before = {
+            "id": "child-1",
+            "updatedAt": "2026-08-30T20:01:00.000Z",
+            "description": "",
             "team": {"id": "ops-1"},
             "state": {"id": "progress-1", "type": "started"},
             "creator": {"id": "actor-1"},
@@ -2577,7 +3038,11 @@ payload
             ],
             "open_blockers": [],
         }
-        after = {**before, "state": {"id": "done-1", "type": "completed"}}
+        after = {
+            **before,
+            "updatedAt": "2026-08-30T20:02:00.000Z",
+            "state": {"id": "done-1", "type": "completed"},
+        }
         graph = FakeGraphQL(
             child_terminal_contexts=[before, before, after],
             agent_sessions=[{
@@ -2645,6 +3110,9 @@ payload
     async def test_complete_child_accepts_creator_managed_specialist_delivery(self):
         context = self.child_terminal_context()
         context["delegate"] = {"id": "specialist-1"}
+        context["id"] = "child-1"
+        context["updatedAt"] = "2026-08-30T20:01:00.000Z"
+        context["description"] = "## Kabul kriterleri\n- [x] Specialist live canary passes"
         sessions = [
             {
                 "id": "specialist-session-1",
@@ -2657,8 +3125,12 @@ payload
             context=context,
             operation_key="child-specialist-complete",
             agent_sessions=sessions,
+            delegate_acceptance_reader=lambda issue_id, actor_id, revision: {
+                acceptance_criteria(context["description"])[0].criterion_hash
+            },
             after_context={
                 **context,
+                "updatedAt": "2026-08-30T20:02:00.000Z",
                 "state": {"id": "done-1", "type": "completed"},
             },
         )
@@ -2666,6 +3138,35 @@ payload
         self.assertEqual(
             len([call for call in mcp.calls if call[0] == "save_issue"]),
             1,
+        )
+
+    async def test_mark_acceptance_backfills_pass_evidence_for_prechecked_criterion_without_vendor_mutation(self):
+        description = "## Kabul kriterleri\n- [x] Human prechecked criterion"
+        criterion = acceptance_criteria(description)[0]
+        evidence = [{
+            "criterion_hash": criterion.criterion_hash,
+            "test_class": "integration",
+            "evidence_digest": "c" * 64,
+            "evidence_pointer": "linear://activity/prechecked-proof",
+            "observed_revision": "2026-08-09T18:00:00.000Z",
+            "result": "PASS",
+            "timestamp": "2026-08-09T18:00:01.000Z",
+        }]
+
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key="mark-acceptance-prechecked-backfill",
+            contexts=[self.plan_context(description=description)],
+            description=description,
+            evidence=evidence,
+        )
+
+        self.assertEqual(result["status"], "already_accepted")
+        self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
+        self.assertEqual(
+            self.acceptance_ledger.acceptance_evidence_hashes(
+                "issue-1", "actor-1", accepted_revision="2026-08-09T18:00:00.000Z"
+            ),
+            {criterion.criterion_hash},
         )
 
     async def test_specialist_completion_authority_is_general_manager_only(self):
@@ -3003,7 +3504,11 @@ payload
 
     async def test_complete_child_closes_stale_creator_parked_session_then_succeeds(self):
         context = self.child_terminal_context()
-        after = {**context, "state": {"id": "done-1", "type": "completed"}}
+        after = {
+            **context,
+            "updatedAt": "2026-08-30T20:02:00.000Z",
+            "state": {"id": "done-1", "type": "completed"},
+        }
         result, mcp = await self.run_child_terminal_action(
             context=context,
             operation_key="op-complete-stale-parked-session",
@@ -3086,12 +3591,59 @@ payload
     async def test_complete_child_is_idempotent_when_already_completed(self):
         context = self.child_terminal_context()
         context["state"] = {"id": "done-1", "type": "completed"}
+        context["description"] = "## Kabul kriterleri\n- [x] Historical criterion"
         result, mcp = await self.run_child_terminal_action(
             context=context,
             operation_key="op-complete-already-done",
         )
         self.assertEqual(result, {"status": "already_completed", "result_id": "done-1"})
         self.assertEqual([call[0] for call in mcp.calls], ["get_user"])
+
+    async def test_complete_child_uses_pre_mutation_evidence_and_requires_revision_advancement(self):
+        before = self.child_terminal_context()
+        before["description"] = "## Kabul kriterleri\n- [x] Live canary passes"
+        criterion = acceptance_criteria(before["description"])[0]
+        self.acceptance_ledger.record_acceptance_evidence(
+            issue_id="child-1",
+            criterion_hash=criterion.criterion_hash,
+            actor_id="actor-1",
+            test_class="live",
+            evidence_digest="b" * 64,
+            evidence_pointer="linear://activity/child-proof",
+            observed_revision="2026-08-30T20:00:00.000Z",
+            accepted_revision="2026-08-30T20:01:00.000Z",
+            result="PASS",
+            timestamp="2026-08-30T20:00:01.000Z",
+        )
+        after = {
+            **before,
+            "updatedAt": "2026-08-30T20:02:00.000Z",
+            "state": {"id": "done-1", "type": "completed"},
+        }
+
+        result, mcp = await self.run_child_terminal_action(
+            context=before,
+            after_context=after,
+            operation_key="op-complete-pre-revision-proof",
+        )
+
+        self.assertEqual(result.get("status"), "success", result)
+        self.assertEqual(len([call for call in mcp.calls if call[0] == "save_issue"]), 1)
+
+    async def test_complete_child_readback_rejects_non_advancing_updated_at(self):
+        before = self.child_terminal_context()
+        after = {**before, "state": {"id": "done-1", "type": "completed"}}
+
+        result, _mcp = await self.run_child_terminal_action(
+            context=before,
+            after_context=after,
+            operation_key="op-complete-no-revision-advance",
+        )
+
+        self.assertEqual(
+            result,
+            {"error": "linear_mutation_outcome_unknown", "reason": "lifecycle_readback_mismatch"},
+        )
 
     async def test_complete_child_denies_incomplete_parent_state(self):
         context = self.child_terminal_context()

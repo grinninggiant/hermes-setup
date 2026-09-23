@@ -13,7 +13,9 @@ import html
 import json
 import os
 import re
+import secrets
 import stat
+import threading
 import unicodedata
 import uuid
 from pathlib import Path
@@ -22,6 +24,14 @@ from typing import Any, Awaitable, Callable
 from markdown_it import MarkdownIt
 
 try:
+    from .acceptance import (
+        EvidenceResolver,
+        acceptance_criteria,
+        acceptance_gate,
+        acceptance_section_error,
+        authenticate_evidence_envelope,
+    )
+    from .ledger import DeliveryLedger
     from .linear_client import (
         LINEAR_ISSUE_CAPACITY,
         LINEAR_ISSUE_CRITICAL_THRESHOLD,
@@ -47,6 +57,14 @@ try:
     from .outbound_policy import OutboundPolicy, extract_linear_profile_url
     from .retention import RetentionInventoryReader, build_manifest, classify_inventory
 except ImportError:  # Direct module loading in standalone tests/scripts.
+    from acceptance import (
+        EvidenceResolver,
+        acceptance_criteria,
+        acceptance_gate,
+        acceptance_section_error,
+        authenticate_evidence_envelope,
+    )
+    from ledger import DeliveryLedger
     from linear_client import (
         LINEAR_ISSUE_CAPACITY,
         LINEAR_ISSUE_CRITICAL_THRESHOLD,
@@ -78,7 +96,7 @@ CRITICAL_THRESHOLD = LINEAR_ISSUE_CRITICAL_THRESHOLD
 WRAPPER_FIELDS = frozenset(
     {
         "operation_key", "target_team_id", "lifecycle_action", "comment_purpose",
-        "expected_updated_at",
+        "expected_updated_at", "acceptance_evidence",
     }
 )
 TOOL_MAP = {
@@ -93,6 +111,42 @@ VENDOR_MUTATION_TOOLS = frozenset(
 LIFECYCLE_NOOP_LEDGER_PREFIX = "lifecycle-noop:"
 LEGACY_QUOTA_ADMISSION_LEDGER_PREFIX = "quota-admission:v1:"
 QUOTA_ADMISSION_LEDGER_PREFIX = "quota-admission:v2:"
+_OPS200_SOUL_TEXT = "9/9 SOUL fresh read-back’te exact delegate-owned acceptance kuralını taşır."
+_OPS200_SOUL_LINE_HASHES = (
+    (b"mark_acceptance", "737a77b5c408f257b2f6e3b095887f47bdb266bb951a1bf5ded6a32a21c69393"),
+    (b"Acceptance checkbox varsa", "25cac62c8a8e25b62329726d8aa34c862bf3bd436d1234ccbd4672e4d04c6cab"),
+)
+_OPS200_PROFILES = ("general", "assistant", "researcher", "coder", "writer", "producer", "marketing", "health", "finance")
+
+
+def _ops200_soul_readback() -> str | None:
+    """Read all nine canonical lines anew, without trusting a prior tool result."""
+    home = Path(os.environ.get("HERMES_HOME", ""))
+    if not home.is_absolute() or home.name != "general" or home.parent.name != "profiles":
+        return None
+    digest = hashlib.sha256()
+    try:
+        for name in _OPS200_PROFILES:
+            profile = home.parent / name
+            path = profile / "SOUL.md"
+            if profile.is_symlink() or not profile.is_dir():
+                return None
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+                    return None
+                lines = os.read(fd, info.st_size + 1).splitlines()
+            finally:
+                os.close(fd)
+            for marker, expected in _OPS200_SOUL_LINE_HASHES:
+                matches = [line for line in lines if marker in line]
+                if len(matches) != 1 or hashlib.sha256(matches[0]).hexdigest() != expected:
+                    return None
+                digest.update(name.encode() + b"\0" + matches[0] + b"\0")
+    except (OSError, ValueError):
+        return None
+    return digest.hexdigest()
 LIFECYCLE_NOOP_STATUSES = frozenset(
     {
         "already_started",
@@ -315,6 +369,26 @@ SAVE_ISSUE_SCHEMA = {
             "expected_updated_at": {
                 "type": "string",
                 "description": "Exact updatedAt revision read before guarded description action",
+            },
+            "acceptance_evidence": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "criterion_hash": {"type": "string"},
+                        "test_class": {"type": "string"},
+                        "evidence_digest": {"type": "string"},
+                        "evidence_pointer": {"type": "string"},
+                        "observed_revision": {"type": "string"},
+                        "result": {"type": "string", "enum": ["PASS", "PARTIAL", "FAIL"]},
+                        "timestamp": {"type": "string"},
+                    },
+                    "required": [
+                        "criterion_hash", "test_class", "evidence_digest", "evidence_pointer",
+                        "observed_revision", "result", "timestamp",
+                    ],
+                    "additionalProperties": False,
+                },
             },
             "priority": {"type": "number"},
             "assignee": {"type": "string"},
@@ -650,8 +724,70 @@ async def _resolve_child_terminal_transition(
     actor_id: str,
     manager_completion_allowed: bool,
     graphql_client: LinearClient,
+    acceptance_ledger: DeliveryLedger | None = None,
+    delegate_acceptance_reader: Callable[[str, str, str], set[str]] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str] | None, dict[str, Any] | None]:
-    context = await graphql_client.get_issue_child_terminal_context(issue_id)
+    context = context or await graphql_client.get_issue_child_terminal_context(issue_id)
+    target_type = "completed" if action == "complete_child" else "canceled"
+    if str((context.get("state") or {}).get("type") or "").casefold() == target_type:
+        # A terminal replay/readback is not a new acceptance decision. Revalidate
+        # authoritative ownership and terminal state without applying the gate to
+        # the post-mutation revision.
+        return _evaluate_child_terminal_context(
+            context,
+            action=action,
+            target_team_id=target_team_id,
+            actor_id=actor_id,
+            open_actor_session=False,
+        )
+    if action == "complete_child":
+        description = str(context.get("description") or "")
+        criteria = acceptance_criteria(description)
+        section_error = acceptance_section_error(description, criteria)
+        if section_error is not None:
+            return None, {"error": "linear_policy_denied", "reason": section_error}
+        if criteria:
+            if not str(context.get("updatedAt") or ""):
+                return None, {
+                    "error": "linear_policy_denied",
+                    "reason": "acceptance_revision_unavailable",
+                }
+            delegate_id = str((context.get("delegate") or {}).get("id") or "")
+            if not delegate_id:
+                return None, {
+                    "error": "linear_policy_denied",
+                    "reason": "acceptance_ledger_unavailable",
+                }
+            if delegate_id == actor_id and acceptance_ledger is None:
+                return None, {
+                    "error": "linear_policy_denied",
+                    "reason": "acceptance_ledger_unavailable",
+                }
+            if delegate_id == actor_id and acceptance_ledger is not None:
+                evidence_hashes = acceptance_ledger.acceptance_evidence_hashes(
+                    str(context.get("id") or issue_id),
+                    delegate_id,
+                    accepted_revision=str(context.get("updatedAt") or ""),
+                )
+            elif delegate_acceptance_reader is not None:
+                try:
+                    evidence_hashes = await asyncio.to_thread(
+                        delegate_acceptance_reader,
+                        str(context.get("id") or issue_id),
+                        delegate_id,
+                        str(context.get("updatedAt") or ""),
+                    )
+                except Exception:
+                    evidence_hashes = set()
+            else:
+                evidence_hashes = set()
+            gate = acceptance_gate(
+                str(context.get("description") or ""),
+                evidence_hashes,
+            )
+            if not gate.allowed:
+                return None, {"error": "linear_policy_denied", "reason": gate.reason}
     sessions = await graphql_client.get_issue_agent_sessions(issue_id)
     sessions = await _release_parked_creator_session(
         issue_id,
@@ -696,7 +832,7 @@ async def _resolve_child_terminal_transition(
             else:
                 if response_count < 1:
                     delegated_completion_error = "delegate_terminal_response_required"
-    return _evaluate_child_terminal_context(
+    transition, result = _evaluate_child_terminal_context(
         context,
         action=action,
         target_team_id=target_team_id,
@@ -704,6 +840,9 @@ async def _resolve_child_terminal_transition(
         open_actor_session=open_actor_session,
         delegated_completion_error=delegated_completion_error,
     )
+    if transition is not None and action == "complete_child":
+        transition["source_updated_at"] = str(context.get("updatedAt") or "")
+    return transition, result
 
 
 PLAN_REQUIRED_HEADINGS = (
@@ -995,12 +1134,37 @@ def _evaluate_acceptance_context(
         return None, {"error": "linear_policy_denied", "reason": "acceptance_revision_mismatch"}
 
     source_description = str(context.get("description") or "")
+    for candidate in (source_description, description):
+        section_error = acceptance_section_error(candidate)
+        if section_error is not None:
+            return None, {"error": "linear_policy_denied", "reason": section_error}
     source_shape, source_states = _acceptance_checkbox_shape(source_description)
     target_shape, target_states = _acceptance_checkbox_shape(description)
     if not source_states or len(source_states) != len(target_states) or source_shape != target_shape:
         return None, {"error": "linear_policy_denied", "reason": "acceptance_description_drift"}
     if any(source and not target for source, target in zip(source_states, target_states, strict=True)):
         return None, {"error": "linear_policy_denied", "reason": "acceptance_checkbox_regression"}
+    source_criteria = acceptance_criteria(source_description)
+    target_criteria = acceptance_criteria(description)
+    if (
+        len(source_criteria) != len(target_criteria)
+        or [item.criterion_hash for item in source_criteria]
+        != [item.criterion_hash for item in target_criteria]
+    ):
+        return None, {"error": "linear_policy_denied", "reason": "acceptance_description_drift"}
+    all_checkbox_changes = sum(
+        1 for source, target in zip(source_states, target_states, strict=True)
+        if not source and target
+    )
+    canonical_changes = sum(
+        1 for source, target in zip(source_criteria, target_criteria, strict=True)
+        if not source.checked and target.checked
+    )
+    if all_checkbox_changes != canonical_changes:
+        return None, {
+            "error": "linear_policy_denied",
+            "reason": "acceptance_noncanonical_checkbox_change",
+        }
     if source_states == target_states:
         if all(source_states):
             return None, {
@@ -1011,6 +1175,7 @@ def _evaluate_acceptance_context(
     if not any(not source and target for source, target in zip(source_states, target_states, strict=True)):
         return None, {"error": "linear_policy_denied", "reason": "acceptance_no_change"}
     return {
+        "issue_id": str(context.get("id") or ""),
         "team_id": target_team_id,
         "delegate_id": actor_id,
         "assignee_id": str(assignee.get("id") or ""),
@@ -1056,6 +1221,19 @@ def _canonicalize_vendor_markdown(description: str) -> str:
     return "".join(lines)
 
 
+def _revision_is_strict_successor(source: str, target: str) -> bool:
+    try:
+        source_timestamp = datetime.fromisoformat(source.replace("Z", "+00:00"))
+        target_timestamp = datetime.fromisoformat(target.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return bool(
+        source_timestamp.tzinfo is not None
+        and target_timestamp.tzinfo is not None
+        and target_timestamp > source_timestamp
+    )
+
+
 def _plan_readback_matches(
     context: dict[str, Any],
     *,
@@ -1076,8 +1254,7 @@ def _plan_readback_matches(
         and str(context.get("title") or "") == snapshot["title"]
         and _canonicalize_vendor_markdown(str(context.get("description") or ""))
         == _canonicalize_vendor_markdown(description)
-        and updated_at
-        and updated_at != expected_updated_at
+        and _revision_is_strict_successor(expected_updated_at, updated_at)
     )
 
 
@@ -1091,6 +1268,11 @@ async def execute_with_clients(
     ledger: OutboundLedger | None,
     graphql_client: LinearClient,
     mcp_client: LinearMCPClient,
+    acceptance_ledger: DeliveryLedger | None = None,
+    delegate_acceptance_reader: Callable[[str, str, str], set[str]] | None = None,
+    evidence_resolver: EvidenceResolver | None = None,
+    expected_agent_session_id: str | None = None,
+    expected_hermes_turn_id: str | None = None,
     quota_admission_lock: FleetGlobalLock | None = None,
     quota_team_ids: frozenset[str] | None = None,
     retention_dry_run: Callable[[], Awaitable[dict[str, Any]]] | None = None,
@@ -1104,6 +1286,12 @@ async def execute_with_clients(
             "error": "linear_policy_denied",
             "reason": "mutation_classification_mismatch",
         }
+    if (
+        vendor_tool == "save_issue"
+        and arguments.get("lifecycle_action") == "mark_acceptance"
+        and (not expected_agent_session_id or not expected_hermes_turn_id)
+    ):
+        return {"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"}
     mutation = derived_mutation
     is_issue_create = vendor_tool == "save_issue" and not arguments.get("id")
     if is_issue_create:
@@ -1152,6 +1340,11 @@ async def execute_with_clients(
                 mutation=mutation,
                 policy=policy,
                 ledger=ledger,
+                acceptance_ledger=acceptance_ledger,
+                delegate_acceptance_reader=delegate_acceptance_reader,
+                evidence_resolver=evidence_resolver,
+                expected_agent_session_id=expected_agent_session_id,
+                expected_hermes_turn_id=expected_hermes_turn_id,
                 quota_admission_lock=quota_admission_lock,
                 quota_team_ids=quota_team_ids,
                 retention_dry_run=retention_dry_run,
@@ -1219,6 +1412,9 @@ async def execute_with_clients(
     lifecycle_action = str(arguments.get("lifecycle_action") or "")
     lifecycle_transition: dict[str, str] | None = None
     plan_snapshot: dict[str, str] | None = None
+    acceptance_read_back: dict[str, Any] | None = None
+    normalized_acceptance_evidence: list[dict[str, str]] = []
+    context: dict[str, Any] = {}
     description_evaluator: Callable[..., Any] | None = None
     lifecycle_noop_result: dict[str, Any] | None = None
     if lifecycle_action == "start":
@@ -1241,6 +1437,8 @@ async def execute_with_clients(
             actor_id=graph_actor,
             manager_completion_allowed=profile_id == "general",
             graphql_client=graphql_client,
+            acceptance_ledger=acceptance_ledger,
+            delegate_acceptance_reader=delegate_acceptance_reader,
         )
         if lifecycle_result is not None:
             if str(lifecycle_result.get("status") or "") in LIFECYCLE_NOOP_STATUSES:
@@ -1255,6 +1453,11 @@ async def execute_with_clients(
             "description": str(arguments.get("description") or ""),
             "lifecycle_action": lifecycle_action,
             "expected_updated_at": str(arguments.get("expected_updated_at") or ""),
+            **(
+                {"acceptance_evidence": arguments.get("acceptance_evidence")}
+                if lifecycle_action == "mark_acceptance"
+                else {}
+            ),
         }
         try:
             existing = await asyncio.to_thread(
@@ -1269,6 +1472,12 @@ async def execute_with_clients(
         except OutboundLedgerError as exc:
             return {"error": "linear_idempotency_rejected", "reason": str(exc)}
         if existing is not None:
+            if lifecycle_action == "mark_acceptance":
+                # Replay metadata has no session/turn binding; never re-attest it.
+                return {
+                    "error": "linear_policy_denied",
+                    "reason": "acceptance_replay_provenance_unverified",
+                }
             if existing.status == "pending":
                 try:
                     existing = await asyncio.to_thread(
@@ -1297,6 +1506,61 @@ async def execute_with_clients(
                 **({"error_code": existing.error_code} if existing.error_code else {}),
             }
         context = await graphql_client.get_issue_plan_context(str(arguments.get("id") or ""))
+        if lifecycle_action == "mark_acceptance":
+            if acceptance_ledger is None:
+                return {"error": "linear_policy_denied", "reason": "acceptance_ledger_unavailable"}
+            raw_evidence = arguments.get("acceptance_evidence")
+            if not isinstance(raw_evidence, list) or not raw_evidence:
+                return {"error": "linear_policy_denied", "reason": "acceptance_evidence_required"}
+            active_evidence_resolver = evidence_resolver
+            normalized_acceptance_evidence = [
+                item
+                for item in (
+                    authenticate_evidence_envelope(
+                        value,
+                        issue_id=str(context.get("id") or arguments.get("id") or ""),
+                        delegate_id=graph_actor,
+                        resolver=active_evidence_resolver,
+                        expected_agent_session_id=expected_agent_session_id,
+                        expected_hermes_turn_id=expected_hermes_turn_id,
+                    )
+                    for value in raw_evidence
+                )
+                if item is not None
+            ]
+            source_by_hash = {
+                item.criterion_hash: item
+                for item in acceptance_criteria(str(context.get("description") or ""))
+            }
+            target_criteria = acceptance_criteria(str(arguments.get("description") or ""))
+            changed_hashes = {
+                item.criterion_hash
+                for item in target_criteria
+                if item.checked
+                and item.criterion_hash in source_by_hash
+                and not source_by_hash[item.criterion_hash].checked
+            }
+            evidence_hashes = {item["criterion_hash"] for item in normalized_acceptance_evidence}
+            checked_source_hashes = {
+                item.criterion_hash for item in source_by_hash.values() if item.checked
+            }
+            evidence_matches_transition = evidence_hashes == changed_hashes
+            evidence_backfills_checked = (
+                not changed_hashes
+                and bool(evidence_hashes)
+                and evidence_hashes.issubset(checked_source_hashes)
+            )
+            if (
+                len(normalized_acceptance_evidence) != len(raw_evidence)
+                or len(evidence_hashes) != len(normalized_acceptance_evidence)
+                or not (evidence_matches_transition or evidence_backfills_checked)
+                or any(
+                    item["observed_revision"]
+                    != str(arguments.get("expected_updated_at") or "")
+                    for item in normalized_acceptance_evidence
+                )
+            ):
+                return {"error": "linear_policy_denied", "reason": "acceptance_evidence_invalid"}
         description_evaluator = (
             _evaluate_plan_context
             if lifecycle_action == "enrich_plan"
@@ -1339,6 +1603,8 @@ async def execute_with_clients(
             ledger_payload["expected_updated_at"] = str(
                 arguments.get("expected_updated_at") or ""
             )
+        if lifecycle_action == "mark_acceptance":
+            ledger_payload["acceptance_evidence"] = arguments.get("acceptance_evidence")
     if not mutation:
         return await mcp_client.call_tool(vendor_tool, forwarded)
     if ledger is None:
@@ -1477,6 +1743,28 @@ async def execute_with_clients(
     if lifecycle_noop_result is not None:
         noop_status = str(lifecycle_noop_result.get("status") or "")
         noop_result_id = str(lifecycle_noop_result.get("result_id") or "")
+        if lifecycle_action == "mark_acceptance" and normalized_acceptance_evidence:
+            assert acceptance_ledger is not None
+            current_revision = str(arguments.get("expected_updated_at") or "")
+            try:
+                await asyncio.to_thread(
+                    acceptance_ledger.persist_acceptance_batch,
+                    str(context.get("id") or arguments.get("id") or ""),
+                    graph_actor,
+                    from_revision=current_revision,
+                    accepted_revision=current_revision,
+                    evidence=normalized_acceptance_evidence,
+                )
+            except Exception:
+                await asyncio.to_thread(
+                    ledger.mark_unknown,
+                    operation_key,
+                    error_code="acceptance_evidence_persist_failed",
+                )
+                return {
+                    "error": "linear_mutation_outcome_unknown",
+                    "reason": "acceptance_evidence_persist_failed",
+                }
         await asyncio.to_thread(
             ledger.mark_success,
             operation_key,
@@ -1506,6 +1794,8 @@ async def execute_with_clients(
                     actor_id=graph_actor,
                     manager_completion_allowed=profile_id == "general",
                     graphql_client=graphql_client,
+                    acceptance_ledger=acceptance_ledger,
+                    delegate_acceptance_reader=delegate_acceptance_reader,
                 )
             confirmation_matches = confirmation_result is None and confirmed == lifecycle_transition
         except Exception:
@@ -1661,6 +1951,9 @@ async def execute_with_clients(
                     and str(read_back_state.get("type") or "").casefold() == "started"
                 )
             else:
+                terminal_read_back = await graphql_client.get_issue_child_terminal_context(
+                    str(arguments.get("id") or "")
+                )
                 _unused, terminal_result = await _resolve_child_terminal_transition(
                     str(arguments.get("id") or ""),
                     action=lifecycle_action,
@@ -1668,6 +1961,9 @@ async def execute_with_clients(
                     actor_id=graph_actor,
                     manager_completion_allowed=profile_id == "general",
                     graphql_client=graphql_client,
+                    acceptance_ledger=acceptance_ledger,
+                    delegate_acceptance_reader=delegate_acceptance_reader,
+                    context=terminal_read_back,
                 )
                 expected_status = (
                     "already_completed"
@@ -1680,6 +1976,11 @@ async def execute_with_clients(
                     and terminal_result.get("result_id")
                     == lifecycle_transition["target_state_id"]
                 )
+                if accepted and lifecycle_action == "complete_child":
+                    accepted = _revision_is_strict_successor(
+                        lifecycle_transition.get("source_updated_at", ""),
+                        str(terminal_read_back.get("updatedAt") or ""),
+                    )
         except Exception:
             accepted = False
         if not accepted:
@@ -1694,10 +1995,11 @@ async def execute_with_clients(
             }
     elif plan_snapshot is not None:
         try:
+            acceptance_read_back = await graphql_client.get_issue_plan_context(
+                str(arguments.get("id") or "")
+            )
             accepted = _plan_readback_matches(
-                await graphql_client.get_issue_plan_context(
-                    str(arguments.get("id") or "")
-                ),
+                acceptance_read_back,
                 snapshot=plan_snapshot,
                 expected_updated_at=str(arguments.get("expected_updated_at") or ""),
                 description=str(arguments.get("description") or ""),
@@ -1714,6 +2016,30 @@ async def execute_with_clients(
                 "error": "linear_mutation_outcome_unknown",
                 "reason": "lifecycle_readback_mismatch",
             }
+
+        if lifecycle_action == "mark_acceptance":
+            assert acceptance_ledger is not None
+            assert plan_snapshot is not None
+            assert acceptance_read_back is not None
+            try:
+                await asyncio.to_thread(
+                    acceptance_ledger.persist_acceptance_batch,
+                    plan_snapshot["issue_id"],
+                    graph_actor,
+                    from_revision=plan_snapshot["updated_at"],
+                    accepted_revision=str(acceptance_read_back.get("updatedAt") or ""),
+                    evidence=normalized_acceptance_evidence,
+                )
+            except Exception:
+                await asyncio.to_thread(
+                    ledger.mark_unknown,
+                    operation_key,
+                    error_code="acceptance_evidence_persist_failed",
+                )
+                return {
+                    "error": "linear_mutation_outcome_unknown",
+                    "reason": "acceptance_evidence_persist_failed",
+                }
 
     parsed = _extract_first_json(result)
     result_id = str(parsed.get("id") or parsed.get("identifier") or "") or None
@@ -1806,6 +2132,31 @@ def _direct_instruction_context(
     return values
 
 
+def _acceptance_invocation_context(
+    profile_id: str, handler_kwargs: dict[str, Any]
+) -> tuple[str, str] | None:
+    """Bind registry-owned invocation IDs to task-local Linear gateway context."""
+    try:
+        from gateway.session_context import get_session_env  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    session_id = handler_kwargs.get("session_id")
+    turn_id = handler_kwargs.get("turn_id")
+    if not (isinstance(session_id, str) and session_id and isinstance(turn_id, str) and turn_id):
+        return None
+    chat_id = str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")
+    bound_session_id = str(get_session_env("HERMES_SESSION_ID", "") or "")
+    if not (
+        get_session_env("HERMES_SESSION_PLATFORM", "") == "linear"
+        and get_session_env("HERMES_SESSION_PROFILE", "") == profile_id
+        and chat_id
+        and bound_session_id
+        and hmac.compare_digest(bound_session_id, session_id)
+    ):
+        return None
+    return chat_id, turn_id
+
+
 def _policy_from_outbound(outbound: dict[str, Any]) -> OutboundPolicy:
     return OutboundPolicy(
         expected_actor_id=str(outbound.get("expected_actor_id") or ""),
@@ -1863,6 +2214,59 @@ def _outbound_ledger_runtime_path_safe(database_path: str) -> bool:
         return False
 
 
+def _delegate_acceptance_reader_from_outbound(
+    outbound: dict[str, Any],
+    *,
+    profile_id: str,
+) -> Callable[[str, str, str], set[str]] | None:
+    """Build the general-only reader for exact specialist evidence ledgers."""
+    raw_mapping = outbound.get("delegate_acceptance_ledgers")
+    if profile_id != "general" or not isinstance(raw_mapping, dict) or not raw_mapping:
+        return None
+    mapping: dict[str, str] = {}
+    for delegate_id, raw_path in raw_mapping.items():
+        if not isinstance(delegate_id, str) or not delegate_id or not isinstance(raw_path, str):
+            return None
+        path = Path(raw_path)
+        if not path.is_absolute():
+            return None
+        try:
+            parent_stat = path.parent.resolve(strict=True).stat()
+            entry = path.lstat()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if (
+            not stat.S_ISDIR(parent_stat.st_mode)
+            or parent_stat.st_uid != os.getuid()
+            or stat.S_IMODE(parent_stat.st_mode) != 0o700
+            or not stat.S_ISREG(entry.st_mode)
+            or stat.S_ISLNK(entry.st_mode)
+            or entry.st_uid != os.getuid()
+            or stat.S_IMODE(entry.st_mode) != 0o600
+            or entry.st_size == 0
+        ):
+            return None
+        mapping[delegate_id] = str(path.resolve(strict=True))
+
+    def read(issue_id: str, delegate_id: str, accepted_revision: str) -> set[str]:
+        database_path = mapping.get(delegate_id)
+        if not database_path or not issue_id or not accepted_revision:
+            return set()
+        if not _outbound_ledger_runtime_path_safe(database_path):
+            return set()
+        ledger = DeliveryLedger(database_path, startup_recovery=False)
+        try:
+            return ledger.acceptance_evidence_hashes(
+                issue_id,
+                delegate_id,
+                accepted_revision=accepted_revision,
+            )
+        finally:
+            ledger.close()
+
+    return read
+
+
 def register_outbound_tools(
     ctx,
     *,
@@ -1887,6 +2291,21 @@ def register_outbound_tools(
     inbound_database_path = str(extra.get("database_path") or "")
     outbound_ledger_path = str(outbound.get("ledger_path") or "")
     quota_admission_lock_path = str(outbound.get("quota_admission_lock_path") or "")
+    delegate_acceptance_reader = _delegate_acceptance_reader_from_outbound(
+        outbound,
+        profile_id=profile_id,
+    )
+    issued: dict[str, dict[str, str]] = {}
+    issued_lock = threading.Lock()
+
+    def resolve_ops200_soul(pointer: str) -> dict[str, str] | None:
+        with issued_lock:
+            metadata = issued.pop(pointer, None)  # single-use even on failed read-back
+        if metadata is None or metadata.pop("home", None) != os.environ.get("HERMES_HOME"):
+            return None
+        return metadata if _ops200_soul_readback() == metadata["evidence_digest"] else None
+
+    evidence_resolver: EvidenceResolver | None = resolve_ops200_soul if profile_id == "general" else None
     raw_quota_team_ids = outbound.get("quota_team_ids")
     quota_team_ids = (
         frozenset(raw_quota_team_ids)
@@ -1940,16 +2359,28 @@ def register_outbound_tools(
                         "error": "linear_policy_denied",
                         "reason": preflight.reason,
                     }
+            is_acceptance = vendor_tool == "save_issue" and safe_args.get("lifecycle_action") == "mark_acceptance"
+            invocation = _acceptance_invocation_context(profile_id, handler_kwargs) if is_acceptance else None
+            if is_acceptance and invocation is None:
+                return {"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"}
+            chat_id, turn_id = invocation if invocation is not None else ("", "")
             store = LinearOAuthStore(oauth_file)
             graphql = LinearClient(oauth_store=store)
             mcp = LinearMCPClient(store, endpoint=endpoint)
             ledger: OutboundLedger | None = None
             direct_ledger: DeliveryLedger | None = None
+            acceptance_ledger: DeliveryLedger | None = None
             quota_admission_lock: FleetGlobalLock | None = None
             diagnostic_stage = "execution"
             try:
                 if mutation:
                     ledger = await asyncio.to_thread(OutboundLedger, outbound_ledger_path)
+                if safe_args.get("lifecycle_action") in {"mark_acceptance", "complete_child"}:
+                    acceptance_ledger = await asyncio.to_thread(
+                        DeliveryLedger,
+                        inbound_database_path,
+                        startup_recovery=False,
+                    )
                 if vendor_tool == "save_issue" and not safe_args.get("id"):
                     try:
                         quota_admission_lock = FleetGlobalLock(quota_admission_lock_path)
@@ -1957,6 +2388,22 @@ def register_outbound_tools(
                         quota_admission_lock = None
                 diagnostic_stage = "graphql_connect"
                 await graphql.connect()
+                if is_acceptance:
+                    try:
+                        agent_context = await graphql.get_agent_turn_context(chat_id)
+                    except Exception:
+                        return {"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"}
+                    issue = agent_context.get("issue") if isinstance(agent_context, dict) else None
+                    if not (
+                        isinstance(issue, dict)
+                        and agent_context.get("id") == chat_id
+                        and agent_context.get("status") == "active"
+                        and agent_context.get("app_user_id") == graphql.actor_id
+                        and issue.get("id") == safe_args.get("id")
+                        and isinstance(issue.get("delegate"), dict)
+                        and issue["delegate"].get("id") == graphql.actor_id
+                    ):
+                        return {"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"}
                 diagnostic_stage = "connect"
                 await mcp.connect()
                 diagnostic_stage = "execution"
@@ -2003,6 +2450,11 @@ def register_outbound_tools(
                     mutation=mutation,
                     policy=policy,
                     ledger=ledger,
+                    acceptance_ledger=acceptance_ledger,
+                    delegate_acceptance_reader=delegate_acceptance_reader,
+                    evidence_resolver=evidence_resolver,
+                    expected_agent_session_id=chat_id or None,
+                    expected_hermes_turn_id=turn_id or None,
                     quota_admission_lock=quota_admission_lock,
                     quota_team_ids=quota_team_ids,
                     retention_dry_run=retention_runner,
@@ -2074,6 +2526,8 @@ def register_outbound_tools(
                     await asyncio.to_thread(ledger.close)
                 if direct_ledger is not None:
                     await asyncio.to_thread(direct_ledger.close)
+                if acceptance_ledger is not None:
+                    await asyncio.to_thread(acceptance_ledger.close)
 
         async def registry_handler(args: dict[str, Any], **kwargs) -> str:
             result = await handler(args, **kwargs)
@@ -2102,9 +2556,12 @@ def register_outbound_tools(
     names = ["linear_get_issue", "linear_list_issues"]
     if mutations_enabled:
         names.extend(allowed_mutation_tools)
+    verifier_enabled = profile_id == "general" and mutations_enabled and "linear_save_issue" in allowed_mutation_tools
+    if verifier_enabled:
+        names.append("linear_verify_ops200_soul")
     if not _tool_names_available(names):
         return
-    for name in names:
+    for name in names[: -1 if verifier_enabled else None]:
         vendor_tool, mutation = TOOL_MAP[name]
         ctx.register_tool(
             name=name,
@@ -2115,4 +2572,66 @@ def register_outbound_tools(
             is_async=True,
             description=SCHEMAS[name]["description"],
             emoji="◩",
+        )
+    if verifier_enabled:
+        async def verify_ops200_soul(args: dict[str, Any], **kwargs) -> str:
+            denied = {"error": "linear_policy_denied", "reason": "ops200_soul_verification_failed"}
+            invocation = _acceptance_invocation_context(profile_id, kwargs)
+            if invocation is None or args:
+                return json.dumps({"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"})
+            chat_id, turn_id = invocation
+            graphql = LinearClient(oauth_store=LinearOAuthStore(oauth_file))
+            try:
+                await graphql.connect()
+                context = await graphql.get_agent_turn_context(chat_id)
+                issue = context.get("issue") if isinstance(context, dict) else None
+                criteria = acceptance_criteria(issue.get("description")) if isinstance(issue, dict) else ()
+                if not (
+                    isinstance(issue, dict) and context.get("id") == chat_id
+                    and context.get("status") == "active"
+                    and context.get("app_user_id") == graphql.actor_id
+                    and issue.get("delegate", {}).get("id") == graphql.actor_id
+                    and issue.get("identifier") == "OPS-200" and isinstance(issue.get("id"), str)
+                    and issue["id"] and len(criteria) >= 1
+                    and criteria[0].text == _OPS200_SOUL_TEXT and not criteria[0].checked
+                    and isinstance(issue.get("updatedAt"), str) and issue["updatedAt"]
+                ):
+                    return json.dumps(denied)
+                revision = issue["updatedAt"]
+                try:
+                    observed = datetime.fromisoformat(revision.replace("Z", "+00:00"))
+                except ValueError:
+                    return json.dumps(denied)
+                if observed.tzinfo is None:
+                    return json.dumps(denied)
+                digest = _ops200_soul_readback()
+                if digest is None:
+                    return json.dumps(denied)
+                pointer = "artifact://ops200-soul/" + secrets.token_urlsafe(32)
+                timestamp = datetime.now(timezone.utc).isoformat()
+                metadata = {
+                    "evidence_pointer": pointer, "issue_id": issue["id"],
+                    "delegate_id": graphql.actor_id, "agent_session_id": chat_id,
+                    "hermes_turn_id": turn_id, "criterion_hash": criteria[0].criterion_hash,
+                    "evidence_digest": digest, "observed_revision": revision, "timestamp": timestamp,
+                    "home": os.environ["HERMES_HOME"],
+                }
+                with issued_lock:
+                    issued[pointer] = metadata
+                    if len(issued) > 32:
+                        issued.pop(next(iter(issued)))
+                return json.dumps({key: metadata[key] for key in (
+                    "criterion_hash", "evidence_digest", "evidence_pointer", "observed_revision", "timestamp",
+                )} | {"test_class": "file", "result": "PASS"})
+            except Exception:
+                return json.dumps(denied)
+            finally:
+                await graphql.close()
+
+        ctx.register_tool(
+            name="linear_verify_ops200_soul", toolset="linear",
+            schema={"name": "linear_verify_ops200_soul", "description": "Verify the OPS-200 SOUL criterion in the current Linear Agent Session; returns one-use metadata-only file evidence.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
+            handler=verify_ops200_soul, check_fn=check_fn, is_async=True,
+            description="Verify OPS-200 SOUL in the current native session without mutating Linear.", emoji="◩",
         )
