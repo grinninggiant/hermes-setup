@@ -10,7 +10,7 @@ esac
 
 hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-d25b0bc3d9e884ddde6550c6d1fd250e98b97a09-baseline-deps/venv/bin/hermes"
 if [[ "$profile" == "general" ]]; then
-  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-fd5d65e8b272480176f66d52907135500bdb5302/venv/bin/hermes"
+  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-85529d5fd26cb0ead14e9866cf38763367a03665/venv/bin/hermes"
 fi
 
 service="com.polatcangames.hermes.op-service-account"
