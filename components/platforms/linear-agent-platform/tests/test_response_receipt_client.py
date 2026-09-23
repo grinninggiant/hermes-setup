@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from linear_client import LinearClient
+from linear_client import LinearClient, _same_response_link_serialization
 from oauth_store import LinearAPIError
 
 
@@ -40,6 +40,28 @@ class ResponseReceiptTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(LinearAPIError) as caught:
             await client.verify_response_receipt("activity", "session", "result")
         self.assertTrue(caught.exception.retryable)
+
+    def test_hidden_markdown_changes_are_not_link_serialization(self):
+        link = "[report](<https://example.com/report>)"
+        plain = "[report](https://example.com/report)"
+        unused = f'[unused]: https://other.example "{link}"'
+        reference = (
+            r"[\[r\](https://example.com/)]: https://target.example/" + "\n"
+            + r"[\[r\](<https://example.com/>)]: https://target.example/" + "\n\n"
+        )
+        cases = [
+            (f"```{plain}\nresult\n```", f"```{link}\nresult\n```"),
+            (unused.replace(link, plain) + "\n\nresult", unused + "\n\nresult"),
+            (reference + r"[shown][\[r\](https://example.com/)]",
+             reference + r"[shown][\[r\](<https://example.com/>)]"),
+            ("a\u0085b\u0085c\n\n" + unused.replace(link, plain) + "\n\n" + link,
+             "a\u0085b\u0085c\n\n" + unused + "\n\n" + link),
+            ("a\rb\rc\n\n" + link + "\n\n" + unused.replace(link, plain),
+             "a\rb\rc\n\n" + link + "\n\n" + unused),
+        ]
+        for sent, actual in cases:
+            with self.subTest(actual=actual):
+                self.assertFalse(_same_response_link_serialization(sent, actual))
 
     async def test_only_angle_wrapped_inline_link_destinations_are_equivalent(self):
         client = LinearClient(oauth_file="unused")
