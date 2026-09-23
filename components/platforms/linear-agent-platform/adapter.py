@@ -42,6 +42,15 @@ from .linear_client import LinearAPIError, LinearClient
 
 logger = logging.getLogger(__name__)
 
+
+def _ops200_profile_fix_active() -> bool:
+    import sys
+    core_file = getattr(sys.modules.get("gateway.run"), "__file__", None)
+    return bool(core_file and Path(core_file).resolve().parent.parent.name == (
+        "hermes-agent-5cc98f1f2ce11bc4c4368ae7e7fabf9c86e81abe-general"
+    ))
+
+
 _WEBHOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,200}$")
 _ALLOWED_ACTIONS = {"created", "prompted"}
 
@@ -879,7 +888,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.41",
+                "version": "0.8.42",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -4217,12 +4226,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             str(state.status) == "paused"
             and getattr(event, "_linear_verified_normal_prompt", False)
         ):
-            if self._ledger.latest_clarify_timeout(session_id) is None:
-                return await self._visible_ingress_veto(
-                    event, "native_goal_paused_without_question"
-                )
-            if not await self._resume_late_clarify_goal(event, hermes_session_id, state):
-                return await self._visible_ingress_veto(event, "late_clarify_unverified")
+            if not await self._resume_ops200_profile_pause(event, hermes_session_id, state):
+                if self._ledger.latest_clarify_timeout(session_id) is None:
+                    return await self._visible_ingress_veto(
+                        event, "native_goal_paused_without_question"
+                    )
+                if not await self._resume_late_clarify_goal(event, hermes_session_id, state):
+                    return await self._visible_ingress_veto(event, "late_clarify_unverified")
         if event.metadata.get("linear_dependency_resume") and self._dependency_resume_claim(event) is None:
             return await self._visible_ingress_veto(event, "dependency_resume_fenced")
         return False
@@ -6059,6 +6069,89 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {"clarify_timeout_goal": self._clarify_goal_token(state),
              "clarify_timeout_hermes_session": sid},
         )
+
+    async def _resume_ops200_profile_pause(self, event: MessageEvent, sid: str, state: Any) -> bool:
+        """One repaired profile-binding pause; a new human prompt is mandatory."""
+        if (
+            not _ops200_profile_fix_active() or self._ledger is None or self._linear is None
+            or event.internal or event.source is None
+            or str(event.source.chat_id) != "8f9bdbc3-ba43-4774-8030-0cfc33d0f4b7"
+            or event.metadata.get("linear_agent_session_id") != "8f9bdbc3-ba43-4774-8030-0cfc33d0f4b7"
+            or event.metadata.get("linear_issue_id") != "d29003de-4f24-43a0-8add-d42fa23fc79f"
+            or sid != "20260923_200530_e690070b"
+            or event.metadata.get("linear_action") != "prompted"
+            or not getattr(event, "_linear_verified_normal_prompt", False)
+            or state.status != "paused" or state.last_verdict != "blocked"
+            or state.created_at != 1790183130.350257
+            or state.last_turn_at != 1790183367.861218
+            or state.turns_used != 1 or state.turns_used >= state.max_turns
+            or state.paused_reason != (
+                "judged unachievable: All 16 acceptance criteria remain unchecked because the "
+                "missing trusted HERMES_SESSION_PROFILE binding causes "
+                "acceptance_provenance_unavailable and must be restored before valid same-turn "
+                "PASS evidence and acceptance mutations can proceed."
+            )
+            or self._ledger.has_session_closure(event.source.chat_id)
+            or self._ledger.get_wait(event.source.chat_id) is not None
+            or self._ledger.latest_clarify_timeout(event.source.chat_id) is not None
+        ):
+            return False
+        from tools import approval, clarify_gateway
+        key = str(event.metadata.get("gateway_session_key") or "")
+        if (not key or approval.get_pending_gateway_approval(key) is not None
+            or clarify_gateway.get_pending_for_session(key, include_choice_prompts=True) is not None):
+            return False
+        activity = (event.raw_message or {}).get("agentActivity") if isinstance(event.raw_message, dict) else None
+        if not isinstance(activity, dict) or activity.get("signal") or event.metadata.get("linear_signal"):
+            return False
+        content = activity.get("content")
+        user = activity.get("user")
+        author = activity.get("userId")
+        activity_id = activity.get("id")
+        if (not isinstance(content, dict) or content.get("type") != "prompt"
+            or not isinstance(user, dict) or not isinstance(author, str) or not author
+            or user.get("id") != author or not isinstance(activity_id, str) or not activity_id
+            or activity.get("agentSessionId") != event.source.chat_id
+            or not isinstance(content.get("body"), str) or not content["body"].strip()
+            or content["body"].lstrip().startswith("/")):
+            return False
+        token = self._clarify_goal_token(state)
+        rows = await self._linear._agent_activity_evidence(event.source.chat_id)
+        if not rows or activity_id not in rows:
+            return False
+        stamp, row = rows[activity_id]
+        if not isinstance(row, dict):
+            return False
+        vendor_content, vendor_user = row.get("content"), row.get("user")
+        if (stamp.timestamp() <= state.last_turn_at
+            or row.get("signal") or not isinstance(vendor_content, dict)
+            or not isinstance(vendor_user, dict)
+            or vendor_content.get("__typename") != "AgentActivityPromptContent"
+            or vendor_content.get("body") != content["body"]
+            or vendor_user.get("id") != author
+            or vendor_user.get("app") is not False
+            or any(other_id != activity_id and at >= stamp and (
+                other.get("signal") or other.get("content", {}).get("__typename") != "AgentActivityThoughtContent"
+            ) for other_id, (at, other) in rows.items())):
+            return False
+        context = await self._linear.get_agent_turn_context(event.source.chat_id)
+        owner = (context.get("issue") or {}).get("assignee") or {}
+        probe = {"completed": False, "failed": False, "interrupted": False,
+                 "turn_exit_reason": "max_iterations_reached(ops200_recovery)", "session_id": sid}
+        if (self._classify_turn_outcome(event, probe, context) != "continue"
+            or owner.get("id") != author or owner.get("app") is not False
+            or author == self._linear.actor_id):
+            return False
+        fresh = await self._goal_state_for_source(event.source, sid)
+        if (fresh is None or self._clarify_goal_token(fresh) != token
+            or self._ledger.has_session_closure(event.source.chat_id)
+            or not _ops200_profile_fix_active()):
+            return False
+        resumed, _ = await self._resume_goal_for_source(event.source, sid, reset_budget=False)
+        if resumed is None or resumed.status != "active" or resumed.turns_used != state.turns_used:
+            return False
+        logger.info("[linear] OPS-200 repaired profile pause resumed on verified human prompt")
+        return True
 
     async def _resume_late_clarify_goal(self, event: MessageEvent, sid: str, state: Any) -> bool:
         """Approved normal late-answer gate; never resume an arbitrary paused goal."""

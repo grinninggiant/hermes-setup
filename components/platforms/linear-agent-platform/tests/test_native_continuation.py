@@ -598,6 +598,70 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["payload"]["activity_type"], "error")
         self.assertIn("turn_failed", item["payload"]["body"])
 
+    async def test_ops200_repaired_profile_pause_needs_exact_human_vendor_prompt(self):
+        from datetime import datetime, timezone
+        session_id = "8f9bdbc3-ba43-4774-8030-0cfc33d0f4b7"
+        issue_id = "d29003de-4f24-43a0-8add-d42fa23fc79f"
+        hermes_id = "20260923_200530_e690070b"
+        reason = (
+            "judged unachievable: All 16 acceptance criteria remain unchecked because the "
+            "missing trusted HERMES_SESSION_PROFILE binding causes "
+            "acceptance_provenance_unavailable and must be restored before valid same-turn "
+            "PASS evidence and acceptance mutations can proceed."
+        )
+        self.adapter._ledger.bind_issue_session(issue_id, session_id)
+        store = FakeSessionStore(hermes_id)
+        store.entry.session_key = f"agent:main:webhook:dm:{session_id}"
+        self.adapter.gateway_runner.async_session_store = store
+        event = turn_event()
+        event.source = source(session_id)
+        event.metadata.update(linear_agent_session_id=session_id, linear_issue_id=issue_id,
+                              linear_action="prompted")
+        event.message_id = "signed-webhook-prompt"
+        event._linear_verified_normal_prompt = True
+        event.raw_message = {"agentActivity": {
+            "id": "human-prompt", "agentSessionId": session_id, "userId": "human-1",
+            "user": {"id": "human-1"},
+            "content": {"type": "prompt", "body": "Devam"},
+        }}
+        state = SimpleNamespace(status="paused", created_at=1790183130.350257,
+                                last_turn_at=1790183367.861218, turns_used=1,
+                                max_turns=20, last_verdict="blocked", paused_reason=reason)
+        self.adapter.gateway_runner.goal_state_for_source = mock.AsyncMock(return_value=state)
+        async def resume(*args, reset_budget, **kwargs):
+            self.assertFalse(reset_budget)
+            state.status, state.paused_reason = "active", None
+            return SimpleNamespace(state=state, continuation_prompt="continue")
+        self.adapter.gateway_runner.resume_goal_for_source = mock.AsyncMock(side_effect=resume)
+        original = self.adapter._linear.get_agent_turn_context
+        async def context(sid):
+            result = await original(sid)
+            result["id"] = session_id
+            result["issue"]["id"] = issue_id
+            result["issue"]["identifier"] = "OPS-200"
+            result["issue"]["assignee"] = {"id": "human-1", "app": False}
+            return result
+        self.adapter._linear.get_agent_turn_context = context
+        row = {"id": "human-prompt", "signal": None,
+               "user": {"id": "human-1", "app": False},
+               "content": {"__typename": "AgentActivityPromptContent", "body": "Devam"}}
+        evidence = {"human-prompt": (datetime.now(timezone.utc), row)}
+        self.adapter._linear._agent_activity_evidence = mock.AsyncMock(return_value=evidence)
+        with mock.patch.object(adapter_mod, "_ops200_profile_fix_active", return_value=True):
+            for at in (state.last_turn_at - 1, state.last_turn_at):
+                evidence["human-prompt"] = (datetime.fromtimestamp(at, timezone.utc), row)
+                self.assertTrue(await self.adapter._prepare_bound_linear_ingress(event))
+                self.assertEqual(state.status, "paused")
+                self.adapter.gateway_runner.resume_goal_for_source.assert_not_awaited()
+            evidence["human-prompt"] = (datetime.now(timezone.utc), row)
+            state.turns_used = 2
+            self.assertTrue(await self.adapter._prepare_bound_linear_ingress(event))
+            self.adapter.gateway_runner.resume_goal_for_source.assert_not_awaited()
+            state.turns_used = 1
+            self.assertFalse(await self.adapter._prepare_bound_linear_ingress(event))
+            self.assertEqual(state.status, "active")
+            self.adapter.gateway_runner.resume_goal_for_source.assert_awaited_once()
+
     async def test_stopped_or_paused_ingress_without_decision_stays_silent(self):
         for reason in ("stopped", "native_goal_paused", "native_goal_not_rejudged"):
             with self.subTest(reason=reason):
