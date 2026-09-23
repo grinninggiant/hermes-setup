@@ -1813,6 +1813,7 @@ def _policy_from_outbound(outbound: dict[str, Any]) -> OutboundPolicy:
         allowed_team_ids=outbound.get("allowed_team_ids") or [],
         sensitive_mode=str(outbound.get("sensitive_mode") or "standard"),
         metadata_templates=outbound.get("metadata_templates") or [],
+        metadata_acceptance_descriptions=outbound.get("metadata_acceptance_descriptions") or [],
     )
 
 

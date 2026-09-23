@@ -103,12 +103,17 @@ class OutboundPolicy:
         allowed_team_ids: Iterable[str],
         sensitive_mode: str = "standard",
         metadata_templates: Iterable[str] = (),
+        metadata_acceptance_descriptions: Iterable[str] = (),
     ) -> None:
         self.expected_actor_id = str(expected_actor_id or "")
         self.expected_organization_id = str(expected_organization_id or "")
         self.allowed_team_ids = frozenset(str(value) for value in allowed_team_ids if value)
         self.sensitive_mode = str(sensitive_mode or "standard")
         self.metadata_templates = frozenset(str(value) for value in metadata_templates)
+        self.metadata_acceptance_descriptions = frozenset(metadata_acceptance_descriptions) if (
+            isinstance(metadata_acceptance_descriptions, (list, tuple, set))
+            and all(isinstance(value, str) for value in metadata_acceptance_descriptions)
+        ) else frozenset()
 
     def is_configured(self) -> bool:
         return bool(
@@ -262,7 +267,12 @@ class OutboundPolicy:
                 if field not in arguments:
                     continue
                 value = str(arguments.get(field) or "")
-                if value not in self.metadata_templates:
+                if value not in self.metadata_templates and not (
+                    tool_name == "save_issue"
+                    and field == "description"
+                    and arguments.get("lifecycle_action") == "mark_acceptance"
+                    and value in self.metadata_acceptance_descriptions
+                ):
                     return PolicyDecision("deny", "sensitive_content")
             for field in METADATA_UUID_ONLY_FIELDS:
                 raw_value = arguments.get(field)

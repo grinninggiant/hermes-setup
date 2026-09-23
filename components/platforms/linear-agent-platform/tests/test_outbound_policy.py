@@ -403,6 +403,37 @@ class OutboundPolicyTests(unittest.TestCase):
         )
         self.assertEqual((decision.action, decision.reason), ("deny", "sensitive_content"))
 
+    def test_metadata_acceptance_template_is_description_and_action_only(self):
+        description = "## Kabul kriterleri\n- [x] Metadata-only canary passed."
+        policy = OutboundPolicy(
+            expected_actor_id="actor-1",
+            expected_organization_id="org-1",
+            allowed_team_ids={"ops-1"},
+            sensitive_mode="metadata_only",
+            metadata_templates={"Existing notice"},
+            metadata_acceptance_descriptions=[description],
+        )
+        base = {"target_team_id": "ops-1", "id": "OPS-1",
+                "expected_updated_at": "2026-09-23T00:00:00Z", "description": description}
+        def decide(tool, arguments):
+            return policy.evaluate(tool, arguments, live_actor_id="actor-1",
+                                   live_organization_id="org-1").action
+        self.assertEqual(decide("save_issue", {**base, "lifecycle_action": "mark_acceptance"}), "allow")
+        self.assertEqual(decide("save_issue", {**base, "lifecycle_action": "enrich_plan"}), "deny")
+        self.assertEqual(decide("save_issue", {"target_team_id": "ops-1", "team": "ops-1",
+                                                 "title": description}), "deny")
+        self.assertEqual(decide("save_comment", {"target_team_id": "ops-1", "issueId": "OPS-1",
+                                                   "body": description}), "deny")
+        self.assertEqual(decide("save_issue", {**base, "lifecycle_action": "mark_acceptance",
+                                               "description": description + " extra"}), "deny")
+        self.assertEqual(decide("save_comment", {"target_team_id": "ops-1", "issueId": "OPS-1",
+                                                   "body": "Existing notice"}), "allow")
+        default = OutboundPolicy(expected_actor_id="actor-1", expected_organization_id="org-1",
+                                 allowed_team_ids={"ops-1"}, sensitive_mode="metadata_only")
+        self.assertEqual(default.evaluate("save_issue", {**base, "lifecycle_action": "mark_acceptance"},
+                                          live_actor_id="actor-1", live_organization_id="org-1").action,
+                         "deny")
+
     def test_metadata_only_accepts_exact_template(self):
         policy = OutboundPolicy(
             expected_actor_id="actor-1",
