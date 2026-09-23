@@ -29,7 +29,7 @@ MAX_CHILD_RELATION_PAGES = 100
 MAX_BLOCKER_RELATION_PAGES = 100
 MAX_ISSUE_QUOTA_PAGES = 100
 
-_ANGLE_LINK = re.compile(r"(?<!!)\[([^\]\n]+)\]\(<(https?://[^\s<>()\[\]]+)>\)")
+_ANGLE_LINK = re.compile(r"(?<!!)\[([^\[\]\\\n]+)\]\(<(https?://[^\s<>()\[\]]+)>\)")
 
 
 def _same_response_link_serialization(expected: str, actual: str) -> bool:
