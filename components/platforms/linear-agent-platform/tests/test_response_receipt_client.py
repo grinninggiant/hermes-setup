@@ -50,6 +50,7 @@ class ResponseReceiptTests(unittest.IsolatedAsyncioTestCase):
             + r"[\[r\](<https://example.com/>)]: https://target.example/" + "\n\n"
         )
         cases = [
+            ("> " * 20 + f"`{plain}`", "> " * 20 + f"`{link}`"),
             (f"```{plain}\nresult\n```", f"```{link}\nresult\n```"),
             (unused.replace(link, plain) + "\n\nresult", unused + "\n\nresult"),
             (reference + r"[shown][\[r\](https://example.com/)]",

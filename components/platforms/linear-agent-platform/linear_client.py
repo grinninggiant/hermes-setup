@@ -42,13 +42,17 @@ def _same_response_link_serialization(expected: str, actual: str) -> bool:
 
     # Raw matching alone could change a literal link in code, HTML, or an image.
     def tokens(source: str) -> tuple:
+        parser = MarkdownIt("commonmark")
         def shape(token):
+            # ponytail: reject depth near parser truncation; source mapping if deep receipts matter.
+            if token.level >= parser.options["maxNesting"] - 1:
+                raise ValueError("Markdown nesting requires an exact receipt")
             return (token.type, token.tag, token.nesting, token.attrs, token.info,
                     None if token.type == "inline" else token.content,
                     tuple(shape(child) for child in token.children or ()))
 
         env: dict = {}
-        parsed = MarkdownIt("commonmark").parse(source, env)
+        parsed = parser.parse(source, env)
         if env.get("references"):
             raise ValueError("reference definitions require an exact receipt")
         return tuple(shape(token) for token in parsed)
