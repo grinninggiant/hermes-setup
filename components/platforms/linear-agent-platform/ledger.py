@@ -3067,7 +3067,7 @@ class DeliveryLedger:
         accepted_revision: str,
         evidence: list[dict[str, str]],
     ) -> None:
-        """Atomically carry old evidence and insert a newly verified PASS batch."""
+        """Atomically replace stale proof with a newly verified PASS batch."""
         if not evidence:
             raise ValueError("Acceptance evidence batch is empty")
         values = (issue_id, actor_id, from_revision, accepted_revision)
@@ -3095,8 +3095,17 @@ class DeliveryLedger:
                         (issue_id, actor_id),
                     ).fetchall()
                 }
-                if existing_revisions and existing_revisions != {from_revision}:
+                if any(
+                    revision != from_revision
+                    and datetime.fromisoformat(revision.replace("Z", "+00:00")) >= source_timestamp
+                    for revision in existing_revisions
+                ):
                     raise ValueError("Acceptance evidence base revision changed")
+                self._db.execute(
+                    "DELETE FROM acceptance_evidence WHERE issue_id=? AND actor_id=? "
+                    "AND result='PASS' AND accepted_revision!=?",
+                    (issue_id, actor_id, from_revision),
+                )
                 if not same_revision:
                     self._db.execute(
                         "UPDATE acceptance_evidence SET accepted_revision=? "
@@ -3104,6 +3113,8 @@ class DeliveryLedger:
                         (accepted_revision, issue_id, actor_id, from_revision),
                     )
                 for item in evidence:
+                    if item["observed_revision"] != from_revision:
+                        raise ValueError("Acceptance evidence source revision changed")
                     self.record_acceptance_evidence(
                         issue_id=issue_id,
                         criterion_hash=item["criterion_hash"],

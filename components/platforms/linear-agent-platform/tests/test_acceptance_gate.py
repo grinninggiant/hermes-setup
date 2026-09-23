@@ -299,6 +299,172 @@ Prose example: - [ ] Not a task item
 
 
 class AcceptanceEvidenceLedgerTests(unittest.TestCase):
+    def test_newly_verified_current_source_replaces_old_revision_but_carries_current_proof(self):
+        old_revision = "2026-08-30T20:00:02.000Z"
+        source_revision = "2026-08-30T20:00:04.000Z"  # Intervening issue edit.
+        updated_at = "2026-08-30T20:00:05.000Z"  # Issue readback after marking.
+        old_hash, new_hash = "a" * 64, "b" * 64
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            root.chmod(0o700)
+            ledger = DeliveryLedger(str(root / "ledger.sqlite3"), startup_recovery=False)
+            try:
+                for issue_id, actor_id in (
+                    ("issue-1", "delegate-1"),
+                    ("issue-1", "other-delegate"),
+                    ("other-issue", "delegate-1"),
+                ):
+                    ledger.record_acceptance_evidence(
+                        issue_id=issue_id, actor_id=actor_id,
+                        criterion_hash=old_hash, test_class="integration",
+                        evidence_digest="a" * 64,
+                        evidence_pointer="linear://activity/old",
+                        observed_revision="2026-08-30T20:00:00.000Z",
+                        accepted_revision=old_revision, result="PASS",
+                        timestamp="2026-08-30T20:00:01.000Z",
+                    )
+                ledger.record_acceptance_evidence(
+                    issue_id="issue-1", actor_id="delegate-1",
+                    criterion_hash="c" * 64, test_class="runtime",
+                    evidence_digest="c" * 64,
+                    evidence_pointer="artifact://native/source-proof",
+                    observed_revision=source_revision,
+                    accepted_revision=source_revision, result="PASS",
+                    timestamp=source_revision,
+                )
+                with self.assertRaisesRegex(ValueError, "source revision changed"):
+                    ledger.persist_acceptance_batch(
+                        "issue-1", "delegate-1", from_revision=source_revision,
+                        accepted_revision=updated_at,
+                        evidence=[{
+                            "criterion_hash": new_hash, "test_class": "runtime",
+                            "evidence_digest": "b" * 64,
+                            "evidence_pointer": "artifact://native/stale-test",
+                            "observed_revision": old_revision, "result": "PASS",
+                            "timestamp": source_revision,
+                        }],
+                    )
+                self.assertEqual(
+                    ledger.acceptance_evidence_hashes("issue-1", "delegate-1"),
+                    {old_hash, "c" * 64},
+                )
+                ledger.persist_acceptance_batch(
+                    "issue-1", "delegate-1", from_revision=source_revision,
+                    accepted_revision=updated_at,
+                    evidence=[{
+                        "criterion_hash": new_hash, "test_class": "runtime",
+                        "evidence_digest": "b" * 64,
+                        "evidence_pointer": "artifact://native/current-test",
+                        "observed_revision": source_revision, "result": "PASS",
+                        "timestamp": "2026-08-30T20:00:04.500Z",
+                    }],
+                )
+                self.assertEqual(
+                    ledger.acceptance_evidence_hashes(
+                        "issue-1", "delegate-1", accepted_revision=updated_at,
+                    ), {new_hash, "c" * 64},
+                )
+                self.assertEqual(
+                    ledger.acceptance_evidence_hashes("issue-1", "delegate-1"),
+                    {new_hash, "c" * 64},
+                )
+                self.assertEqual(
+                    ledger.acceptance_evidence_hashes(
+                        "issue-1", "delegate-1", accepted_revision=old_revision,
+                    ), set(),
+                )
+                self.assertEqual(
+                    ledger.acceptance_evidence_hashes(
+                        "issue-1", "delegate-1", accepted_revision=source_revision,
+                    ), set(),
+                )
+                for issue_id, actor_id in (
+                    ("issue-1", "other-delegate"),
+                    ("other-issue", "delegate-1"),
+                ):
+                    self.assertEqual(
+                        ledger.acceptance_evidence_hashes(
+                            issue_id, actor_id, accepted_revision=old_revision,
+                        ), {old_hash},
+                    )
+            finally:
+                ledger.close()
+
+    def test_two_sequential_checkbox_passes_retain_current_proof(self):
+        revisions = (
+            "2026-08-30T20:00:00.000Z",
+            "2026-08-30T20:00:01.000Z",
+            "2026-08-30T20:00:02.000Z",
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            root.chmod(0o700)
+            ledger = DeliveryLedger(str(root / "ledger.sqlite3"), startup_recovery=False)
+            try:
+                for index, criterion_hash in enumerate(("a" * 64, "b" * 64)):
+                    source, updated = revisions[index:index + 2]
+                    ledger.persist_acceptance_batch(
+                        "issue-1", "delegate-1", from_revision=source,
+                        accepted_revision=updated,
+                        evidence=[{
+                            "criterion_hash": criterion_hash, "test_class": "runtime",
+                            "evidence_digest": criterion_hash,
+                            "evidence_pointer": f"artifact://native/criterion-{index}",
+                            "observed_revision": source, "result": "PASS",
+                            "timestamp": source,
+                        }],
+                    )
+                self.assertEqual(
+                    ledger.acceptance_evidence_hashes(
+                        "issue-1", "delegate-1", accepted_revision=revisions[2],
+                    ), {"a" * 64, "b" * 64},
+                )
+                self.assertEqual(
+                    ledger.acceptance_evidence_hashes(
+                        "issue-1", "delegate-1", accepted_revision=revisions[1],
+                    ), set(),
+                )
+            finally:
+                ledger.close()
+
+    def test_preexisting_future_revision_blocks_replacement_without_deletion(self):
+        source_revision = "2026-08-30T20:00:04.000Z"
+        for stored_revision, timestamp in (
+            ("2026-08-30T20:00:06.000Z", "2026-08-30T20:00:05.000Z"),
+            ("2026-08-30T20:00:04+00:00", source_revision),
+        ):
+            with self.subTest(stored_revision=stored_revision), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                root.chmod(0o700)
+                ledger = DeliveryLedger(str(root / "ledger.sqlite3"), startup_recovery=False)
+                try:
+                    ledger.record_acceptance_evidence(
+                        issue_id="issue-1", actor_id="delegate-1",
+                        criterion_hash="a" * 64, test_class="runtime",
+                        evidence_digest="a" * 64,
+                        evidence_pointer="artifact://native/concurrent",
+                        observed_revision=source_revision, accepted_revision=stored_revision,
+                        result="PASS", timestamp=timestamp,
+                    )
+                    with self.assertRaisesRegex(ValueError, "base revision changed"):
+                        ledger.persist_acceptance_batch(
+                            "issue-1", "delegate-1", from_revision=source_revision,
+                            accepted_revision="2026-08-30T20:00:07.000Z",
+                            evidence=[{
+                                "criterion_hash": "b" * 64, "test_class": "runtime",
+                                "evidence_digest": "b" * 64,
+                                "evidence_pointer": "artifact://native/current",
+                                "observed_revision": source_revision, "result": "PASS",
+                                "timestamp": "2026-08-30T20:00:04.500Z",
+                            }],
+                        )
+                    self.assertEqual(
+                        ledger.acceptance_evidence_hashes("issue-1", "delegate-1"),
+                        {"a" * 64},
+                    )
+                finally:
+                    ledger.close()
+
     def test_pass_evidence_is_durable_metadata_only_and_delegate_scoped(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

@@ -3489,8 +3489,53 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         live_context = await self._validate_activity_target(
                             item.payload["agent_session_id"]
                         )
-                        if item.id.startswith("activity:final:"):
-                            self._validate_final_acceptance_snapshot(item.payload, live_context)
+                        if item.payload.get("activity_type") == "response":
+                            if (
+                                "acceptance_snapshot" in item.payload
+                                or item.id.startswith("activity:final:")
+                            ):
+                                self._validate_final_acceptance_snapshot(
+                                    item.payload, live_context
+                                )
+                            elif item.id.startswith("activity:creator-owned:"):
+                                issue_id = live_context.get("issue_id")
+                                issue = (
+                                    await self._linear.get_issue_closure_context(issue_id)
+                                    if isinstance(issue_id, str) and issue_id else {}
+                                )
+                                if not (
+                                    item.operation == "activity.create"
+                                    and item.aggregate_key == item.payload.get("agent_session_id")
+                                    and item.payload.get("activity_id") == self._activity_uuid(
+                                        item.id.removeprefix("activity:")
+                                    )
+                                    and item.payload.get("body") == (
+                                        "Creator-agent manages this child through the MCP lifecycle; "
+                                        "native session closed."
+                                    )
+                                    and issue.get("id") == issue_id
+                                    and (issue.get("parent") or {}).get("id")
+                                    and self._linear.actor_id
+                                    and hmac.compare_digest(
+                                        str((issue.get("creator") or {}).get("id") or ""),
+                                        self._linear.actor_id,
+                                    )
+                                ):
+                                    raise LinearAPIError(
+                                        "Creator-owned control response is no longer authorized",
+                                        retryable=False,
+                                    )
+                            elif (
+                                not isinstance(live_context.get("description"), str)
+                                or not all(
+                                    isinstance(live_context.get(key), str) and live_context[key]
+                                    for key in ("issue_id", "updated_at", "delegate_id")
+                                )
+                                or not acceptance_gate(
+                                    live_context["description"], set()
+                                ).allowed
+                            ):
+                                raise LinearAPIError("Final acceptance snapshot is missing", retryable=False)
                     # Recheck after the final awaited target validation and
                     # immediately before vendor create: the waiter or turn
                     # may disappear while that validation is in flight.

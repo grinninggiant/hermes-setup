@@ -7552,6 +7552,206 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             set(),
         )
 
+    async def test_legacy_response_without_snapshot_cannot_bypass_acceptance(self):
+        session_id = "session-legacy-response"
+        item_id = f"activity:response:{session_id}:pre-upgrade"
+        self.adapter._linear.delivery_contexts[session_id] = {
+            "id": session_id,
+            "app_user_id": "agent-derya",
+            "issue_id": "issue-legacy-response",
+            "delegate_id": "agent-derya",
+            "description": "## Acceptance criteria\n- [ ] Live canary passes",
+            "updated_at": "2026-08-30T20:01:00.000Z",
+        }
+        self.adapter._ledger.enqueue_outbox(
+            item_id, session_id, "activity.create",
+            {
+                "activity_id": self.adapter._activity_uuid(item_id),
+                "agent_session_id": session_id,
+                "activity_type": "response",
+                "body": "Unverified pre-upgrade final",
+            },
+        )
+
+        await self.adapter._drain_outbox_once()
+
+        item = self.adapter._ledger.get_outbox_item(item_id)
+        self.assertEqual(item["state"], "dead")
+        self.assertIn("acceptance snapshot", item["last_error"].casefold())
+        self.assertEqual(self.adapter._linear.calls, [])
+
+    async def test_legacy_response_retry_without_receipt_rechecks_acceptance(self):
+        session_id = "session-legacy-retry"
+        item_id = f"activity:response:{session_id}:pre-upgrade"
+        self.adapter._linear.delivery_contexts[session_id] = {
+            "id": session_id,
+            "app_user_id": "agent-derya",
+            "issue_id": "issue-legacy-retry",
+            "delegate_id": "agent-derya",
+            "description": "## Acceptance criteria\n- [ ] Live canary passes",
+            "updated_at": "2026-08-30T20:01:00.000Z",
+        }
+        self.adapter._ledger.enqueue_outbox(
+            item_id, session_id, "activity.create",
+            {
+                "activity_id": self.adapter._activity_uuid(item_id),
+                "agent_session_id": session_id,
+                "activity_type": "response",
+                "body": "Retry without a receipt",
+            },
+        )
+        self.adapter._ledger._db.execute(
+            "UPDATE outbox SET attempts = 1 WHERE id = ?", (item_id,)
+        )
+        self.adapter._ledger._db.commit()
+
+        await self.adapter._drain_outbox_once()
+
+        self.assertEqual(self.adapter._ledger.get_outbox_item(item_id)["state"], "dead")
+        self.assertEqual(self.adapter._linear.calls, [])
+
+    async def test_legacy_response_with_uncertain_issue_context_fails_closed(self):
+        session_id = "session-legacy-uncertain"
+        item_id = f"activity:response:{session_id}:pre-upgrade"
+        self.adapter._linear.delivery_contexts[session_id] = {
+            "id": session_id,
+            "app_user_id": "agent-derya",
+            "issue_id": "issue-legacy-uncertain",
+            "delegate_id": "agent-derya",
+            "updated_at": "2026-08-30T20:01:00.000Z",
+        }
+        self.adapter._ledger.enqueue_outbox(
+            item_id, session_id, "activity.create",
+            {
+                "activity_id": self.adapter._activity_uuid(item_id),
+                "agent_session_id": session_id,
+                "activity_type": "response",
+                "body": "Unknown acceptance state",
+            },
+        )
+
+        await self.adapter._drain_outbox_once()
+
+        self.assertEqual(self.adapter._ledger.get_outbox_item(item_id)["state"], "dead")
+        self.assertEqual(self.adapter._linear.calls, [])
+
+    async def test_legacy_response_with_ambiguous_or_empty_acceptance_fails_closed(self):
+        descriptions = (
+            "## Acceptance criteria\nNo criteria were written yet",
+            "## Acceptance criteria\n- [ ] First\n## Acceptance\n- [ ] Second",
+        )
+        for index, description in enumerate(descriptions):
+            with self.subTest(index=index):
+                session_id = f"session-legacy-ambiguous-{index}"
+                item_id = f"activity:response:{session_id}:pre-upgrade"
+                self.adapter._linear.delivery_contexts[session_id] = {
+                    "id": session_id,
+                    "app_user_id": "agent-derya",
+                    "issue_id": f"issue-legacy-ambiguous-{index}",
+                    "delegate_id": "agent-derya",
+                    "description": description,
+                    "updated_at": "2026-08-30T20:01:00.000Z",
+                }
+                self.adapter._ledger.enqueue_outbox(
+                    item_id, session_id, "activity.create",
+                    {
+                        "activity_id": self.adapter._activity_uuid(item_id),
+                        "agent_session_id": session_id,
+                        "activity_type": "response",
+                        "body": "Unverified legacy response",
+                    },
+                )
+                await self.adapter._drain_outbox_once()
+                self.assertEqual(self.adapter._ledger.get_outbox_item(item_id)["state"], "dead")
+                self.assertEqual(self.adapter._linear.calls, [])
+
+    async def test_legacy_response_without_criteria_still_delivers(self):
+        session_id = "session-legacy-no-criteria"
+        item_id = f"activity:response:{session_id}:pre-upgrade"
+        self.adapter._ledger.enqueue_outbox(
+            item_id, session_id, "activity.create",
+            {
+                "activity_id": self.adapter._activity_uuid(item_id),
+                "agent_session_id": session_id,
+                "activity_type": "response",
+                "body": "Legacy response on an issue without criteria",
+            },
+        )
+
+        await self.adapter._drain_outbox_once()
+
+        self.assertEqual(self.adapter._ledger.get_outbox_item(item_id)["state"], "delivered")
+        self.assertEqual(self.adapter._linear.calls, [
+            (session_id, "response", "Legacy response on an issue without criteria")
+        ])
+
+    async def test_creator_owned_control_requires_live_creator_parent_and_exact_body(self):
+        control_body = (
+            "Creator-agent manages this child through the MCP lifecycle; "
+            "native session closed."
+        )
+        cases = (
+            ("valid", "agent-derya", control_body, "delivered"),
+            ("wrong-creator", "other-agent", control_body, "dead"),
+            ("wrong-body", "agent-derya", "Forged final", "dead"),
+        )
+        for name, creator_id, body, expected in cases:
+            with self.subTest(name=name):
+                session_id = f"session-control-{name}"
+                issue_id = f"issue-control-{name}"
+                item_key = f"creator-owned:verified-{name}"
+                self.adapter._linear.delivery_contexts[session_id] = {
+                    "id": session_id,
+                    "app_user_id": "agent-derya",
+                    "issue_id": issue_id,
+                    "delegate_id": "agent-derya",
+                    "description": "## Acceptance criteria\n- [ ] Child completion needs proof",
+                    "updated_at": "2026-08-30T20:01:00.000Z",
+                }
+                self.adapter._linear.closure_contexts[issue_id] = {
+                    "id": issue_id,
+                    "creator": {"id": creator_id},
+                    "parent": {"id": "parent-issue"},
+                    "state": {"type": "started"},
+                }
+                calls_before = len(self.adapter._linear.calls)
+                self.adapter._enqueue_activity(
+                    session_id, "response", body, item_key=item_key,
+                )
+                await self.adapter._drain_outbox_once()
+                self.assertEqual(
+                    self.adapter._ledger.get_outbox_item(f"activity:{item_key}")["state"],
+                    expected,
+                )
+                self.assertEqual(
+                    len(self.adapter._linear.calls) - calls_before,
+                    int(expected == "delivered"),
+                )
+
+    async def test_trusted_closure_response_bypasses_acceptance_snapshot_gate(self):
+        session_id = "session-closure-with-criteria"
+        self.adapter._linear.delivery_contexts[session_id] = {
+            "id": session_id,
+            "app_user_id": "agent-derya",
+            "issue_id": "issue-closure-with-criteria",
+            "delegate_id": "agent-derya",
+            "description": "## Acceptance criteria\n- [ ] Live canary passes",
+            "updated_at": "2026-08-30T20:01:00.000Z",
+        }
+        self.adapter._ledger.enqueue_closure_activity(
+            "trusted-closure", "issue-closure-with-criteria", session_id,
+            "closure-activity-id", "Human closure acknowledged", {},
+        )
+
+        await self.adapter._drain_outbox_once()
+
+        self.assertEqual(self.adapter._ledger.get_outbox_item(
+            "activity:closure:trusted-closure"
+        )["state"], "delivered")
+        self.assertEqual(self.adapter._linear.calls, [
+            (session_id, "response", "Human closure acknowledged")
+        ])
+
     async def test_final_retry_dead_letters_when_authoritative_acceptance_snapshot_drifts(self):
         description = "## Kabul kriterleri\n- [x] Live canary passes"
         criterion = acceptance_criteria(description)[0]
