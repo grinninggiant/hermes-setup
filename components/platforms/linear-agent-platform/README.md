@@ -401,7 +401,7 @@ rejects any commit that is not an ancestor of `origin/main`, so unreviewed
 branch-only code can never reach a profile runtime. Each deploy records
 `main_gated: true` alongside the immutable rollback coordinates.
 
-The helper writes and prints the immutable rollback path and tree digest before the first rename. Rollback must use those exact values; never discover a backup by recency:
+The helper writes and prints the immutable rollback path and tree digest before the first rename. New staging, rollback, and failed copies live under the owner-only `profile/plugin-backups/linear` root, outside plugin discovery. Rollback must use those exact values; never discover a backup by recency. Historical coordinates pointing under `profile/plugins` fail closed: an operator must explicitly reposition the old backup into the new root and pass its corrected path with the recorded digest; the helper never migrates historical data:
 
 ```bash
 /Users/mutlupolatcan/.hermes/runtime/hermes-agent/venv/bin/python \
