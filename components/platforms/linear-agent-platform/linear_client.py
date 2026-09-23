@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import re
 from typing import Any
 
 import aiohttp
+from markdown_it import MarkdownIt
 
 try:
     from .oauth_store import LINEAR_TOKEN_URL, LinearAPIError, LinearOAuthStore
@@ -26,6 +28,39 @@ MAX_USER_PAGES = 100
 MAX_CHILD_RELATION_PAGES = 100
 MAX_BLOCKER_RELATION_PAGES = 100
 MAX_ISSUE_QUOTA_PAGES = 100
+
+_ANGLE_LINK = re.compile(r"(?<!!)\[([^\[\]\\\n]+)\]\(<(https?://[^\s<>()\[\]]+)>\)")
+
+
+def _same_response_link_serialization(expected: str, actual: str) -> bool:
+    """Accept only the known inline-link destination angle-bracket serialization."""
+    def unwrap(source: str) -> str:
+        return _ANGLE_LINK.sub(lambda match: f"[{match[1]}]({match[2]})", source)
+
+    if unwrap(expected) != unwrap(actual):
+        return False
+
+    # Raw matching alone could change a literal link in code, HTML, or an image.
+    def tokens(source: str) -> tuple:
+        parser = MarkdownIt("commonmark")
+        def shape(token):
+            # ponytail: reject depth near parser truncation; source mapping if deep receipts matter.
+            if token.level >= parser.options["maxNesting"] - 1:
+                raise ValueError("Markdown nesting requires an exact receipt")
+            return (token.type, token.tag, token.nesting, token.attrs, token.info,
+                    None if token.type == "inline" else token.content,
+                    tuple(shape(child) for child in token.children or ()))
+
+        env: dict = {}
+        parsed = parser.parse(source, env)
+        if env.get("references"):
+            raise ValueError("reference definitions require an exact receipt")
+        return tuple(shape(token) for token in parsed)
+
+    try:
+        return tokens(expected) == tokens(actual)
+    except Exception:
+        return False
 
 
 class LinearClient:
@@ -1067,7 +1102,9 @@ mutation LinearNativeAgentActivity($input: AgentActivityCreateInput!) {
             or owner.get("id") != self.actor_id
             or user.get("id") != self.actor_id
             or content.get("__typename") != "AgentActivityResponseContent"
-            or content.get("body") != body
+            or not isinstance(body, str)
+            or not isinstance(content.get("body"), str)
+            or (content["body"] != body and not _same_response_link_serialization(body, content["body"]))
         ):
             raise LinearAPIError("Response receipt identity or content mismatch", retryable=False)
         if session.get("status") != "complete":
