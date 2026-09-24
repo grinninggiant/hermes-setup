@@ -9,6 +9,7 @@ import json
 from types import SimpleNamespace
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -130,6 +131,11 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
         context.run(set_session_vars, platform="linear", chat_id="linear-session-221",
                     session_key=self.key, session_id="hermes-session-221")
         runner = object.__new__(TurnRunner)
+        # This fixture bypasses __init__, so preserve the actual per-runner
+        # registration fence introduced by the paired core candidate.
+        runner._clarify_lock = threading.Lock()
+        runner._clarify_ids = set()
+        runner._clarify_closed = False
         runner._ctx = SimpleNamespace(
             _status_adapter=self.adapter, session_key=self.key,
             _status_chat_id="linear-session-221", _status_thread_metadata={})
