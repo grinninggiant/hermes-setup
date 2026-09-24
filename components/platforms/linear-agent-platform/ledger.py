@@ -1258,6 +1258,13 @@ class DeliveryLedger:
             self._db.rollback()
             return False
 
+    def delivery_is_done(self, webhook_id: str) -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT state FROM deliveries WHERE webhook_id = ?", (webhook_id,)
+            ).fetchone()
+            return row is not None and row[0] == "done"
+
     def mark_done(self, webhook_id: str, *, now: int | None = None) -> None:
         now = int(time.time()) if now is None else int(now)
         with self._lock:

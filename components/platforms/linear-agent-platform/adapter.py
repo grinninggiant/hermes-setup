@@ -911,6 +911,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             status=200 if healthy else 503,
         )
 
+    def _duplicate_delivery_response(self, delivery_key: str) -> web.Response:
+        # A processing claim is not durable admission: keep vendor retries alive.
+        done = self._ledger is not None and self._ledger.delivery_is_done(delivery_key)
+        return web.json_response(
+            {"status": "duplicate" if done else "processing"}, status=200 if done else 503
+        )
+
     async def _handle_webhook(self, request: web.Request) -> web.Response:
         raw = await request.read()
         signature = request.headers.get("Linear-Signature", "").strip().lower()
@@ -986,7 +993,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     webhook_id,
                     delivery_key,
                 )
-                return web.json_response({"status": "duplicate"}, status=200)
+                return self._duplicate_delivery_response(delivery_key)
             claimed = True
             inflight = self._inflight_session_deliveries.setdefault(agent_session_id, set())
             inflight.add(delivery_key)
@@ -2745,7 +2752,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return web.json_response({"status": "unavailable"}, status=503)
         delivery_key = _delivery_key(payload, raw)
         if not self._ledger.claim(delivery_key):
-            return web.json_response({"status": "duplicate"}, status=200)
+            return self._duplicate_delivery_response(delivery_key)
         claimed = True
         try:
             actor_id, _ = _actor(payload)

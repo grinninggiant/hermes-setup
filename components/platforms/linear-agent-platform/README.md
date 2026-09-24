@@ -84,6 +84,50 @@ flowchart LR
 - Human terminal reconciliation uses a second durable key over the authoritative issue revision (`updatedAt`), workflow state, human assignee, delegate, and team. Provider `completedAt` is audit-only. Duplicate webhook revisions therefore converge on one ordered pair: an ephemeral `thought` indicator followed by the final `response`.
 - Linear issue, comment, and prompt content is labeled as untrusted user input, never as trusted instructions.
 
+## Created webhook deadline audit (partial, not vendor acceptance)
+
+[Linear Agent Interaction](https://linear.app/developers/agent-interaction) specifies
+**5 seconds for the HTTP response** and, independently, **10 seconds after `created`
+for an activity or external URL update**. A fast HTTP response is not activity proof.
+
+The actual path is `_handle_webhook` → policy/dependency reads → `handle_message`
+→ `_prepare_bound_linear_ingress` → core scheduling → `mark_done` → HTTP 200.
+`_schedule_thought` persists an outbox item, but `_drain_outbox_once` still reads the
+live activity owner before calling Linear. Policy reads hold an issue lock; native
+admission reads hold a session lock. Stop can wait behind those reads. The client’s
+8-second per-request timeout is not an aggregate ingress or first-activity budget.
+
+The narrow fix here returns **503 `processing`**, not 200, for an unfinished delivery
+claim on both AgentSession and data-event ingress. Only `done` duplicates receive
+200. Existing stale-claim recovery, authorization, Stop and owner guards are unchanged;
+there is no new inbox, early-success ACK or background admission promise.
+
+`diagnostics/created_deadline_probe.py` is an explicit **RED diagnostic**, outside
+normal regression discovery. It uses signed loopback HTTP, real adapter/core ingress
+and real outbox validation with fixture remote reads; no Linear write or model call.
+Run from the checkout with the intended Hermes core (not an arbitrary installed core):
+
+```bash
+CORE=/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-5cc98f1f2ce11bc4c4368ae7e7fabf9c86e81abe-general
+TEST_HOME=$(mktemp -d)
+(
+  trap 'rm -rf "$TEST_HOME"' EXIT
+  env -i HOME="$TEST_HOME" HERMES_HOME="$TEST_HOME" PATH=/usr/bin:/bin \
+    PYTHONPATH="$CORE" "$CORE/venv/bin/python" \
+    components/platforms/linear-agent-platform/diagnostics/created_deadline_probe.py -v
+)
+```
+
+Observed: policy and native-admission HTTP responses were absent at 5 seconds;
+with fast admission but a blocked outbound owner read, no activity attempt occurred
+by 10 seconds; Stop cancellation was still waiting after 250 ms behind the policy
+lock. All four probes fail intentionally against the unresolved behavior; they are
+not skipped/expected-failure tests disguised as GREEN. The ordinary regression suite
+passes separately. Fixing these clocks safely still requires a reviewed durable
+admission/cancellation boundary, rather than acknowledging a mere processing claim
+or bypassing authoritative owner validation. Real vendor `created` delivery, activity
+receipt and deployed-runtime timing remain unverified; no deploy was performed.
+
 ## Agent Session creation and execution policy
 
 An Agent Session and a Hermes execution are different objects. Linear normally creates the native Agent Session when a human delegates or explicitly mentions an app-user. The sole adapter-initiated exception is the exact signed human terminal-to-started reopen contract documented below, which uses Linear's native `agentSessionCreateOnIssue` mutation after durable exactly-once and live authorization gates. The adapter may bind an accepted vendor session to an issue, but binding alone is not permission to run a model.

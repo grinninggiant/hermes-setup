@@ -5279,6 +5279,89 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             self.adapter._ledger.get_activation_wait(issue_id)["state"], "canceled"
         )
 
+    async def test_inflight_created_retry_is_not_successfully_acked(self):
+        # A processing claim contains neither a replay payload nor an admission receipt.
+        del self.adapter.handle_message  # Exercise real ingress, not asyncSetUp's capture.
+        self.adapter._planned_activation_enabled = True
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_policy_read(_issue_id):
+            entered.set()
+            await asyncio.wait_for(release.wait(), timeout=2)
+            raise LinearAPIError("fixture read unavailable", retryable=True)
+
+        self.adapter._linear.get_issue_closure_context = slow_policy_read
+        payload = self.make_payload(agentSession={"id": "session-1", "issue": {"id": "issue-1"}})
+        request = self.request_for(payload)
+        first = asyncio.create_task(self.adapter._handle_webhook(request))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            duplicate = await self.adapter._handle_webhook(request)
+            self.assertEqual(duplicate.status, 503)
+            self.assertEqual(json.loads(duplicate.text)["status"], "processing")
+        finally:
+            release.set()
+            await asyncio.wait_for(first, timeout=1)
+        self.assertEqual(self.adapter._linear.calls, [])
+        # The failed read is retryable even after reopening the durable ledger.
+        self.adapter._ledger.close()
+        self.adapter._ledger = DeliveryLedger(str(Path(self.temp.name) / "ledger.sqlite3"))
+        key = adapter_mod._delivery_key(payload, request._body)
+        self.assertTrue(self.adapter._ledger.claim(key))
+        self.adapter._ledger.mark_done(key)
+        duplicate = await self.adapter._handle_webhook(request)
+        self.assertEqual(duplicate.status, 200)
+        self.assertEqual(json.loads(duplicate.text)["status"], "duplicate")
+
+    async def test_canceled_pre_admission_read_cannot_turn_retry_into_success(self):
+        del self.adapter.handle_message
+        entered = asyncio.Event()
+
+        async def slow_read(_issue_id):
+            entered.set()
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=2)
+
+        self.adapter._linear.get_open_blockers = slow_read
+        request = self.request_for(self.make_payload(
+            agentSession={"id": "session-1", "issue": {"id": "issue-1"}}
+        ))
+        first = asyncio.create_task(self.adapter._handle_webhook(request))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+        finally:
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+        self.adapter._ledger.close()
+        self.adapter._ledger = DeliveryLedger(str(Path(self.temp.name) / "ledger.sqlite3"))
+        retry = await self.adapter._handle_webhook(request)
+        self.assertEqual(retry.status, 503)
+        self.assertEqual(json.loads(retry.text)["status"], "processing")
+        self.assertEqual(self.adapter._linear.calls, [])
+        self.assertEqual(self.adapter._session_tasks, {})
+
+    async def test_unfinished_claim_after_restart_is_retryable_for_both_ingress_paths(self):
+        for payload in (self.make_payload(), self.make_data_payload()):
+            with self.subTest(event_type=payload["type"]):
+                request = self.request_for(payload)
+                key = adapter_mod._delivery_key(payload, request._body)
+                self.assertTrue(self.adapter._ledger.claim(key))
+                self.adapter._ledger.close()
+                self.adapter._ledger = DeliveryLedger(str(Path(self.temp.name) / "ledger.sqlite3"))
+                response = await self.adapter._handle_webhook(request)
+                self.assertEqual(response.status, 503)
+                self.assertEqual(json.loads(response.text)["status"], "processing")
+                # Advance only this claim's clock to exercise existing stale recovery.
+                self.assertTrue(self.adapter._ledger.claim(
+                    key, now=int(time.time()) + self.adapter._ledger.processing_timeout_seconds + 1
+                ))
+                self.adapter._ledger.mark_done(key)
+                response = await self.adapter._handle_webhook(request)
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.text)["status"], "duplicate")
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.adapter._linear.calls, [])
+
     async def test_created_acknowledgment_uses_installed_app_actor_name(self):
         self.adapter._linear.actor_name = "Doruk"
 
