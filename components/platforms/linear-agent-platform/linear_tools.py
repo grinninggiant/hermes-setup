@@ -47,7 +47,6 @@ try:
         safe_mcp_diagnostic,
     )
     from .oauth_store import LinearOAuthStore
-    from .ledger import DeliveryLedger
     from .outbound_ledger import (
         FleetGlobalLock,
         FleetGlobalLockError,
@@ -80,7 +79,6 @@ except ImportError:  # Direct module loading in standalone tests/scripts.
         safe_mcp_diagnostic,
     )
     from oauth_store import LinearOAuthStore
-    from ledger import DeliveryLedger
     from outbound_ledger import (
         FleetGlobalLock,
         FleetGlobalLockError,
@@ -111,6 +109,7 @@ VENDOR_MUTATION_TOOLS = frozenset(
 LIFECYCLE_NOOP_LEDGER_PREFIX = "lifecycle-noop:"
 LEGACY_QUOTA_ADMISSION_LEDGER_PREFIX = "quota-admission:v1:"
 QUOTA_ADMISSION_LEDGER_PREFIX = "quota-admission:v2:"
+_OPS200_ISSUE_ID = "d29003de-4f24-43a0-8add-d42fa23fc79f"
 _OPS200_SOUL_TEXT = "9/9 SOUL fresh read-back’te exact delegate-owned acceptance kuralını taşır."
 _OPS200_SOUL_LINE_HASHES = (
     (b"mark_acceptance", "737a77b5c408f257b2f6e3b095887f47bdb266bb951a1bf5ded6a32a21c69393"),
@@ -1118,6 +1117,7 @@ def _evaluate_acceptance_context(
     actor_id: str,
     expected_updated_at: str,
     description: str,
+    backfill_hashes: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, str] | None, dict[str, Any] | None]:
     if str((context.get("team") or {}).get("id") or "") != target_team_id:
         return None, {"error": "linear_policy_denied", "reason": "authoritative_team_mismatch"}
@@ -1166,7 +1166,13 @@ def _evaluate_acceptance_context(
             "reason": "acceptance_noncanonical_checkbox_change",
         }
     if source_states == target_states:
-        if all(source_states):
+        if all(source_states) or (
+            backfill_hashes
+            and source_description == description
+            and backfill_hashes.issubset({
+                item.criterion_hash for item in source_criteria if item.checked
+            })
+        ):
             return None, {
                 "status": "already_accepted",
                 "result_id": str(context.get("id") or ""),
@@ -1414,6 +1420,7 @@ async def execute_with_clients(
     plan_snapshot: dict[str, str] | None = None
     acceptance_read_back: dict[str, Any] | None = None
     normalized_acceptance_evidence: list[dict[str, str]] = []
+    evaluator_kwargs: dict[str, Any] = {}
     context: dict[str, Any] = {}
     description_evaluator: Callable[..., Any] | None = None
     lifecycle_noop_result: dict[str, Any] | None = None
@@ -1547,7 +1554,11 @@ async def execute_with_clients(
             evidence_matches_transition = evidence_hashes == changed_hashes
             evidence_backfills_checked = (
                 not changed_hashes
-                and bool(evidence_hashes)
+                and profile_id == "general"
+                and context.get("id") == _OPS200_ISSUE_ID
+                and bool(target_criteria)
+                and target_criteria[0].text == _OPS200_SOUL_TEXT
+                and evidence_hashes == {target_criteria[0].criterion_hash}
                 and evidence_hashes.issubset(checked_source_hashes)
             )
             if (
@@ -1561,6 +1572,8 @@ async def execute_with_clients(
                 )
             ):
                 return {"error": "linear_policy_denied", "reason": "acceptance_evidence_invalid"}
+            if evidence_backfills_checked:
+                evaluator_kwargs["backfill_hashes"] = frozenset(evidence_hashes)
         description_evaluator = (
             _evaluate_plan_context
             if lifecycle_action == "enrich_plan"
@@ -1572,6 +1585,7 @@ async def execute_with_clients(
             actor_id=graph_actor,
             expected_updated_at=str(arguments.get("expected_updated_at") or ""),
             description=str(arguments.get("description") or ""),
+            **evaluator_kwargs,
         )
         if plan_result is not None:
             if str(plan_result.get("status") or "") in LIFECYCLE_NOOP_STATUSES:
@@ -1745,6 +1759,34 @@ async def execute_with_clients(
         noop_result_id = str(lifecycle_noop_result.get("result_id") or "")
         if lifecycle_action == "mark_acceptance" and normalized_acceptance_evidence:
             assert acceptance_ledger is not None
+            # A no-op still writes durable proof: recheck authority and exact bytes.
+            try:
+                fresh = await graphql_client.get_issue_plan_context(str(arguments.get("id") or ""))
+                _, fresh_result = _evaluate_acceptance_context(
+                    fresh,
+                    target_team_id=team_id,
+                    actor_id=graph_actor,
+                    expected_updated_at=str(arguments.get("expected_updated_at") or ""),
+                    description=str(arguments.get("description") or ""),
+                    **evaluator_kwargs,
+                )
+                stable = (
+                    fresh_result == lifecycle_noop_result
+                    and str(context.get("description") or "") == str(arguments.get("description") or "")
+                    and all(fresh.get(key) == context.get(key) for key in (
+                        "id", "team", "delegate", "assignee", "state", "title",
+                        "updatedAt", "description",
+                    ))
+                )
+            except Exception:
+                stable = False
+            if not stable:
+                await asyncio.to_thread(
+                    ledger.mark_failed,
+                    operation_key,
+                    error_code="lifecycle_pre_dispatch_changed",
+                )
+                return {"error": "linear_policy_denied", "reason": "lifecycle_pre_dispatch_changed"}
             current_revision = str(arguments.get("expected_updated_at") or "")
             try:
                 await asyncio.to_thread(
@@ -2593,7 +2635,7 @@ def register_outbound_tools(
                     and issue.get("delegate", {}).get("id") == graphql.actor_id
                     and issue.get("identifier") == "OPS-200" and isinstance(issue.get("id"), str)
                     and issue["id"] and len(criteria) >= 1
-                    and criteria[0].text == _OPS200_SOUL_TEXT and not criteria[0].checked
+                    and criteria[0].text == _OPS200_SOUL_TEXT
                     and isinstance(issue.get("updatedAt"), str) and issue["updatedAt"]
                 ):
                     return json.dumps(denied)

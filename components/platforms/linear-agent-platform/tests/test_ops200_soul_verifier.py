@@ -11,7 +11,7 @@ from unittest import mock
 import test_linear_tools
 from acceptance import acceptance_criteria, authenticate_evidence_envelope
 from ledger import DeliveryLedger
-from linear_tools import execute_with_clients, register_outbound_tools
+from linear_tools import _OPS200_ISSUE_ID, execute_with_clients, register_outbound_tools
 from outbound_ledger import OutboundLedger
 from outbound_policy import OutboundPolicy
 
@@ -95,6 +95,60 @@ class Ops200SoulVerifierTests(unittest.TestCase):
         (self.profiles / "finance" / "SOUL.md").write_bytes(LINES[0] + b"\nchanged\n")
         self.assertIsNone(authenticate(drift))
         self.assertEqual(self.verify()["reason"], "ops200_soul_verification_failed")
+
+    def test_checked_ops200_criterion_issues_fresh_proof_without_vendor_checkbox_write(self):
+        checked = DESCRIPTION.replace("[ ]", "[x]")
+        self.issue["id"] = _OPS200_ISSUE_ID
+        self.issue["description"] = checked
+        envelope = self.verify()
+        self.assertEqual(envelope.get("result"), "PASS", envelope)
+        resolver = self.get_resolver(envelope)
+        context = {**test_linear_tools.ExecutionTests.plan_context(
+            updated_at=REVISION, description=checked,
+        ), "id": _OPS200_ISSUE_ID}
+        policy = OutboundPolicy(
+            expected_actor_id="actor-1", expected_organization_id="org-1",
+            allowed_team_ids={"ops-1"},
+        )
+        ledger = OutboundLedger(str(self.root / "checked-outbound.sqlite3"))
+        acceptance_ledger = DeliveryLedger(
+            str(self.root / "checked-acceptance.sqlite3"), startup_recovery=False,
+        )
+        mcp = test_linear_tools.FakeMCP()
+        try:
+            result = asyncio.run(execute_with_clients(
+                profile_id="general", vendor_tool="save_issue",
+                arguments={
+                    "id": _OPS200_ISSUE_ID, "target_team_id": "ops-1",
+                    "operation_key": "ops200-checked-proof-test",
+                    "lifecycle_action": "mark_acceptance",
+                    "expected_updated_at": REVISION, "description": checked,
+                    "acceptance_evidence": [envelope],
+                },
+                mutation=True, policy=policy, ledger=ledger,
+                acceptance_ledger=acceptance_ledger,
+                evidence_resolver=resolver,
+                expected_agent_session_id="agent-native",
+                expected_hermes_turn_id="turn-native",
+                graphql_client=test_linear_tools.FakeGraphQL(plan_contexts=[context, context]),  # type: ignore[arg-type]
+                mcp_client=mcp,  # type: ignore[arg-type]
+            ))
+            self.assertEqual(result.get("status"), "already_accepted", result)
+            self.assertEqual(
+                acceptance_ledger.acceptance_evidence_hashes(
+                    _OPS200_ISSUE_ID, "actor-1", accepted_revision=REVISION,
+                ),
+                {acceptance_criteria(checked)[0].criterion_hash},
+            )
+            self.assertFalse(any(call[0] == "save_issue" for call in mcp.calls))
+            self.assertIsNone(authenticate_evidence_envelope(
+                envelope, issue_id=_OPS200_ISSUE_ID, delegate_id="actor-1",
+                resolver=resolver, expected_agent_session_id="agent-native",
+                expected_hermes_turn_id="turn-native",
+            ))  # pointer consumed by the accepted call
+        finally:
+            acceptance_ledger.close()
+            ledger.close()
 
     def test_verifier_evicts_old_unconsumed_pointers(self):
         envelopes = [self.verify() for _ in range(33)]
@@ -188,7 +242,7 @@ class Ops200SoulVerifierTests(unittest.TestCase):
         mcp.connect = mock.AsyncMock()
         mcp.close = mock.AsyncMock()
         execute = mock.AsyncMock(return_value={"error": "linear_policy_denied", "reason": "offline"})
-        args = {"id": "issue-200", "target_team_id": "ops-1", "operation_key": "one-test",
+        args = {"id": self.issue["id"], "target_team_id": "ops-1", "operation_key": "one-test",
                 "lifecycle_action": "mark_acceptance", "expected_updated_at": REVISION,
                 "description": DESCRIPTION.replace("[ ]", "[x]"), "acceptance_evidence": [envelope]}
         with (mock.patch("linear_tools.LinearOAuthStore"),
