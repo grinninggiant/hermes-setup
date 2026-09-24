@@ -44,6 +44,13 @@ from .linear_client import LinearAPIError, LinearClient
 logger = logging.getLogger(__name__)
 
 
+def _ledger_busy(exc: Exception) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and (
+        str(exc) == "Linear ledger is busy"
+        or getattr(exc, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    )
+
+
 def _check_admission_deadline(deadline: float | None) -> None:
     # timeout_at only cancels on a loop tick; an awaited coroutine may never yield.
     if deadline is not None and asyncio.get_running_loop().time() >= deadline:
@@ -3928,10 +3935,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         self._outbox_wakeup.set()
                     logger.error("[linear] Outbox dead letter id=%s: %s", item.id, exc)
             except Exception as exc:
-                if isinstance(exc, sqlite3.OperationalError) and (
-                    str(exc) == "Linear ledger is busy"
-                    or getattr(exc, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-                ):
+                if _ledger_busy(exc):
                     exponent = min(max(item.attempts - 1, 0), 16)
                     delay = min(self._outbox_max_delay, self._outbox_base_delay * (2**exponent))
                     self._ledger.reschedule_outbox(item.id, str(exc), delay)
@@ -5200,7 +5204,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     event, turn_result, context
                 )
             except Exception as exc:
-                if isinstance(exc, LinearAPIError) and exc.retryable:
+                if (isinstance(exc, LinearAPIError) and exc.retryable) or _ledger_busy(exc):
                     raise
                 logger.warning(
                     "[linear] authoritative turn read-back failed closed session=%s: %s",
@@ -5216,7 +5220,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     event.source, hermes_session_id
                 )
             except Exception as exc:
-                if isinstance(exc, LinearAPIError) and exc.retryable:
+                if (isinstance(exc, LinearAPIError) and exc.retryable) or _ledger_busy(exc):
                     raise
                 logger.warning(
                     "[linear] native goal read failed closed session=%s: %s",
@@ -5540,7 +5544,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         ):
             return
         self._turn_recovery_requested = False
-        staged_retry_needed = await self._recover_staged_turn_deliveries()
+        staged_retry_needed, ledger_busy = await self._recover_staged_turn_deliveries()
+        if ledger_busy:
+            if self._running:
+                self._turn_recovery_task = asyncio.create_task(
+                    self._delayed_turn_decision_recovery()
+                )
+            return  # Other recovery scans cannot read the ledger yet either.
         cursor: tuple[int, str] | None = None
         while True:
             rows = self._ledger.running_turn_decisions(
@@ -5831,13 +5841,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._ledger.fence_turn_success_without_activity(decision_id, message)
         return False
 
-    async def _recover_staged_turn_deliveries(self) -> bool:
+    async def _recover_staged_turn_deliveries(self) -> tuple[bool, bool]:
         """Retry staged finals through the same native decision boundary.
 
         The response remains intentionally process-local until the authoritative
         read succeeds; orphan recovery handles text lost across process restart.
         """
         retry_needed = False
+        ledger_busy = False
         for chat_id, retry_state in list(self._staged_delivery_attempts.items()):
             pending_delivery, previous_attempts = retry_state
             if (
@@ -5903,13 +5914,20 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     )
                 self._remove_owned_staged_delivery(chat_id, pending_delivery)
             except Exception as exc:
+                if _ledger_busy(exc):
+                    if self._pending_turn_deliveries.get(chat_id) is pending_delivery:
+                        # Contention spends no delivery attempt; retry rechecks ownership.
+                        self._staged_delivery_attempts[chat_id] = (pending_delivery, previous_attempts)
+                        retry_needed = True
+                        ledger_busy = True
+                    continue
                 logger.warning(
                     "[linear] staged final recovery failed session=%s: %s",
                     chat_id,
                     exc,
                 )
                 self._remove_owned_staged_delivery(chat_id, pending_delivery)
-        return retry_needed
+        return retry_needed, ledger_busy
 
     def _remove_owned_staged_delivery(
         self, chat_id: str, pending_delivery: tuple[MessageEvent, str, dict[str, Any]]
