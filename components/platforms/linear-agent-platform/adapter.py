@@ -491,6 +491,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         self._outbox_drain_lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._issue_locks: dict[str, asyncio.Lock] = {}
+        self._inflight_session_deliveries: dict[str, set[str]] = {}
         self.config.typing_indicator = False
 
     @property
@@ -972,6 +973,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         delivery_key = _delivery_key(payload, raw)
         claimed = False
         direct_activation_created = False
+        inflight: set[str] | None = None
         direct_dispatch_attempted = False
         direct_issue_lock: asyncio.Lock | None = None
         direct_issue_lock_held = False
@@ -986,6 +988,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 )
                 return web.json_response({"status": "duplicate"}, status=200)
             claimed = True
+            inflight = self._inflight_session_deliveries.setdefault(agent_session_id, set())
+            inflight.add(delivery_key)
             event_actor_id, _ = _actor(payload)
             manager_activation = (
                 self._ledger.get_manager_activation(issue_id)
@@ -1070,10 +1074,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         ),
                     )
                 ):
-                    self._ledger.put_direct_activation_event(
-                        issue_id, agent_session_id, delivery_key, payload
-                    )
-                    self._ledger.bind_issue_session(issue_id, agent_session_id)
+                    async with self._issue_lock(issue_id):
+                        if not await self._bind_issue_session(issue_id, agent_session_id):
+                            self._ledger.mark_done(delivery_key)
+                            return web.json_response({"status": "issue_session_active"}, status=200)
+                        self._ledger.put_direct_activation_event(
+                            issue_id, agent_session_id, delivery_key, payload
+                        )
                     self._ledger.mark_done(delivery_key)
                     return web.json_response(
                         {"status": "direct_activation_waiting_for_grant"}, status=200
@@ -1129,15 +1136,25 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                                 issue_id, pending_closure["event_revision"]
                             )
                         else:
-                            self._ledger.bind_issue_session(issue_id, agent_session_id)
+                            await self._bind_issue_session(issue_id, agent_session_id)
                             self._ledger.release(delivery_key)
                             claimed = False
                             return web.json_response(
                                 {"status": "closure_deferred"}, status=503
                             )
-                    self._ledger.bind_issue_session(issue_id, agent_session_id)
+                    if not await self._bind_issue_session(issue_id, agent_session_id):
+                        if direct_activation_created:
+                            self._ledger.reset_direct_activation_claim(
+                                issue_id, agent_session_id, "issue_session_active"
+                            )
+                        self._ledger.mark_done(delivery_key)
+                        return web.json_response({"status": "issue_session_active"}, status=200)
             if action == "prompted" and issue_id:
                 async with self._issue_lock(issue_id):
+                    if (not is_stop and self._ledger.get_issue_session(issue_id)
+                            not in (None, agent_session_id)):
+                        self._ledger.mark_done(delivery_key)
+                        return web.json_response({"status": "issue_session_active"}, status=200)
                     pending_closure = self._ledger.get_pending_closure_event(issue_id)
                     if pending_closure is not None:
                         closure_status = await self._reconcile_human_completion(
@@ -1412,6 +1429,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             return web.json_response({"status": "unavailable"}, status=503)
         finally:
+            if inflight is not None:
+                inflight.discard(delivery_key)
+                if not inflight:
+                    self._inflight_session_deliveries.pop(agent_session_id, None)
             if dispatch_lock_held and dispatch_lock is not None:
                 dispatch_lock.release()
             if direct_issue_lock_held and direct_issue_lock is not None:
@@ -1619,6 +1640,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 self._ledger.mark_manager_activation(issue_id, "canceled")
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "activation_policy_denied"}, status=200)
+            if not await self._bind_issue_session(issue_id, session_id):
+                self._ledger.mark_done(delivery_key)
+                return web.json_response({"status": "issue_session_active"}, status=200)
             if state in {"claimed", "failed", "delegation_unknown"}:
                 self._ledger.mark_manager_activation(issue_id, "delegated")
             if not self._ledger.claim_manager_session(issue_id, session_id):
@@ -1630,7 +1654,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 )
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": status}, status=200)
-            self._ledger.bind_issue_session(issue_id, session_id)
             async with self._session_lock(session_id):
                 event = self._message_event(
                     payload, delivery_key, webhook_id, activation_resume=True
@@ -2224,8 +2247,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             logger.info("[linear] terminal fenced issue=%s reason=session_unbound", issue_id)
             return "terminal_fenced"
-        if not persisted_session_id:
-            self._ledger.bind_issue_session(issue_id, session_id)
+        if not persisted_session_id and not await self._bind_issue_session(issue_id, session_id):
+            return "closure_deferred"
         material = "\0".join(
             (
                 issue_id,
@@ -2533,7 +2556,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     return False
                 if not self._ledger.mark_channel_route(operation_key, "dispatching"):
                     return False
-                self._ledger.bind_issue_session(issue_id, session_id)
                 return True
 
             accepted = await self.dispatch_channel_route(
@@ -2635,7 +2657,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         authorize_dispatch: Callable[[], bool] | None = None,
     ) -> bool:
         """Revalidate and serialize cross-channel dispatch with native intake."""
-        async with self._session_lock(expected_session_id):
+        async with self._issue_lock(expected_issue_id), self._session_lock(expected_session_id):
             target = await self.get_channel_route_target(issue_ref)
             if (
                 target.get("routable") is not True
@@ -2647,10 +2669,57 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return False
             if authorize_dispatch is not None and not authorize_dispatch():
                 return False
+            if not await self._bind_issue_session(expected_issue_id, expected_session_id):
+                return False
             if before_dispatch is not None and not before_dispatch():
                 raise LinearAPIError("Cross-channel durable dispatch boundary was not acquired")
             await self.handle_message(event)
             return True
+
+    async def _bind_issue_session(self, issue_id: str, session_id: str) -> bool:
+        """One issue execution per profile/app; callers hold the issue lock.
+
+        Vendor terminal status must belong to the exact old binding. The SQLite
+        CAS also protects against another ledger connection replacing it mid-read.
+        """
+        assert self._ledger is not None and self._linear is not None
+        previous = self._ledger.get_issue_session(issue_id)
+        if previous and previous != session_id:
+            context = await self._linear.get_agent_session_delivery_context(previous)
+            if not (
+                self._linear.actor_id
+                and context.get("id") == previous
+                and context.get("issue_id") == issue_id
+                and context.get("app_user_id") == self._linear.actor_id
+                and context.get("status") in {"complete", "error"}
+            ):
+                return False
+            source = self.build_source(chat_id=previous, chat_type="dm")
+            extra = getattr(self.config, "extra", None) or {}
+            key = build_session_key(
+                source,
+                group_sessions_per_user=extra.get("group_sessions_per_user", True),
+                thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+                profile=self._session_key_profile(source),
+            )
+            if (self._inflight_session_deliveries.get(previous)
+                    or self._session_lock(previous).locked()
+                    or key in self._active_sessions or key in self._pending_messages
+                    or previous in self._active_turn_events
+                    or previous in self._pending_turn_deliveries):
+                return False
+            # Terminal upstream must not orphan a locally resumable execution.
+            for pending in (
+                self._ledger.get_wait(previous),
+                self._ledger.get_activation_wait(issue_id),
+                self._ledger.get_direct_activation_event(issue_id),
+            ):
+                if (pending and pending.get("session_id") == previous
+                        and pending.get("state") in {"waiting", "resuming", "claimed", "dispatch_unknown"}):
+                    return False
+        return self._ledger.bind_issue_session(
+            issue_id, session_id, expected_session_id=previous,
+        )
 
     def _issue_lock(self, issue_id: str) -> asyncio.Lock:
         lock = self._issue_locks.get(issue_id)

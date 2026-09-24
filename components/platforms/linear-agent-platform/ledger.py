@@ -338,18 +338,22 @@ class DeliveryLedger:
             candidate.chmod(0o600)
 
     def bind_issue_session(
-        self, issue_id: str, session_id: str, *, now: int | None = None,
-    ) -> None:
-        """Record the latest locally accepted Agent Session creation for an issue."""
+        self, issue_id: str, session_id: str, *,
+        expected_session_id: str | None = None, now: int | None = None,
+    ) -> bool:
+        """Bind once; replacement requires the exact previously verified session."""
         now = int(time.time()) if now is None else int(now)
         with self._lock:
-            self._db.execute(
+            cursor = self._db.execute(
                 "INSERT INTO issue_session_bindings(issue_id, session_id, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT(issue_id) DO UPDATE SET "
-                "session_id=excluded.session_id, updated_at=excluded.updated_at",
-                (issue_id, session_id, now, now),
+                "session_id=excluded.session_id, updated_at=excluded.updated_at "
+                "WHERE issue_session_bindings.session_id=excluded.session_id "
+                "OR issue_session_bindings.session_id=?",
+                (issue_id, session_id, now, now, expected_session_id),
             )
             self._db.commit()
+            return cursor.rowcount == 1
 
     def get_issue_session(self, issue_id: str) -> str | None:
         with self._lock:

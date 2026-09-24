@@ -527,10 +527,12 @@ class PluginRegistrationTests(unittest.TestCase):
 
     def test_adapter_serializes_and_revalidates_cross_channel_dispatch(self):
         async def scenario():
-            adapter = object.__new__(LinearPlatformAdapter)
-            adapter._session_locks = {}
-            adapter._ledger = mock.Mock()
-            adapter._ledger.has_session_closure.return_value = False
+            temp = tempfile.TemporaryDirectory()
+            self.addCleanup(temp.cleanup)
+            config = PlatformConfig(enabled=True, extra={})
+            adapter = LinearPlatformAdapter(config, Platform.WEBHOOK)
+            adapter._ledger = DeliveryLedger(str(Path(temp.name) / "routes.sqlite3"))
+            self.addCleanup(adapter._ledger.close)
             release = asyncio.Event()
             first_entered = asyncio.Event()
             calls = []
@@ -539,7 +541,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 calls.append(event)
                 if len(calls) == 1:
                     first_entered.set()
-                    await release.wait()
+                    await asyncio.wait_for(release.wait(), 2)
 
             context = {
                 "id": "issue-159",
@@ -566,15 +568,19 @@ class PluginRegistrationTests(unittest.TestCase):
             first = asyncio.create_task(adapter.dispatch_channel_route(
                 "OPS-159", "issue-159", "session-active", event_1
             ))
-            await first_entered.wait()
-            second = asyncio.create_task(adapter.dispatch_channel_route(
-                "OPS-159", "issue-159", "session-active", event_2
-            ))
-            await asyncio.sleep(0)
-            self.assertEqual(adapter._linear.get_channel_routing_context.await_count, 1)
-            self.assertEqual(calls, [event_1])
-            release.set()
-            await asyncio.gather(first, second)
+            tasks = [first]
+            try:
+                await asyncio.wait_for(first_entered.wait(), 2)
+                second = asyncio.create_task(adapter.dispatch_channel_route(
+                    "OPS-159", "issue-159", "session-active", event_2
+                ))
+                tasks.append(second)
+                await asyncio.sleep(0)
+                self.assertEqual(adapter._linear.get_channel_routing_context.await_count, 1)
+                self.assertEqual(calls, [event_1])
+            finally:
+                release.set()
+                await asyncio.wait_for(asyncio.gather(*tasks), 2)
             self.assertEqual(adapter._linear.get_channel_routing_context.await_count, 2)
             self.assertEqual(calls, [event_1, event_2])
 
@@ -584,6 +590,7 @@ class PluginRegistrationTests(unittest.TestCase):
         async def scenario():
             adapter = object.__new__(LinearPlatformAdapter)
             adapter._session_locks = {}
+            adapter._issue_locks = {}
             adapter._ledger = mock.Mock()
             adapter._ledger.has_session_closure.return_value = False
             adapter.get_channel_route_target = mock.AsyncMock(return_value={
@@ -615,6 +622,7 @@ class PluginRegistrationTests(unittest.TestCase):
         async def scenario():
             adapter = object.__new__(LinearPlatformAdapter)
             adapter._session_locks = {}
+            adapter._issue_locks = {}
             adapter._ledger = mock.Mock()
             adapter._ledger.has_session_closure.return_value = True
             adapter.get_channel_route_target = mock.AsyncMock(return_value={
@@ -643,6 +651,7 @@ class PluginRegistrationTests(unittest.TestCase):
         async def scenario():
             adapter = object.__new__(LinearPlatformAdapter)
             adapter._session_locks = {}
+            adapter._issue_locks = {}
             adapter._linear = mock.Mock(
                 actor_id="agent-derya",
                 get_channel_routing_context=mock.AsyncMock(return_value={
@@ -2162,14 +2171,26 @@ class LedgerTests(unittest.TestCase):
             self.assertIsNone(ledger.get_direct_activation_event("issue-direct-prune"))
             ledger.close()
 
-    def test_issue_session_binding_is_durable_and_tracks_latest_accepted_creation(self):
+    def test_issue_session_binding_is_durable_and_compare_and_swap(self):
         with tempfile.TemporaryDirectory() as td:
             path = str(Path(td) / "bindings.sqlite3")
             ledger = DeliveryLedger(path)
-            ledger.bind_issue_session("issue-1", "session-1", now=100)
-            self.assertEqual(ledger.get_issue_session("issue-1"), "session-1")
-            ledger.bind_issue_session("issue-1", "session-2", now=101)
-            ledger.close()
+            self.assertTrue(ledger.bind_issue_session("issue-1", "session-1", now=100))
+            other = DeliveryLedger(path, startup_recovery=False)
+            try:
+                self.assertFalse(other.bind_issue_session("issue-1", "session-2", now=101))
+                self.assertTrue(other.bind_issue_session("issue-1", "session-1", now=101))
+                self.assertTrue(ledger.bind_issue_session(
+                    "issue-1", "session-2", expected_session_id="session-1", now=102,
+                ))
+                self.assertFalse(other.bind_issue_session(
+                    "issue-1", "session-3", expected_session_id="session-1", now=103,
+                ))
+                self.assertEqual(ledger.get_session_issue("session-2"), "issue-1")
+                self.assertIsNone(ledger.get_session_issue("session-1"))
+            finally:
+                other.close()
+                ledger.close()
 
             reopened = DeliveryLedger(path)
             self.assertEqual(reopened.get_issue_session("issue-1"), "session-2")
@@ -3223,10 +3244,18 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         later_response = await self.adapter._handle_webhook(self.request_for(later))
+        self.assertEqual(json.loads(later_response.text)["status"], "issue_session_active")
+        self.assertEqual(len(self.events), 1)
+        self.adapter._linear.delivery_contexts["session-agent-created-direct"] = {
+            "id": "session-agent-created-direct", "issue_id": issue_id,
+            "app_user_id": "agent-derya", "status": "complete",
+        }
+        later["agentSession"]["id"] = "session-agent-created-direct-after-terminal"
+        later_response = await self.adapter._handle_webhook(self.request_for(later))
         self.assertEqual(json.loads(later_response.text)["status"], "accepted")
         self.assertEqual(len(self.events), 2)
         self.assertEqual(
-            self.events[-1].source.chat_id, "session-agent-created-direct-later"
+            self.events[-1].source.chat_id, "session-agent-created-direct-after-terminal"
         )
 
     async def test_direct_dispatch_exception_is_durably_ambiguous_not_replayed(self):
@@ -5280,6 +5309,196 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_response.status, 200)
         self.assertEqual(second_response.status, 200)
         self.assertEqual([event.source.chat_id for event in self.events], ["session-1", "session-2"])
+
+    async def test_signed_distinct_created_sessions_keep_one_issue_binding(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        issue_id = "issue-single-active"
+        first = self.make_payload(agentSession={"id": "session-first", "issue": {"id": issue_id}})
+        second = self.make_payload(agentSession={"id": "session-second", "issue": {"id": issue_id}})
+        self.adapter._linear.delivery_contexts["session-first"] = {
+            "id": "session-first", "issue_id": issue_id,
+            "app_user_id": "agent-derya", "status": "active",
+        }
+        entered, release = asyncio.Event(), asyncio.Event()
+        running, finish = asyncio.Event(), asyncio.Event()
+
+        async def execute(event):
+            self.events.append(event)
+            running.set()
+            await asyncio.wait_for(finish.wait(), 2)
+
+        # Exercise the serving runtime's real background admission, not a mocked
+        # handle_message. Only the model handler and remote Linear I/O are fake.
+        del self.adapter.handle_message
+        self.adapter.set_message_handler(execute)
+        self.adapter._native_goal_continuation_enabled = False
+
+        async def blockers(_issue_id):
+            if not entered.is_set():
+                entered.set()
+                await asyncio.wait_for(release.wait(), 2)
+            return []
+
+        app = web.Application()
+        app.router.add_post("/linear/webhook", self.adapter._handle_webhook)
+        try:
+            async with TestClient(TestServer(app)) as client:
+                async def post(payload):
+                    request = self.request_for(payload)
+                    response = await asyncio.wait_for(client.post(
+                        "/linear/webhook", data=await request.read(), headers=request.headers,
+                    ), 2)
+                    self.assertEqual(response.status, 200)
+                    return (await response.json())["status"]
+
+                with mock.patch.object(self.adapter._linear, "get_open_blockers", side_effect=blockers):
+                    first_task = asyncio.create_task(post(first))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 2)
+                        second_status = await post(second)
+                        # Terminal upstream is insufficient while local intake
+                        # or execution still owns the old session.
+                        self.adapter._linear.delivery_contexts["session-first"]["status"] = "complete"
+                        third = self.make_payload(agentSession={
+                            "id": "session-third", "issue": {"id": issue_id},
+                        })
+                        third_status = await post(third)
+                    finally:
+                        release.set()
+                        first_status = await asyncio.wait_for(first_task, 2)
+                await asyncio.wait_for(running.wait(), 2)
+                self.assertEqual([event.source.chat_id for event in self.events], ["session-first"])
+                self.assertEqual(len(self.adapter._active_sessions), 1)
+                self.assertEqual((first_status, second_status, third_status),
+                                 ("accepted", "issue_session_active", "issue_session_active"))
+                self.assertEqual(await post(second), "duplicate")
+                fourth = self.make_payload(agentSession={
+                    "id": "session-fourth", "issue": {"id": issue_id},
+                })
+                self.assertEqual(await post(fourth), "issue_session_active")
+                prompted = self.make_payload(
+                    action="prompted", agentActivity={"id": "prompt-second", "body": "continue"},
+                    agentSession=second["agentSession"],
+                )
+                self.assertEqual(await post(prompted), "issue_session_active")
+                self.assertEqual(self.adapter._ledger.get_issue_session(issue_id), "session-first")
+                self.assertEqual(self.adapter._ledger.get_session_issue("session-first"), issue_id)
+                self.assertIsNone(self.adapter._ledger.get_session_issue("session-second"))
+                self.adapter._native_goal_continuation_enabled = True
+                with mock.patch.object(self.adapter, "_cancel_linear_session_processing", new=mock.AsyncMock()) as cancel:
+                    await self.adapter._stop_bound_turns(issue_id, "linear_issue_canceled")
+                cancel.assert_awaited_once_with("session-first")
+                self.adapter._native_goal_continuation_enabled = False
+        finally:
+            release.set()
+            finish.set()
+            await asyncio.wait_for(asyncio.gather(*self.adapter._session_tasks.values()), 2)
+        self.assertEqual(self.adapter._inflight_session_deliveries, {})
+
+    async def test_created_rotation_requires_exact_terminal_old_session_after_restart(self):
+        for status in ("pending", "active", "awaitingInput", "stale", "", "complete", "error"):
+            for manager in (False, True):
+                with self.subTest(status=status, manager=manager):
+                    issue_id = f"issue-rotation-{status}-{manager}"
+                    old, new = f"old-{issue_id}", f"new-{issue_id}"
+                    self.adapter._ledger.bind_issue_session(issue_id, old)
+                    if manager:
+                        self.adapter._ledger.claim_manager_activation(issue_id, f"activation-{issue_id}", {})
+                        self.adapter._ledger.mark_manager_activation(issue_id, "session_started", session_id=old)
+                    path = str(self.adapter._ledger.path)
+                    self.adapter._ledger.close()
+                    self.adapter._ledger = DeliveryLedger(path)
+                    self.adapter._linear.delivery_contexts[old] = {
+                        "id": old, "issue_id": issue_id, "app_user_id": "agent-derya", "status": status,
+                    }
+                    before = len(self.events)
+                    response = await self.adapter._handle_webhook(self.request_for(self.make_payload(
+                        agentSession={"id": new, "issue": {"id": issue_id}},
+                    )))
+                    allowed = status in {"complete", "error"}
+                    self.assertEqual(json.loads(response.text)["status"], "accepted" if allowed else "issue_session_active")
+                    self.assertEqual(len(self.events) - before, int(allowed))
+                    self.assertEqual(self.adapter._ledger.get_issue_session(issue_id), new if allowed else old)
+
+    async def test_created_rotation_fails_closed_on_old_identity_or_read_failure(self):
+        for override in ({"id": "wrong"}, {"issue_id": "wrong"}, {"app_user_id": "wrong"}, {"app_user_id": ""}):
+            with self.subTest(override=override):
+                self.adapter._ledger.bind_issue_session("issue-identity", "old-identity")
+                self.adapter._linear.delivery_contexts["old-identity"] = {
+                    "id": "old-identity", "issue_id": "issue-identity",
+                    "app_user_id": "agent-derya", "status": "complete", **override,
+                }
+                response = await self.adapter._handle_webhook(self.request_for(self.make_payload(
+                    agentSession={"id": f"new-{next(iter(override))}-{override[next(iter(override))]}", "issue": {"id": "issue-identity"}},
+                )))
+                self.assertEqual(json.loads(response.text)["status"], "issue_session_active")
+                self.assertEqual(self.adapter._ledger.get_issue_session("issue-identity"), "old-identity")
+        payload = self.make_payload(agentSession={"id": "new-read-failure", "issue": {"id": "issue-identity"}})
+        with mock.patch.object(self.adapter._linear, "get_agent_session_delivery_context", new=mock.AsyncMock(
+            side_effect=LinearAPIError("temporary read failure", retryable=True),
+        )):
+            response = await self.adapter._handle_webhook(self.request_for(payload))
+        self.assertEqual(response.status, 503)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.adapter._ledger.get_issue_session("issue-identity"), "old-identity")
+
+    async def test_created_rotation_cas_preserves_binding_changed_during_vendor_read(self):
+        issue_id, old = "issue-store-race", "old-store-race"
+        self.adapter._ledger.bind_issue_session(issue_id, old)
+        other = DeliveryLedger(str(self.adapter._ledger.path), startup_recovery=False)
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def read_terminal(session_id):
+            self.assertEqual(session_id, old)
+            # Pause before the SQLite CAS, never inside the contested store lock.
+            started.set()
+            await asyncio.wait_for(release.wait(), 2)
+            return {"id": old, "issue_id": issue_id,
+                    "app_user_id": "agent-derya", "status": "complete"}
+
+        payload = self.make_payload(agentSession={
+            "id": "stale-candidate", "issue": {"id": issue_id},
+        })
+        with mock.patch.object(self.adapter._linear, "get_agent_session_delivery_context", side_effect=read_terminal):
+            task = asyncio.create_task(self.adapter._handle_webhook(self.request_for(payload)))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                self.assertTrue(other.bind_issue_session(
+                    issue_id, "concurrent-winner", expected_session_id=old,
+                ))
+            finally:
+                release.set()
+                try:
+                    response = await asyncio.wait_for(task, 2)
+                finally:
+                    other.close()
+        self.assertEqual(json.loads(response.text)["status"], "issue_session_active")
+        self.assertEqual(self.adapter._ledger.get_issue_session(issue_id), "concurrent-winner")
+        self.assertEqual(self.events, [])
+
+    async def test_created_rotation_does_not_orphan_resumable_waits(self):
+        for kind in ("dependency", "planned", "direct"):
+            with self.subTest(kind=kind):
+                issue_id, old = f"issue-wait-{kind}", f"old-wait-{kind}"
+                ledger = self.adapter._ledger
+                ledger.bind_issue_session(issue_id, old)
+                self.adapter._linear.delivery_contexts[old] = {
+                    "id": old, "issue_id": issue_id,
+                    "app_user_id": "agent-derya", "status": "complete",
+                }
+                if kind == "dependency":
+                    ledger.put_wait(old, issue_id, old, {}, [{"id": "blocker"}])
+                elif kind == "planned":
+                    ledger.put_activation_wait(old, issue_id, old, {})
+                else:
+                    ledger.put_direct_activation_event(issue_id, old, old, {})
+                response = await self.adapter._handle_webhook(self.request_for(self.make_payload(
+                    agentSession={"id": f"new-{kind}", "issue": {"id": issue_id}},
+                )))
+                self.assertEqual(json.loads(response.text)["status"], "issue_session_active")
+                self.assertEqual(ledger.get_issue_session(issue_id), old)
+        self.assertEqual(self.events, [])
 
     async def test_same_session_accepts_distinct_prompt_activity_ids(self):
         first = self.make_payload(
