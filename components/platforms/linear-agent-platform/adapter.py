@@ -4168,6 +4168,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         source_profile = str(getattr(event.source, "profile", "") or "").strip()
         if profile and source_profile and profile != source_profile:
             return
+        # A queued recursive turn can reuse this event. Keep completed owners
+        # until the event retires; a late old end hook cannot erase a newer fence.
+        completed_owners = getattr(event, "_linear_completed_turn_owners", None)
+        if completed_owners is None:
+            completed_owners = event._linear_completed_turn_owners = set()
+        completed_owners.add((str(hermes_session_id or ""), str(turn_id or "")))
         self._completed_turn_results[str(chat_id)] = {
             "completed": bool(completed),
             "failed": bool(failed),
@@ -5965,7 +5971,21 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 in {"completed", "canceled", "cancelled"}
             ):
                 raise LinearAPIError("Linear clarify live issue ownership check failed", retryable=False)
-            if self._ledger.has_session_closure(str(chat_id)) or str(chat_id) in self._completed_turn_results:
+            # Core captures this immutable pair before bounded hooks can yield.
+            # Missing ownership (including older cores) must never use latest progress.
+            owner = getattr(entry, "turn_owner", None)
+            if (not isinstance(owner, tuple) or len(owner) != 2
+                    or not all(isinstance(value, str) and value for value in owner)):
+                raise LinearAPIError("Linear clarify native turn owner is missing or malformed", retryable=False)
+            if not self._clarify_owner_is_live(event, *owner):
+                raise LinearAPIError("Linear clarify turn owner is no longer live", retryable=False)
+            store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
+            lookup = getattr(store, "lookup_by_session_key", None)
+            live_session = await lookup(str(session_key)) if callable(lookup) else None
+            if (str(getattr(live_session, "session_key", "")) != str(session_key)
+                    or str(getattr(live_session, "session_id", "")) != owner[0]):
+                raise LinearAPIError("Linear clarify Hermes session rotated", retryable=False)
+            if self._ledger.has_session_closure(str(chat_id)):
                 raise LinearAPIError("Linear clarify is fenced by terminal turn state", retryable=False)
 
             item_id = f"activity:clarify:{clarify_id}"
@@ -5979,7 +5999,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 )
                 if (
                     current_event is not event
-                    or current_entry is None
+                    or not self._clarify_owner_is_live(event, *owner)
+                    or current_entry is not entry
                     or current_entry.event.is_set()
                     or str(current_entry.clarify_id) != str(clarify_id)
                     or str(current_entry.question) != str(question)
@@ -6003,6 +6024,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         "clarify_id": str(clarify_id),
                         "clarify_session_key": str(session_key),
                         "clarify_question": str(question),
+                        "clarify_hermes_session_id": owner[0],
+                        "clarify_hermes_turn_id": owner[1],
                         "clarify_turn_key": str(event.metadata.get("linear_delivery_key") or event.message_id or event.metadata.get("linear_clarify_turn_key") or ""),
                     },
                 )
@@ -6505,6 +6528,20 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and not bool(payload.get("clarify_resolved"))
         )
 
+    def _clarify_owner_is_live(self, event: MessageEvent, session_id: str, turn_id: str) -> bool:
+        """Validate captured native identity against current progress and terminal state."""
+        cached = self._completed_turn_results.get(str(event.source.chat_id))
+        return bool(
+            session_id and turn_id
+            and str(event.metadata.get("gateway_session_id") or "") == session_id
+            and self._current_progress_turn_key(str(event.source.chat_id)) == turn_id
+            and (session_id, turn_id) not in getattr(event, "_linear_completed_turn_owners", ())
+            and (cached is None or (
+                cached.get("session_id") == session_id
+                and cached.get("turn_id") and cached["turn_id"] != turn_id
+            ))
+        )
+
     def _clarify_outbox_is_live(self, item: OutboxItem) -> bool:
         """Allow clarification delivery only with its exact live waiter/turn."""
         payload = item.payload
@@ -6525,6 +6562,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and str(pending.clarify_id) == clarify_id
             and str(pending.question) == str(payload.get("clarify_question") or "")
             and active is not None
+            and getattr(pending, "turn_owner", None) == (
+                payload.get("clarify_hermes_session_id"), payload.get("clarify_hermes_turn_id"))
+            and self._clarify_owner_is_live(
+                active, str(payload.get("clarify_hermes_session_id") or ""),
+                str(payload.get("clarify_hermes_turn_id") or ""),
+            )
             and str(active.metadata.get("linear_delivery_key") or active.message_id or active.metadata.get("linear_clarify_turn_key") or "") == turn_key
         )
 

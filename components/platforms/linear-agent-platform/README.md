@@ -657,6 +657,22 @@ Run with an immutable cutoff so repeated runs over the same validated evidence e
 
 The two complete issue-and-comment evidence passes and the final ordered team-membership pass must match exactly; any identity, revision, comment, relation, attachment, ordering, membership, or other evidence drift aborts before classification and manifest writing. Each comment must have an ID, body, app-authorship classification, creation timestamp, and update timestamp. Missing, malformed, future, or pre-issue comment timestamps fail closed. Linear may report a comment `updatedAt` a fraction of a second before its `createdAt`, so those two vendor timestamps are validated independently and activity uses their maximum. Issue activity is the latest issue creation, update, completion/cancellation, comment creation, or comment update timestamp. Validation freezes all issue, comment, successor, cutoff, age, and team evidence into one immutable envelope; classification owns that envelope, and manifest construction accepts only the immutable classification result, never the mutable API inventory. The manifest sorts candidates by identifier and ID, and its `sha256` is computed from canonical JSON for every other manifest field. Terminal state, a coherent matching terminal timestamp no later than the immutable cutoff, minimum age, the verified successor, and an empty relationship graph are all required. Every issue referenced as a valid verified successor is retained, including in successor chains and cycles. Active/nonterminal issues, Operations inbox markers, human or ambiguous comment authorship, decision/security/incident terms, any parent/child/relation, attachment, document, HTTP or non-HTTP canonical pointers, young records, and malformed evidence are protected. Review the manifest; it is evidence only and is never input to an automatic deletion or archive workflow.
 
+## Native clarify core dependency
+
+Native goal-continuation clarify requires Hermes to capture `(session_id, turn_id)`
+and the clarify callback before pre-tool hooks, then pass that immutable pair as
+`turn_owner` through `TurnRunner._clarify_callback_sync` to the clarify registry.
+The adapter validates `entry.turn_owner` against current progress, session rotation,
+completed/stopped owners, and closure state, and rechecks it before enqueue and
+outbox delivery. A queued follow-up may clarify after an earlier turn completes;
+a delayed callback from that earlier turn may not.
+
+**Do not deploy this plugin patch alone on an older core.** In particular, core
+`5cc98f1f2ce11bc4c4368ae7e7fabf9c86e81abe` without the native owner patch is
+incompatible: missing/malformed owners fail closed, with no native elicitation.
+There is no ContextVar or latest-progress fallback. Offline dispatcher/callback
+checks do not replace live delivery, reply, and Stop acceptance for the paired release.
+
 ## Tests
 
 Use the Hermes-bundled Python; the system Python may not include gateway modules:

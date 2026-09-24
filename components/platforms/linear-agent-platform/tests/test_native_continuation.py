@@ -807,7 +807,12 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._linear.create_activity = create_activity
 
         async def handler(received):
-            clarify_gateway.register("native-wake-question", key, "Fixture question", None)
+            # This handler stands in for the model turn; the dispatcher/callback
+            # ownership handoff itself is exercised in test_native_clarify.
+            self.adapter.open_progress_turn("linear-session", "native-wake-turn")
+            clarify_gateway.register(
+                "native-wake-question", key, "Fixture question", None,
+                turn_owner=("hermes-session", "native-wake-turn"))
             observed.append(await self.adapter.send_clarify(
                 "linear-session", "Fixture question", None, "native-wake-question", key
             ))
