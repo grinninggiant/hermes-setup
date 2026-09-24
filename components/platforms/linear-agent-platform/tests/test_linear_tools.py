@@ -18,6 +18,8 @@ if str(PLUGIN_ROOT) not in sys.path:
 from acceptance import acceptance_criteria  # noqa: E402
 from ledger import DeliveryLedger  # noqa: E402
 from linear_tools import (  # noqa: E402
+    _OPS200_ISSUE_ID,
+    _OPS200_SOUL_TEXT,
     _canonicalize_vendor_markdown,
     _direct_instruction_context,
     _delegate_acceptance_reader_from_outbound,
@@ -1828,6 +1830,7 @@ Stale human edit körlemesine ezilmez. Drift durumunda mutation fail-closed olur
         evidence_resolver: Any = "auto",
         expected_agent_session_id: str | None = "session-current",
         expected_hermes_turn_id: str | None = "turn-current",
+        issue_id: str | None = None,
     ) -> tuple[dict, FakeMCP, FakeGraphQL]:
         mcp = FakeMCP()
         graphql = FakeGraphQL(plan_contexts=contexts)
@@ -1852,7 +1855,7 @@ Stale human edit körlemesine ezilmez. Drift durumunda mutation fail-closed olur
             resolved_by_pointer = {
                 item["evidence_pointer"]: {
                     "evidence_pointer": item["evidence_pointer"],
-                    "issue_id": "issue-1",
+                    "issue_id": issue_id or "issue-1",
                     "delegate_id": "actor-1",
                     "agent_session_id": "session-current",
                     "hermes_turn_id": "turn-current",
@@ -1868,7 +1871,7 @@ Stale human edit körlemesine ezilmez. Drift durumunda mutation fail-closed olur
             profile_id="general",
             vendor_tool="save_issue",
             arguments={
-                "id": "OPS-105",
+                "id": issue_id or "OPS-105",
                 "target_team_id": "ops-1",
                 "operation_key": operation_key,
                 "lifecycle_action": "mark_acceptance",
@@ -3140,11 +3143,10 @@ payload
             1,
         )
 
-    async def test_mark_acceptance_backfills_pass_evidence_for_prechecked_criterion_without_vendor_mutation(self):
+    async def test_mark_acceptance_rejects_unrelated_prechecked_criterion_without_vendor_mutation(self):
         description = "## Kabul kriterleri\n- [x] Human prechecked criterion"
-        criterion = acceptance_criteria(description)[0]
         evidence = [{
-            "criterion_hash": criterion.criterion_hash,
+            "criterion_hash": acceptance_criteria(description)[0].criterion_hash,
             "test_class": "integration",
             "evidence_digest": "c" * 64,
             "evidence_pointer": "linear://activity/prechecked-proof",
@@ -3160,13 +3162,137 @@ payload
             evidence=evidence,
         )
 
-        self.assertEqual(result["status"], "already_accepted")
+        self.assertEqual(result.get("reason"), "acceptance_evidence_invalid", result)
         self.assertEqual([call for call in mcp.calls if call[0] == "save_issue"], [])
         self.assertEqual(
             self.acceptance_ledger.acceptance_evidence_hashes(
                 "issue-1", "actor-1", accepted_revision="2026-08-09T18:00:00.000Z"
             ),
+            set(),
+        )
+
+    async def test_mark_acceptance_backfills_checked_proof_in_mixed_list(self):
+        description = f"## Kabul kriterleri\n- [x] {_OPS200_SOUL_TEXT}\n- [ ] Pending proof"
+        criterion = acceptance_criteria(description)[0]
+        revision = "2026-08-09T18:00:00.000Z"
+        evidence = [{
+            "criterion_hash": criterion.criterion_hash,
+            "test_class": "integration",
+            "evidence_digest": "c" * 64,
+            "evidence_pointer": "linear://activity/mixed-proof",
+            "observed_revision": revision,
+            "result": "PASS",
+            "timestamp": "2026-08-09T18:00:01.000Z",
+        }]
+        before = {**self.plan_context(description=description), "id": _OPS200_ISSUE_ID}
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key="mixed-backfill",
+            contexts=[before, before],
+            description=description,
+            evidence=evidence,
+            issue_id=_OPS200_ISSUE_ID,
+        )
+        self.assertEqual(result.get("status"), "already_accepted", result)
+        self.assertFalse(any(call[0] == "save_issue" for call in mcp.calls))
+        self.assertEqual(
+            self.acceptance_ledger.acceptance_evidence_hashes(
+                _OPS200_ISSUE_ID, "actor-1", accepted_revision=revision),
             {criterion.criterion_hash},
+        )
+
+    async def test_mark_acceptance_backfill_is_only_ops200_soul(self):
+        for label, issue_id, text in (
+            ("other_issue", "issue-1", _OPS200_SOUL_TEXT),
+            ("other_criterion", _OPS200_ISSUE_ID, "Unrelated checked proof"),
+        ):
+            with self.subTest(label=label):
+                description = f"## Kabul kriterleri\n- [x] {text}\n- [ ] Pending proof"
+                criterion = acceptance_criteria(description)[0]
+                before = {**self.plan_context(description=description), "id": issue_id}
+                result, mcp, _graphql = await self.run_acceptance_action(
+                    operation_key=f"backfill-scope-{label}",
+                    contexts=[before, before],
+                    description=description,
+                    issue_id=issue_id,
+                    evidence=[{
+                        "criterion_hash": criterion.criterion_hash,
+                        "test_class": "integration",
+                        "evidence_digest": "f" * 64,
+                        "evidence_pointer": f"linear://activity/{label}",
+                        "observed_revision": before["updatedAt"],
+                        "result": "PASS",
+                        "timestamp": "2026-08-09T18:00:01.000Z",
+                    }],
+                )
+                self.assertEqual(result.get("reason"), "acceptance_evidence_invalid", result)
+                self.assertFalse(any(call[0] == "save_issue" for call in mcp.calls))
+                self.assertEqual(
+                    self.acceptance_ledger.acceptance_evidence_hashes(
+                        issue_id, "actor-1", accepted_revision=before["updatedAt"],
+                    ),
+                    set(),
+                )
+
+    async def test_mark_acceptance_backfill_rechecks_authority_before_persist(self):
+        description = f"## Kabul kriterleri\n- [x] {_OPS200_SOUL_TEXT}\n- [ ] Pending proof"
+        criterion = acceptance_criteria(description)[0]
+        revision = "2026-08-09T18:00:00.000Z"
+        evidence = [{
+            "criterion_hash": criterion.criterion_hash,
+            "test_class": "integration",
+            "evidence_digest": "d" * 64,
+            "evidence_pointer": "linear://activity/drift-proof",
+            "observed_revision": revision,
+            "result": "PASS",
+            "timestamp": "2026-08-09T18:00:01.000Z",
+        }]
+        before = {**self.plan_context(description=description), "id": _OPS200_ISSUE_ID}
+        for label, drift in (
+            ("delegate", {**before, "delegate": {"id": "other-actor"}}),
+            ("revision", {**before, "updatedAt": "2026-08-09T18:01:00.000Z"}),
+        ):
+            with self.subTest(label=label):
+                result, mcp, _graphql = await self.run_acceptance_action(
+                    operation_key=f"backfill-drift-{label}",
+                    contexts=[before, drift],
+                    description=description,
+                    evidence=evidence,
+                    issue_id=_OPS200_ISSUE_ID,
+                )
+                self.assertEqual(result.get("reason"), "lifecycle_pre_dispatch_changed", result)
+                self.assertFalse(any(call[0] == "save_issue" for call in mcp.calls))
+                self.assertEqual(
+                    self.acceptance_ledger.acceptance_evidence_hashes(
+                        _OPS200_ISSUE_ID, "actor-1", accepted_revision=revision),
+                    set(),
+                )
+
+    async def test_mark_acceptance_all_checked_backfill_rechecks_delegate(self):
+        description = f"## Kabul kriterleri\n- [x] {_OPS200_SOUL_TEXT}"
+        criterion = acceptance_criteria(description)[0]
+        before = {**self.plan_context(description=description), "id": _OPS200_ISSUE_ID}
+        drift = {**before, "delegate": {"id": "other-actor"}}
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key="all-checked-backfill-drift",
+            contexts=[before, drift],
+            description=description,
+            issue_id=_OPS200_ISSUE_ID,
+            evidence=[{
+                "criterion_hash": criterion.criterion_hash,
+                "test_class": "integration",
+                "evidence_digest": "e" * 64,
+                "evidence_pointer": "linear://activity/all-checked-drift",
+                "observed_revision": before["updatedAt"],
+                "result": "PASS",
+                "timestamp": "2026-08-09T18:00:01.000Z",
+            }],
+        )
+        self.assertEqual(result.get("reason"), "lifecycle_pre_dispatch_changed", result)
+        self.assertFalse(any(call[0] == "save_issue" for call in mcp.calls))
+        self.assertEqual(
+            self.acceptance_ledger.acceptance_evidence_hashes(
+                _OPS200_ISSUE_ID, "actor-1", accepted_revision=before["updatedAt"]),
+            set(),
         )
 
     async def test_specialist_completion_authority_is_general_manager_only(self):
