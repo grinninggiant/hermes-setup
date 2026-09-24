@@ -270,7 +270,7 @@ class RegistrationTests(unittest.TestCase):
         register_outbound_tools(ctx, extra=self.extra(mutations=True))
         self.assertEqual(
             set(ctx.tools),
-            {"linear_get_issue", "linear_list_issues", "linear_save_issue", "linear_save_comment", "linear_verify_ops200_soul"},
+            {"linear_get_issue", "linear_list_issues", "linear_save_issue", "linear_save_comment", "linear_verify_ops200_soul", "linear_verify_ops200_human_state"},
         )
         issue_properties = ctx.tools["linear_save_issue"]["schema"]["parameters"]["properties"]
         self.assertEqual(issue_properties["priority"], {"type": "number"})
@@ -378,7 +378,7 @@ class RegistrationTests(unittest.TestCase):
         register_outbound_tools(ctx, extra=self.extra(mutations=True))
         self.assertEqual(
             set(ctx.tools),
-            {"linear_get_issue", "linear_list_issues", "linear_save_issue", "linear_save_comment", "linear_verify_ops200_soul"},
+            {"linear_get_issue", "linear_list_issues", "linear_save_issue", "linear_save_comment", "linear_verify_ops200_soul", "linear_verify_ops200_human_state"},
         )
         self.assertEqual(ctx.hooks, {})
 

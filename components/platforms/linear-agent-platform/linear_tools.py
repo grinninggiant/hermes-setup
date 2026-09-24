@@ -111,6 +111,7 @@ LEGACY_QUOTA_ADMISSION_LEDGER_PREFIX = "quota-admission:v1:"
 QUOTA_ADMISSION_LEDGER_PREFIX = "quota-admission:v2:"
 _OPS200_ISSUE_ID = "d29003de-4f24-43a0-8add-d42fa23fc79f"
 _OPS200_SOUL_TEXT = "9/9 SOUL fresh read-back’te exact delegate-owned acceptance kuralını taşır."
+_OPS200_HUMAN_STATE_TEXT = "Human-owned issue state’i korunur; agent Done girişimleri reddedilir."
 _OPS200_SOUL_LINE_HASHES = (
     (b"mark_acceptance", "737a77b5c408f257b2f6e3b095887f47bdb266bb951a1bf5ded6a32a21c69393"),
     (b"Acceptance checkbox varsa", "25cac62c8a8e25b62329726d8aa34c862bf3bd436d1234ccbd4672e4d04c6cab"),
@@ -2309,6 +2310,59 @@ def _delegate_acceptance_reader_from_outbound(
     return read
 
 
+async def _ops200_human_state_readback(
+    graphql_client: LinearClient, policy: OutboundPolicy, issue: dict[str, Any]
+) -> str | None:
+    """Probe installed guards against live, human-owned OPS-200 without dispatching a write."""
+    issue_id = issue.get("id")
+    actor = str(graphql_client.actor_id or "")
+    if issue_id != _OPS200_ISSUE_ID or not actor:
+        return None
+    plan = await graphql_client.get_issue_plan_context(issue_id)
+    child = await graphql_client.get_issue_child_terminal_context(issue_id)
+    assignee = plan.get("assignee") or {}
+    state = plan.get("state") or {}
+    team_id = str((plan.get("team") or {}).get("id") or "")
+    revision = str(issue.get("updatedAt") or "")
+    if not (
+        plan.get("id") == child.get("id") == issue_id
+        and revision and revision == plan.get("updatedAt") == child.get("updatedAt")
+        and plan.get("description") == child.get("description") == issue.get("description")
+        and team_id in policy.allowed_team_ids
+        and team_id == str((child.get("team") or {}).get("id") or "")
+        and str((plan.get("delegate") or {}).get("id") or "") == actor
+        and str((child.get("delegate") or {}).get("id") or "") == actor
+        and str(assignee.get("id") or "") not in {"", actor}
+        and assignee.get("app") is False
+        and str(state.get("id") or "") == str((child.get("state") or {}).get("id") or "")
+        and str(state.get("type") or "").casefold() in {"backlog", "unstarted", "started"}
+        and str(state.get("type") or "").casefold()
+        == str((child.get("state") or {}).get("type") or "").casefold()
+        and not child.get("parent")
+    ):
+        return None
+    done = policy.evaluate(
+        "save_issue", {"id": issue_id, "target_team_id": team_id,
+                       "operation_key": "ops200-read-only-probe", "state": "Done"},
+        live_actor_id=actor, live_organization_id=str(graphql_client.organization_id or ""),
+    )
+    transition, child_denial = _evaluate_child_terminal_context(
+        child, action="complete_child", target_team_id=team_id,
+        actor_id=actor, open_actor_session=False,
+    )
+    if (
+        done.action != "deny" or done.reason != "state_transition_not_allowed"
+        or transition is not None or not isinstance(child_denial, dict)
+        or child_denial.get("reason") not in {"child_creator_mismatch", "child_parent_required"}
+    ):
+        return None
+    facts = (issue_id, revision, team_id, str(assignee["id"]), actor,
+             str(state["id"]), str((child.get("creator") or {}).get("id") or ""),
+             hashlib.sha256(str(plan["description"]).encode()).hexdigest(),
+             done.reason, child_denial["reason"])
+    return hashlib.sha256(json.dumps(facts).encode()).hexdigest()
+
+
 def register_outbound_tools(
     ctx,
     *,
@@ -2340,14 +2394,16 @@ def register_outbound_tools(
     issued: dict[str, dict[str, str]] = {}
     issued_lock = threading.Lock()
 
-    def resolve_ops200_soul(pointer: str) -> dict[str, str] | None:
+    def resolve_ops200_evidence(pointer: str) -> dict[str, str] | None:
         with issued_lock:
             metadata = issued.pop(pointer, None)  # single-use even on failed read-back
         if metadata is None or metadata.pop("home", None) != os.environ.get("HERMES_HOME"):
             return None
+        if metadata.pop("kind", None) == "human_state":
+            return metadata if metadata.pop("validated", None) == "1" else None
         return metadata if _ops200_soul_readback() == metadata["evidence_digest"] else None
 
-    evidence_resolver: EvidenceResolver | None = resolve_ops200_soul if profile_id == "general" else None
+    evidence_resolver: EvidenceResolver | None = resolve_ops200_evidence if profile_id == "general" else None
     raw_quota_team_ids = outbound.get("quota_team_ids")
     quota_team_ids = (
         frozenset(raw_quota_team_ids)
@@ -2446,6 +2502,29 @@ def register_outbound_tools(
                         and issue["delegate"].get("id") == graphql.actor_id
                     ):
                         return {"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"}
+                    for envelope in safe_args.get("acceptance_evidence", ()):
+                        if not isinstance(envelope, dict):
+                            continue
+                        pointer = envelope.get("evidence_pointer")
+                        if not isinstance(pointer, str) or not pointer.startswith("artifact://ops200-human-state/"):
+                            continue
+                        with issued_lock:
+                            metadata = issued.get(pointer)
+                        if (
+                            metadata is None or metadata.get("kind") != "human_state"
+                            or metadata.get("validated") != "0"
+                            or metadata.get("agent_session_id") != chat_id
+                            or metadata.get("hermes_turn_id") != turn_id
+                            or metadata.get("observed_revision") != issue.get("updatedAt")
+                        ):
+                            return {"error": "linear_policy_denied", "reason": "acceptance_evidence_invalid"}
+                        digest = await _ops200_human_state_readback(graphql, policy, issue)
+                        if digest is None or not hmac.compare_digest(digest, metadata["evidence_digest"]):
+                            return {"error": "linear_policy_denied", "reason": "acceptance_evidence_invalid"}
+                        with issued_lock:
+                            if issued.get(pointer) is not metadata:
+                                return {"error": "linear_policy_denied", "reason": "acceptance_evidence_invalid"}
+                            metadata["validated"] = "1"
                 diagnostic_stage = "connect"
                 await mcp.connect()
                 diagnostic_stage = "execution"
@@ -2598,12 +2677,13 @@ def register_outbound_tools(
     names = ["linear_get_issue", "linear_list_issues"]
     if mutations_enabled:
         names.extend(allowed_mutation_tools)
+    base_names = names.copy()
     verifier_enabled = profile_id == "general" and mutations_enabled and "linear_save_issue" in allowed_mutation_tools
     if verifier_enabled:
-        names.append("linear_verify_ops200_soul")
+        names.extend(("linear_verify_ops200_soul", "linear_verify_ops200_human_state"))
     if not _tool_names_available(names):
         return
-    for name in names[: -1 if verifier_enabled else None]:
+    for name in base_names:
         vendor_tool, mutation = TOOL_MAP[name]
         ctx.register_tool(
             name=name,
@@ -2656,7 +2736,7 @@ def register_outbound_tools(
                     "delegate_id": graphql.actor_id, "agent_session_id": chat_id,
                     "hermes_turn_id": turn_id, "criterion_hash": criteria[0].criterion_hash,
                     "evidence_digest": digest, "observed_revision": revision, "timestamp": timestamp,
-                    "home": os.environ["HERMES_HOME"],
+                    "home": os.environ["HERMES_HOME"], "kind": "soul",
                 }
                 with issued_lock:
                     issued[pointer] = metadata
@@ -2676,4 +2756,67 @@ def register_outbound_tools(
                     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
             handler=verify_ops200_soul, check_fn=check_fn, is_async=True,
             description="Verify OPS-200 SOUL in the current native session without mutating Linear.", emoji="◩",
+        )
+
+        async def verify_ops200_human_state(args: dict[str, Any], **kwargs) -> str:
+            denied = {"error": "linear_policy_denied", "reason": "ops200_human_state_verification_failed"}
+            invocation = _acceptance_invocation_context(profile_id, kwargs)
+            if invocation is None or args:
+                return json.dumps({"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"})
+            chat_id, turn_id = invocation
+            graphql = LinearClient(oauth_store=LinearOAuthStore(oauth_file))
+            try:
+                await graphql.connect()
+                context = await graphql.get_agent_turn_context(chat_id)
+                issue = context.get("issue") if isinstance(context, dict) else None
+                criteria = acceptance_criteria(str(issue.get("description") or "")) if isinstance(issue, dict) else ()
+                matches = [criterion for criterion in criteria if criterion.text == _OPS200_HUMAN_STATE_TEXT]
+                if not (
+                    isinstance(issue, dict) and context.get("id") == chat_id
+                    and context.get("status") == "active"
+                    and context.get("app_user_id") == graphql.actor_id
+                    and issue.get("id") == _OPS200_ISSUE_ID
+                    and issue.get("identifier") == "OPS-200"
+                    and (issue.get("delegate") or {}).get("id") == graphql.actor_id
+                    and len(matches) == 1
+                ):
+                    return json.dumps(denied)
+                revision = str(issue.get("updatedAt") or "")
+                try:
+                    observed = datetime.fromisoformat(revision.replace("Z", "+00:00"))
+                except (AttributeError, ValueError):
+                    return json.dumps(denied)
+                if observed.tzinfo is None:
+                    return json.dumps(denied)
+                digest = await _ops200_human_state_readback(graphql, policy, issue)
+                if digest is None:
+                    return json.dumps(denied)
+                pointer = "artifact://ops200-human-state/" + secrets.token_urlsafe(32)
+                timestamp = datetime.now(timezone.utc).isoformat()
+                metadata = {
+                    "evidence_pointer": pointer, "issue_id": issue["id"],
+                    "delegate_id": graphql.actor_id, "agent_session_id": chat_id,
+                    "hermes_turn_id": turn_id, "criterion_hash": matches[0].criterion_hash,
+                    "evidence_digest": digest, "observed_revision": revision,
+                    "timestamp": timestamp, "home": os.environ["HERMES_HOME"],
+                    "kind": "human_state", "validated": "0",
+                }
+                with issued_lock:
+                    issued[pointer] = metadata
+                    if len(issued) > 32:
+                        issued.pop(next(iter(issued)))
+                return json.dumps({key: metadata[key] for key in (
+                    "criterion_hash", "evidence_digest", "evidence_pointer", "observed_revision", "timestamp",
+                )} | {"test_class": "runtime", "result": "PASS"})
+            except Exception:
+                return json.dumps(denied)
+            finally:
+                await graphql.close()
+
+        ctx.register_tool(
+            name="linear_verify_ops200_human_state", toolset="linear",
+            schema={"name": "linear_verify_ops200_human_state", "description": "Read-only OPS-200 human-owned state and guard proof in the current AgentSession.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
+            handler=verify_ops200_human_state, check_fn=check_fn, is_async=True,
+            description="Verify human-owned OPS-200 state without dispatching a state mutation.", emoji="◩",
         )
