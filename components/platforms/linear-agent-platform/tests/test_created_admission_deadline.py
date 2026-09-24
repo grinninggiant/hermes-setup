@@ -277,6 +277,29 @@ class CreatedAdmissionDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ledger.delivery_is_done(key))
         self.assertIsNone(ledger.get_outbox_item(thought_id))
 
+    async def test_prune_expires_retry_receipts_without_dropping_acceptance_obligations(self):
+        ledger = self.adapter._ledger
+        now = int(time.time())
+        expired = now - ledger.retention_seconds - 1
+        for key in ("retry-expired", "retry-fresh", "processing-expired", "done-owed"):
+            self.assertTrue(ledger.claim(key, now=now if key == "retry-fresh" else expired))
+        # The separate ingress candidate persists this state on release.
+        ledger._db.execute("UPDATE deliveries SET state = 'retry' WHERE webhook_id LIKE 'retry-%'")
+        ledger._db.commit()
+        ledger.mark_done("done-owed", now=expired, acceptance_thought={
+            "agent_session_id": "linear-session", "issue_id": "issue-164", "include_queued": True,
+        })
+        ledger.close()
+        self.adapter._ledger = ledger = probe.fixtures.DeliveryLedger(str(ledger.path))
+        # Reopen runs startup pruning; a second prune must remain idempotent.
+        ledger.prune(now=now)
+        remaining = {row[0] for row in ledger._db.execute("SELECT webhook_id FROM deliveries")}
+        self.assertEqual(remaining, {"retry-fresh", "processing-expired", "done-owed"})
+        self.assertTrue(ledger.pending_acceptance_thoughts("done-owed"))
+        ledger.cancel_acceptance_thoughts("linear-session")
+        self.assertEqual(ledger.prune(now=now), 1)
+        self.assertFalse(ledger.delivery_is_done("done-owed"))
+
     async def test_stop_suppresses_thought_after_pending_owner_read(self):
         original = self.adapter._linear.get_agent_session_delivery_context
         owner_release = asyncio.Event()
