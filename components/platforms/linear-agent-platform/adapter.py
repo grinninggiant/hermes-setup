@@ -914,11 +914,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
     def _duplicate_delivery_response(self, delivery_key: str) -> web.Response:
         # A processing claim is not durable admission: keep vendor retries alive.
         done = self._ledger is not None and self._ledger.delivery_is_done(delivery_key)
+        if done:
+            self._repair_acceptance_thoughts(delivery_key)
         return web.json_response(
             {"status": "duplicate" if done else "processing"}, status=200 if done else 503
         )
 
     async def _handle_webhook(self, request: web.Request) -> web.Response:
+        read_deadline = asyncio.get_running_loop().time() + 4.0
         raw = await request.read()
         signature = request.headers.get("Linear-Signature", "").strip().lower()
         logger.info(
@@ -1033,7 +1036,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         return web.json_response(
                             {"status": "direct_activation_policy_denied"}, status=200
                         )
-                    context = await self._linear.get_issue_closure_context(issue_id)
+                    async with asyncio.timeout_at(read_deadline):
+                        context = await self._linear.get_issue_closure_context(issue_id)
                     team_id = str((context.get("team") or {}).get("id") or "")
                     direct_authoritative = bool(
                         self._direct_activation_policy_allows(context, direct_grant)
@@ -1061,7 +1065,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 and self._linear.actor_id
                 and hmac.compare_digest(event_actor_id, self._linear.actor_id)
             ):
-                context = await self._linear.get_issue_closure_context(issue_id)
+                async with asyncio.timeout_at(read_deadline):
+                    context = await self._linear.get_issue_closure_context(issue_id)
                 team_id = str((context.get("team") or {}).get("id") or "")
                 owner_id = str((context.get("assignee") or {}).get("id") or "")
                 creator_id = str((context.get("creator") or {}).get("id") or "")
@@ -1220,7 +1225,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 and not direct_activation_created
             ):
                 async with self._issue_lock(issue_id):
-                    context = await self._linear.get_issue_closure_context(issue_id)
+                    async with asyncio.timeout_at(read_deadline):
+                        context = await self._linear.get_issue_closure_context(issue_id)
                     state_type = str((context.get("state") or {}).get("type") or "").casefold()
                     if state_type == "backlog":
                         team_id = str((context.get("team") or {}).get("id") or "")
@@ -1276,7 +1282,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             {"status": "waiting_for_activation"}, status=200
                         )
             if action == "created" and self._dependency_wait_enabled and issue_id:
-                blockers = await self._linear.get_open_blockers(issue_id)
+                async with asyncio.timeout_at(read_deadline):
+                    blockers = await self._linear.get_open_blockers(issue_id)
                 if direct_activation_created:
                     direct_issue_lock = self._issue_lock(issue_id)
                     await direct_issue_lock.acquire()
@@ -1387,13 +1394,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"status": "native_command_requester_unavailable"}, status=200
                 )
-            if not is_stop:
-                self._schedule_thought(
-                    agent_session_id,
-                    issue_id,
-                    delivery_key,
-                    include_queued=action == "created",
-                )
+            if action == "created" and not direct_activation_created:
+                # Bound only a read before admission, never core dispatch or a
+                # manager/Direct ambiguity-fenced claim. Consume it once so a
+                # queued event's later pre-handler check gets a fresh read.
+                event._linear_created_read_deadline = read_deadline
             if direct_activation_created:
                 direct_dispatch_attempted = True
             await self.handle_message(event)
@@ -1406,7 +1411,16 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 self._ledger.mark_manager_activation(
                     issue_id, "session_started", session_id=agent_session_id
                 )
-            self._ledger.mark_done(delivery_key)
+            acceptance_thought = None
+            if (not is_stop and getattr(event, "_gateway_accepted", False)
+                and not getattr(event, "_linear_ingress_vetoed", False)):
+                acceptance_thought = {
+                    "agent_session_id": agent_session_id,
+                    "issue_id": issue_id,
+                    "include_queued": action == "created",
+                }
+            self._ledger.mark_done(delivery_key, acceptance_thought=acceptance_thought)
+            self._repair_acceptance_thoughts(delivery_key)
             logger.info(
                 "[linear] accepted subscription_id=%s delivery_key=%s action=%s signal=%s agent_session_id=%s",
                 webhook_id,
@@ -3099,6 +3113,22 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 logger.exception("[linear] Dependency recovery loop failed: %s", exc)
                 await asyncio.sleep(self._dependency_poll_seconds)
 
+    def _repair_acceptance_thoughts(self, delivery_key: str | None = None) -> None:
+        if self._ledger is None:
+            return
+        for receipt in self._ledger.pending_acceptance_thoughts(delivery_key):
+            key = receipt["delivery_key"]
+            try:
+                self._schedule_thought(
+                    receipt["agent_session_id"], receipt["issue_id"], key,
+                    include_queued=receipt["include_queued"], acceptance_delivery_key=key,
+                )
+                self._ledger.mark_acceptance_thought_scheduled(key)
+            except Exception:
+                if delivery_key is not None:
+                    raise  # HTTP replay stays 503; unrelated outbox work must not stall.
+                logger.warning("[linear] Acceptance thought repair failed key=%s", key, exc_info=True)
+
     def _schedule_thought(
         self,
         agent_session_id: str,
@@ -3107,6 +3137,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         *,
         include_queued: bool,
         body: str | None = None,
+        acceptance_delivery_key: str = "",
     ) -> None:
         if body is None:
             actor_name = getattr(self._linear, "actor_name", None) or "Hermes"
@@ -3116,10 +3147,17 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             "thought",
             body,
             item_key=f"thought:{delivery_key}",
+            metadata={"acceptance_delivery_key": acceptance_delivery_key} if acceptance_delivery_key else None,
         )
         if include_queued:
-            self._enqueue_status(agent_session_id, issue_id, "queued", delivery_key)
-        self._enqueue_status(agent_session_id, issue_id, "running", delivery_key)
+            self._enqueue_status(
+                agent_session_id, issue_id, "queued", delivery_key,
+                acceptance_delivery_key=acceptance_delivery_key,
+            )
+        self._enqueue_status(
+            agent_session_id, issue_id, "running", delivery_key,
+            acceptance_delivery_key=acceptance_delivery_key,
+        )
         task = asyncio.create_task(self._post_thought(agent_session_id))
         bucket = self._ack_tasks.setdefault(agent_session_id, set())
         bucket.add(task)
@@ -3209,6 +3247,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             self._outbox_wakeup.set()
             if terminal_activity:
+                self._ledger.cancel_acceptance_thoughts(agent_session_id)
                 self._notify_terminal_progress_fence(
                     agent_session_id, expected_turn_key=turn_key
                 )
@@ -3278,6 +3317,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 session_id,
                 payload,
             )
+            self._ledger.cancel_acceptance_thoughts(session_id)
             self._outbox_wakeup.set()
             self._notify_terminal_progress_fence(
                 session_id, expected_turn_key=turn_key
@@ -3292,6 +3332,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         issue_id: str,
         execution_state: str,
         delivery_key: str,
+        *,
+        acceptance_delivery_key: str = "",
     ) -> None:
         if (
             not self._status_writeback_enabled
@@ -3307,6 +3349,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "issue_id": issue_id,
                 "execution_state": execution_state,
+                "acceptance_delivery_key": acceptance_delivery_key,
                 "state_name": self._status_mapping[execution_state],
                 "state_rank": self._status_ranks[execution_state],
                 "state_ranks": {
@@ -3333,6 +3376,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
     async def _outbox_loop(self) -> None:
         while self._running:
             try:
+                self._repair_acceptance_thoughts()
                 delivered = await self._drain_outbox_once()
                 if delivered:
                     continue
@@ -3505,6 +3549,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             if item is None:
                 return False
+            acceptance_key = item.payload.get("acceptance_delivery_key")
+            if acceptance_key and not self._ledger.acceptance_thought_is_current(acceptance_key):
+                self._ledger.mark_outbox_delivered(item.id)
+                return True
             turn_success_item = item.id.startswith("activity:turn-success:")
             if item.payload.get("activity_type") == "response" and item.attempts > 1:
                 # A prior create may already have completed the vendor session.
@@ -3679,6 +3727,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     # Recheck after the final awaited target validation and
                     # immediately before vendor create: the waiter or turn
                     # may disappear while that validation is in flight.
+                    acceptance_key = item.payload.get("acceptance_delivery_key")
+                    if acceptance_key and not self._ledger.acceptance_thought_is_current(acceptance_key):
+                        self._ledger.mark_outbox_delivered(item.id)
+                        return True
                     if (
                         str(item.payload.get("activity_type") or "") == "elicitation"
                         and item.payload.get("clarify_id")
@@ -4193,6 +4245,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         return True
 
     async def _cancel_linear_session_processing(self, session_id: str) -> None:
+        if self._ledger is not None:
+            self._ledger.cancel_acceptance_thoughts(session_id)
         source = self.build_source(
             chat_id=session_id,
             chat_name="Linear",
@@ -4362,7 +4416,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 "gateway_session_strict": True,
             }
         )
-        context = await self._linear.get_agent_turn_context(session_id)
+        read_deadline = getattr(event, "_linear_created_read_deadline", None)
+        event._linear_created_read_deadline = None
+        async with asyncio.timeout_at(read_deadline):
+            context = await self._linear.get_agent_turn_context(session_id)
         probe = {
             "completed": False,
             "failed": False,

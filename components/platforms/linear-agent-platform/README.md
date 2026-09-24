@@ -106,7 +106,7 @@ claim on both AgentSession and data-event ingress. Only `done` duplicates receiv
 200. Existing stale-claim recovery, authorization, Stop and owner guards are unchanged;
 there is no new inbox, early-success ACK or background admission promise.
 
-`diagnostics/created_deadline_probe.py` is an explicit **RED diagnostic**, outside
+`diagnostics/created_deadline_probe.py` remains an explicit **partial/RED diagnostic**, outside
 normal regression discovery. It uses signed loopback HTTP, real adapter/core ingress
 and real outbox validation with fixture remote reads; no Linear write or model call.
 Run from the checkout with the intended Hermes core (not an arbitrary installed core):
@@ -122,23 +122,44 @@ TEST_HOME=$(mktemp -d)
 )
 ```
 
-Observed before the Stop mitigation: policy and native-admission HTTP responses were
-absent at 5 seconds; with fast admission but a blocked outbound owner read, no activity
-attempt occurred by 10 seconds; Stop interruption was still waiting after 250 ms behind
-the policy lock. After the mitigation, **the two HTTP probes and first-activity probe
-remain RED**; only the Stop-interruption probe is GREEN. They are not skipped or
-expected-failure tests disguised as vendor acceptance. The ordinary regression
+The deadline candidate bounds the early created policy/blocker reads and the ordinary
+created native-context read to one absolute four-second read budget. Timeout becomes
+an ordinary exception before dispatch, so the existing handler returns 503 and releases
+the processing claim; it never cancels the whole handler. Ordinary ingress schedules
+its acceptance thought only after core acceptance. The durable `done` commit now also
+stores the exact acceptance-thought obligation in the delivery row. A failed thought
+INSERT still returns 503, but replay repairs only that obligation (using stable outbox
+IDs), never execution. The existing outbox poll repairs it after restart even without a
+webhook retry. Stop/preemption and terminal output cancel these obligations; tagged
+acceptance thoughts recheck cancellation after their awaited owner read. The nullable receipt
+column is added idempotently to existing databases; old done deliveries do not acquire
+invented acceptance evidence. This does not make core dispatch and SQLite atomic: a
+process/storage failure before the durable done commit remains outside this repair.
+
+The signed-loopback regression uses a real SQLite trigger and real core ingress:
+503 → repeated 503 → database reopen → duplicate + exactly one thought and no second
+core admission. It also covers poll recovery, Stop after the fault, Stop during an
+outbound owner read, a five-second Stop HTTP bound behind the bounded policy read,
+timeout → retry → done duplicate, and one shared budget across two admission reads.
+
+**The two HTTP probes and Stop-interruption probe are GREEN; first-activity remains
+RED** when the outbound owner read is unavailable for ten seconds. That read is still
+mandatory: no cached-owner fallback, fabricated activity or early 200 was added. The
+probes are not skipped or expected failures disguised as vendor acceptance. The ordinary regression
 `tests/test_stop_ingress_contention.py` also exercises signed loopback HTTP with real
 core processing: current work is cancelled with each of the three locks held, no early
 HTTP success bypasses the durable fence, and a late admission is cancelled again after
 issue/session lock release. This does not promise that no new admission can run between
 the first interrupt and the final locked fence.
 
-A blanket coroutine timeout was not introduced: native/manager/Direct/dependency
-callers can persist dispatch state or perform admission across awaits, so cancelling
-without an exact receipt could lose work or permit replay. Fixing the remaining clocks
-safely still requires a reviewed durable admission/cancellation boundary, rather than
-acknowledging a mere processing claim or bypassing authoritative owner validation.
+A blanket coroutine timeout was not introduced: manager/Direct/dependency callers can
+persist dispatch state or perform admission across awaits, so cancelling without an
+exact receipt could lose work or permit replay. The four-second budget does not cover
+lock contention, closure reconciliation, manager admission, Direct post-claim native
+admission, gateway-store/goal awaits, or core dispatch. Those paths and the sibling
+manager/activation/recovery thought producers are unchanged; this is not an end-to-end
+deadline or universal no-false-progress guarantee. Fixing those boundaries still
+requires reviewed admission receipts, not acknowledging a mere processing claim.
 Unavailable owner evidence beyond ten seconds cannot honestly yield a timely activity
 receipt. Real vendor `created` delivery, activity receipt and deployed-runtime timing
 remain unverified; no deploy was performed.

@@ -94,6 +94,10 @@ class DeliveryLedger:
             "CREATE TABLE IF NOT EXISTS deliveries ("
             "webhook_id TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at INTEGER NOT NULL)"
         )
+        if "acceptance_thought_json" not in {
+            row[1] for row in self._db.execute("PRAGMA table_info(deliveries)")
+        }:
+            self._db.execute("ALTER TABLE deliveries ADD COLUMN acceptance_thought_json TEXT")
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS outbox ("
             "id TEXT PRIMARY KEY, "
@@ -1265,14 +1269,54 @@ class DeliveryLedger:
             ).fetchone()
             return row is not None and row[0] == "done"
 
-    def mark_done(self, webhook_id: str, *, now: int | None = None) -> None:
+    def mark_done(
+        self, webhook_id: str, *, now: int | None = None,
+        acceptance_thought: dict[str, Any] | None = None,
+    ) -> None:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        # Commit the admitted delivery and its repair obligation together. A
+        # failed activity INSERT must never release already admitted execution.
+        encoded = json.dumps(acceptance_thought) if acceptance_thought is not None else None
+        with self._lock, self._db:
             self._db.execute(
-                "UPDATE deliveries SET state = 'done', updated_at = ? WHERE webhook_id = ?",
-                (now, webhook_id),
+                "UPDATE deliveries SET state = 'done', updated_at = ?, "
+                "acceptance_thought_json = ? WHERE webhook_id = ?",
+                (now, encoded, webhook_id),
             )
             self._db.commit()
+
+    def pending_acceptance_thoughts(self, webhook_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT webhook_id, acceptance_thought_json FROM deliveries "
+                "WHERE state = 'done' AND acceptance_thought_json IS NOT NULL "
+                "AND json_extract(acceptance_thought_json, '$.scheduled') IS NULL "
+                "AND (? IS NULL OR webhook_id = ?)", (webhook_id, webhook_id),
+            ).fetchall()
+        return [{**json.loads(row[1]), "delivery_key": row[0]} for row in rows]
+
+    def mark_acceptance_thought_scheduled(self, webhook_id: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE deliveries SET acceptance_thought_json = "
+                "json_set(acceptance_thought_json, '$.scheduled', 1) WHERE webhook_id = ?",
+                (webhook_id,),
+            )
+
+    def acceptance_thought_is_current(self, webhook_id: str) -> bool:
+        with self._lock:
+            return self._db.execute(
+                "SELECT 1 FROM deliveries WHERE webhook_id = ? AND state = 'done' "
+                "AND acceptance_thought_json IS NOT NULL", (webhook_id,),
+            ).fetchone() is not None
+
+    def cancel_acceptance_thoughts(self, session_id: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE deliveries SET acceptance_thought_json = NULL "
+                "WHERE json_extract(acceptance_thought_json, '$.agent_session_id') = ?",
+                (session_id,),
+            )
 
     def release(self, webhook_id: str) -> None:
         with self._lock:
@@ -1294,7 +1338,7 @@ class DeliveryLedger:
         """Persist one operation. A stable item_id makes producer retries idempotent."""
         now = int(time.time()) if now is None else int(now)
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        with self._lock:
+        with self._lock, self._db:
             self._db.execute("BEGIN IMMEDIATE")
             if self._db.execute("SELECT 1 FROM outbox WHERE id = ?", (item_id,)).fetchone():
                 self._db.rollback()
