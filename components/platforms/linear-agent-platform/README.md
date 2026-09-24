@@ -153,6 +153,15 @@ core admission. It also covers poll recovery, Stop after the fault, Stop during 
 outbound owner read, a five-second Stop HTTP bound behind the bounded policy read,
 timeout → retry → done duplicate, and one shared budget across two admission reads.
 
+A blocked `created` request returns 200 `awaiting_input` immediately after persisting
+its dependency wait, elicitation/status outbox items and done receipt. It no longer
+re-reads blockers inline after that commit. If completion raced the wait commit,
+existing dependency events or the tracked recovery loop resume the same wait; the
+poll interval defaults to 60 seconds, not immediate reconciliation. Signed-loopback
+regressions cover the five-second ACK with a suspended second blocker read, SQLite
+reopen, eventual real core admission, duplicate/single-active suppression, and
+Stop/closure while recovery is reading. No new worker or scheduling surface is added.
+
 **The two HTTP probes and Stop-interruption probe are GREEN; first-activity remains
 RED** when the outbound owner read is unavailable for ten seconds. That read is still
 mandatory: no cached-owner fallback, fabricated activity or early 200 was added. The

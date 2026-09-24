@@ -1321,12 +1321,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     )
                     self._enqueue_status(agent_session_id, issue_id, "blocked", delivery_key)
                     self._ledger.mark_done(delivery_key)
-                    # Close the race where the last blocker completed between the
-                    # initial query and the durable wait commit.
-                    resumed = await self._reconcile_wait(agent_session_id)
-                    return web.json_response(
-                        {"status": "accepted" if resumed else "awaiting_input"}, status=200
-                    )
+                    # The existing dependency loop recovers a completion missed
+                    # before put_wait; do not put vendor I/O after durable ACK state.
+                    return web.json_response({"status": "awaiting_input"}, status=200)
             if direct_activation_created and issue_id and not direct_issue_lock_held:
                 direct_issue_lock = self._issue_lock(issue_id)
                 await direct_issue_lock.acquire()
