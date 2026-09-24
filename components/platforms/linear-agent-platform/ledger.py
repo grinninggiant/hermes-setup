@@ -2913,7 +2913,12 @@ class DeliveryLedger:
             changed = self._db.execute(
                 "UPDATE turn_decisions SET dispatch_state='fenced', outcome='stopped', "
                 "error=?, updated_at=?, completed_at=? WHERE agent_session_id=? "
-                "AND dispatch_state IN ('pending', 'enqueued', 'running')",
+                "AND (dispatch_state IN ('pending', 'enqueued', 'running') OR "
+                "(dispatch_state IN ('completed', 'fenced') AND EXISTS ("
+                "SELECT 1 FROM outbox WHERE id IN ("
+                "'activity:turn-summary:' || turn_decisions.decision_id, "
+                "'activity:turn-decision:' || turn_decisions.decision_id) "
+                "AND state IN ('pending', 'in_flight'))))",
                 (reason[:1000], now, now, agent_session_id),
             ).rowcount
             self._db.commit()

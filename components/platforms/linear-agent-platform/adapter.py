@@ -888,7 +888,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.44",
+                "version": "0.8.45",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -1316,7 +1316,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 )
             ):
                 if self._native_goal_continuation_enabled:
-                    self._ledger.fence_turn_decisions(
+                    await self._fence_turn_decisions_for_visibility(
                         agent_session_id,
                         f"linear_{signal or agent_session_status or ('human_prompt' if human_preemption else 'stop')}_signal",
                     )
@@ -2699,7 +2699,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         if bound_session:
                             async with self._session_lock(bound_session):
                                 if self._native_goal_continuation_enabled:
-                                    self._ledger.fence_turn_decisions(
+                                    await self._fence_turn_decisions_for_visibility(
                                         bound_session, f"linear_issue_{event_state_type}"
                                     )
                             await self._cancel_linear_session_processing(bound_session)
@@ -2726,7 +2726,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         if bound_session:
                             async with self._session_lock(bound_session):
                                 if self._native_goal_continuation_enabled:
-                                    self._ledger.fence_turn_decisions(
+                                    await self._fence_turn_decisions_for_visibility(
                                         bound_session, f"linear_issue_{event_state_type}"
                                     )
                             await self._cancel_linear_session_processing(bound_session)
@@ -3478,6 +3478,26 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return True
             try:
                 if item.operation in {"activity.create", "activity.transient.create"}:
+                    if item.payload.get("visibility_decision_id"):
+                        # The outbox lock also serializes native Stop fences.
+                        # Never acquire the session lock here: inline commands
+                        # can await this drain while already holding that lock.
+                        if not await self._visible_turn_activity_is_live(item):
+                            if not self._ledger.update_outbox_payload_metadata(
+                                item.id, {"visibility_suppressed": True}
+                            ):
+                                raise LinearAPIError("Visibility suppression was not recorded", retryable=True)
+                            self._ledger.mark_outbox_delivered(item.id)
+                            return True
+                        await self._linear.create_activity(
+                            item.payload["agent_session_id"],
+                            item.payload["activity_type"],
+                            item.payload["body"],
+                            activity_id=item.payload["activity_id"],
+                            ephemeral=False,
+                        )
+                        self._ledger.mark_outbox_delivered(item.id)
+                        return True
                     orphan_id = item.payload.get("orphan_success_decision_id")
                     if orphan_id:
                         decision = self._ledger.get_turn_decision(str(orphan_id))
@@ -3663,6 +3683,54 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             else:
                 self._ledger.mark_outbox_delivered(item.id)
             return True
+
+    async def _visible_turn_activity_is_live(self, item: Any) -> bool:
+        if self._ledger is None or self._linear is None:
+            return False
+        decision = self._ledger.get_turn_decision(
+            str(item.payload.get("visibility_decision_id") or "")
+        )
+        if decision is None or decision["agent_session_id"] != item.aggregate_key:
+            return False
+        expected = "blocked" if item.payload.get("activity_type") == "error" else "continue"
+        if decision["outcome"] != expected or decision["dispatch_state"] not in (
+            {"fenced"} if expected == "blocked" else {"completed", "enqueued", "running"}
+        ):
+            return False
+        if expected == "blocked" and decision["error"] != "native_goal_paused":
+            return False
+        if self._ledger.has_session_closure(item.aggregate_key):
+            return False
+        progress_key = str(item.payload.get("terminal_progress_key") or "")
+        if progress_key and progress_key != self._current_progress_turn_key(item.aggregate_key):
+            return False
+        context = await self._linear.get_agent_turn_context(item.aggregate_key)
+        issue = context.get("issue") or {}
+        if (
+            context.get("id") != item.aggregate_key
+            or context.get("status") != "active"
+            or not self._linear.actor_id
+            or context.get("app_user_id") != self._linear.actor_id
+            or issue.get("id") != decision["issue_id"]
+            or (issue.get("delegate") or {}).get("id") != self._linear.actor_id
+            or (issue.get("state") or {}).get("type") not in {"started", "unstarted"}
+            or context.get("open_blockers")
+        ):
+            return False
+        if not await self._turn_success_session_matches(
+            decision, {"session_id": decision["hermes_session_id"]}
+        ):
+            return False
+        if expected == "blocked":
+            source = self._source_from_snapshot(decision["source"], item.aggregate_key)
+            state = await self._goal_state_for_source(source, decision["hermes_session_id"])
+            return bool(
+                state is not None
+                and getattr(state, "status", "") == "paused"
+                and getattr(state, "last_verdict", "") == "blocked"
+                and str(getattr(state, "paused_reason", "") or "").startswith("judged unachievable:")
+            )
+        return True
 
     async def _validate_activity_target(self, agent_session_id: str) -> dict[str, Any]:
         """Fail closed when a normal activity target changed app-user owner."""
@@ -4061,6 +4129,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
         await self.cancel_session_processing(session_key)
 
+    async def _fence_turn_decisions_for_visibility(self, session_id: str, reason: str) -> int:
+        # This is the sole lock shared with tagged activity dispatch; callers
+        # may already hold the session lock (webhook/issue preemption).
+        async with self._outbox_drain_lock:
+            ledger = self._ledger
+            if ledger is None:
+                raise RuntimeError("Linear ledger unavailable for visibility fence")
+            return ledger.fence_turn_decisions(session_id, reason)
+
     async def _stop_bound_turns(self, issue_id: str, reason: str) -> bool:
         if not self._native_goal_continuation_enabled or self._ledger is None:
             return False
@@ -4068,7 +4145,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if not session_id:
             return False
         async with self._session_lock(session_id):
-            changed = self._ledger.fence_turn_decisions(session_id, reason)
+            changed = await self._fence_turn_decisions_for_visibility(session_id, reason)
         await self._cancel_linear_session_processing(session_id)
         return bool(changed or session_id)
 
@@ -4564,6 +4641,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         final_state: str | None = None,
         orphan_success: bool = False,
         reason_code: str | None = None,
+        verified_native_blocked: bool = False,
     ) -> bool:
         if self._ledger is None:
             raise RuntimeError("Linear outbox is unavailable")
@@ -4578,7 +4656,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 session_id, f"terminal:{activity_id}"
             )
         expected = expected_state or str(decision["dispatch_state"])
-        if normalized_reason in _SILENT_CONTROL_REASONS:
+        if normalized_reason in _SILENT_CONTROL_REASONS and not (
+            normalized_reason == "native_goal_paused" and verified_native_blocked
+        ):
             changed = self._ledger.fence_turn_without_activity(
                 str(decision["decision_id"]), expected, session_id, turn_key,
                 outcome=outcome if decision["outcome"] in {"continue", "success"} else None,
@@ -4596,12 +4676,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 step="devam teslimi",
             )[:4000],
         }
+        if verified_native_blocked:
+            payload["visibility_decision_id"] = str(decision["decision_id"])
         if orphan_success:
             payload["orphan_success_decision_id"] = str(decision["decision_id"])
         if turn_key:
             payload["terminal_progress_key"] = turn_key
         final = final_state or (
-            "completed" if decision["outcome"] != "continue" else "fenced"
+            "fenced" if verified_native_blocked or decision["outcome"] == "continue"
+            else "completed"
         )
         changed = self._ledger.complete_turn_with_activity(
             str(decision["decision_id"]),
@@ -4633,14 +4716,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         verified = reason_code in _CONTINUATION_REASON_CODES
         pause_details = {
             "native_goal_not_rejudged": "Yeni yanıt turu için goal değerlendirmesi yapılmadı; önceki turun paused kararı kaldı.",
-            "native_goal_paused": "Native goal paused durumda; bu tur otomatik devam kararı üretmedi.",
+            "native_goal_paused": "Bu turun güncel goal değerlendirmesi blocked; yürütme durdu. Bu, senden yanıt beklendiği veya işin tamamlandığı anlamına gelmez.",
             "native_goal_paused_without_question": "Görev duraklatılmış; bu oturumda timeout sonrası yanıt bekleyen soru kaydı yok. Bu durum eksik veya geç verilmiş insan yanıtı olarak yorumlanmamalıdır.",
             "late_clarify_unverified": "Geç yanıtın aynı timeout sorusuna ve mevcut insan sahibine güvenli bağı doğrulanamadı; goal yeniden açılmadı.",
         }
         if reason_code in pause_details:
             return (
                 f"{context_label} Devam durduruldu; {reason_code}: {pause_details[reason_code]} "
-                "Teknik onarım sorumlu ajandadır; soru/yanıt ve goal revision kayıtları eşleştirilmelidir. "
+                "Teknik sorumlu ajan durma nedenini ve sonraki güvenli adımı doğrulamalıdır. "
                 "Bu mesaj kullanıcıdan eski cevabı tekrar istemez; başarı teslimi değildir."
             )
         if not verified or reason_code in {"blocked", "unverified"}:
@@ -4715,7 +4798,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         )
 
     def _complete_turn_thought(
-        self, decision: dict[str, Any], response: str
+        self, decision: dict[str, Any], response: str, *, human_followup: bool = False
     ) -> bool:
         if self._ledger is None:
             raise RuntimeError("Linear outbox is unavailable")
@@ -4725,8 +4808,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             "agent_session_id": decision["agent_session_id"],
             "activity_type": "thought",
             "body": response[:12000],
-            "ephemeral": True,
+            "ephemeral": not human_followup,
         }
+        if human_followup:
+            payload["visibility_decision_id"] = str(decision["decision_id"])
+            payload["terminal_progress_key"] = self._current_progress_turn_key(
+                str(decision["agent_session_id"])
+            )
         return self._ledger.complete_turn_with_activity(
             decision["decision_id"],
             "pending",
@@ -4942,13 +5030,44 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return None
 
             if outcome != "continue":
+                started = getattr(event, "_linear_processing_started_at", 0)
+                last_turn = getattr(state, "last_turn_at", None)
+                verified_native_blocked = (
+                    outcome == "blocked"
+                    and live_outcome in {"continue", "success"}
+                    and live_reason == "native_goal_paused"
+                    and isinstance(turn_result, Mapping)
+                    and not turn_result.get("failed")
+                    and not turn_result.get("interrupted")
+                    and bool(started)
+                    and isinstance(last_turn, (int, float))
+                    and last_turn >= started
+                    and str(getattr(state, "last_verdict", "")) == "blocked"
+                    and str(getattr(state, "paused_reason", "") or "").startswith(
+                        "judged unachievable:"
+                    )
+                    and await self._turn_success_session_matches(decision, turn_result)
+                )
                 self._enqueue_turn_terminal_activity(
                     decision, outcome, reason_code=live_reason,
+                    verified_native_blocked=verified_native_blocked,
+                )
+                return None
+
+            if (
+                event.metadata.get("linear_action") == "prompted"
+                and not await self._turn_success_session_matches(decision, turn_result)
+            ):
+                self._enqueue_turn_terminal_activity(
+                    decision, "stopped", reason_code="stopped"
                 )
                 return None
 
             if not exceptional:
-                self._complete_turn_thought(decision, str(response or ""))
+                self._complete_turn_thought(
+                    decision, str(response or ""),
+                    human_followup=event.metadata.get("linear_action") == "prompted",
+                )
                 self._outbox_wakeup.set()
                 return None
 
@@ -5021,12 +5140,17 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 )
                 return None
             if response:
+                human_followup = event.metadata.get("linear_action") == "prompted"
                 self._enqueue_activity(
                     session_id,
                     "thought",
                     str(response)[:12000],
                     item_key=f"turn-summary:{decision['decision_id']}",
-                    ephemeral=True,
+                    ephemeral=not human_followup,
+                    metadata={
+                        "visibility_decision_id": decision["decision_id"],
+                        "terminal_progress_key": self._current_progress_turn_key(session_id),
+                    } if human_followup else None,
                 )
             if not self._ledger.transition_turn_decision(
                 decision["decision_id"], "pending", "enqueued"

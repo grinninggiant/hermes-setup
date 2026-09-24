@@ -1709,6 +1709,101 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(outbox["payload"]["ephemeral"])
         self.assertEqual(decision["dispatch_state"], "completed")
 
+    async def test_human_followup_explanation_is_durable_thought(self):
+        FakeGoalManager.existing = True
+        event = turn_event()
+        event.metadata["linear_action"] = "prompted"
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "Soruyu açıklayayım: senden şu an işlem beklemiyorum.",
+            event._gateway_turn_result,
+        )
+        decision = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+        item = self.adapter._ledger.get_outbox_item(
+            f"activity:turn-summary:{decision['decision_id']}"
+        )
+        self.assertEqual(item["payload"]["activity_type"], "thought")
+        self.assertFalse(item["payload"]["ephemeral"])
+        self.assertEqual(decision["dispatch_state"], "completed")
+        self.assertEqual(self.admitted, [])
+
+    async def test_rotated_followup_does_not_enqueue_durable_explanation(self):
+        FakeGoalManager.existing = True
+        event = turn_event()
+        event.metadata["linear_action"] = "prompted"
+        self.adapter.gateway_runner.async_session_store.entry.session_id = "rotated"
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "Stale explanation", event._gateway_turn_result,
+        )
+        decision = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+        self.assertEqual(decision["dispatch_state"], "fenced")
+        self.assertIsNone(self.adapter._ledger.get_outbox_item(
+            f"activity:turn-summary:{decision['decision_id']}"
+        ))
+
+    async def test_queued_followup_explanation_is_suppressed_after_rotation(self):
+        FakeGoalManager.existing = True
+        event = turn_event()
+        event.metadata["linear_action"] = "prompted"
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "Stale explanation", event._gateway_turn_result,
+        )
+        decision = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+        self.assertIsNotNone(self.adapter._ledger.get_outbox_item(
+            f"activity:turn-summary:{decision['decision_id']}"
+        ))
+        self.adapter.gateway_runner.async_session_store.entry.session_id = "rotated"
+        self.adapter._linear.create_activity = mock.AsyncMock(return_value="fixture")
+        self.assertTrue(await LinearPlatformAdapter._drain_outbox_once(self.adapter))
+        self.adapter._linear.create_activity.assert_not_awaited()
+
+    async def test_current_followup_explanation_is_delivered_once_as_durable_thought(self):
+        FakeGoalManager.existing = True
+        event = turn_event()
+        event.metadata["linear_action"] = "prompted"
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "Here is the clarification", event._gateway_turn_result,
+        )
+        self.adapter._linear.create_activity = mock.AsyncMock(return_value="fixture")
+        self.assertTrue(await LinearPlatformAdapter._drain_outbox_once(self.adapter))
+        self.adapter._linear.create_activity.assert_awaited_once()
+        call = self.adapter._linear.create_activity.await_args
+        assert call is not None
+        self.assertEqual(call.args[1:3], ("thought", "Here is the clarification"))
+        self.assertFalse(call.kwargs["ephemeral"])
+        self.assertFalse(await LinearPlatformAdapter._drain_outbox_once(self.adapter))
+
+    async def test_queued_followup_explanation_is_suppressed_after_stop(self):
+        FakeGoalManager.existing = True
+        event = turn_event()
+        event.metadata["linear_action"] = "prompted"
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "Stale clarification", event._gateway_turn_result,
+        )
+        decision = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+        self.assertEqual(decision["dispatch_state"], "completed")
+        self.assertGreater(self.adapter._ledger.fence_turn_decisions(
+            "linear-session", "linear_authoritative_stop"
+        ), 0)
+        self.adapter._linear.create_activity = mock.AsyncMock(return_value="fixture")
+        self.assertTrue(await LinearPlatformAdapter._drain_outbox_once(self.adapter))
+        self.adapter._linear.create_activity.assert_not_awaited()
+
+    async def test_prompted_unchecked_acceptance_summary_is_durable_not_final(self):
+        FakeGoalManager.existing = True
+        FakeGoalManager.existing_status = "done"
+        event = turn_event()
+        event.metadata["linear_action"] = "prompted"
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "Acceptance is still open", event._gateway_turn_result,
+        )
+        decision = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+        item = self.adapter._ledger.get_outbox_item(
+            f"activity:turn-summary:{decision['decision_id']}"
+        )
+        self.assertEqual(item["payload"]["activity_type"], "thought")
+        self.assertFalse(item["payload"].get("ephemeral", False))
+        self.assertNotEqual(decision["outcome"], "success")
+
     async def test_documented_delivery_boundary_routes_structured_turn_result(self):
         FakeGoalManager.existing = True
         event = turn_event()
