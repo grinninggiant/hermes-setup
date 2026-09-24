@@ -5396,6 +5396,64 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(asyncio.gather(*self.adapter._session_tasks.values()), 2)
         self.assertEqual(self.adapter._inflight_session_deliveries, {})
 
+    async def test_active_issue_rejects_competitor_without_delaying_stop_on_vendor_read(self):
+        issue_id, old = "issue-stop-latency", "session-stop-latency"
+        running, interrupted = asyncio.Event(), asyncio.Event()
+        read_started, release_read = asyncio.Event(), asyncio.Event()
+        finish = asyncio.Event()
+        del self.adapter.handle_message
+        self.adapter._native_goal_continuation_enabled = False
+
+        async def execute(event):
+            if event.text == "/stop":
+                return
+            self.events.append(event)
+            running.set()
+            try:
+                await asyncio.wait_for(finish.wait(), 5)
+            finally:
+                interrupted.set()
+
+        self.adapter.set_message_handler(execute)
+        first = self.make_payload(agentSession={"id": old, "issue": {"id": issue_id}})
+        response = await asyncio.wait_for(self.adapter._handle_webhook(self.request_for(first)), 2)
+        self.assertEqual(json.loads(response.text)["status"], "accepted")
+        await asyncio.wait_for(running.wait(), 2)
+
+        async def slow_read(session_id):
+            read_started.set()
+            await asyncio.wait_for(release_read.wait(), 5)
+            return {"id": session_id, "issue_id": issue_id,
+                    "app_user_id": "agent-derya", "status": "complete"}
+
+        competitor = self.make_payload(agentSession={"id": "session-competitor", "issue": {"id": issue_id}})
+        stop = self.make_payload(action="prompted", agentSession=first["agentSession"],
+                                 agentActivity={"id": "stop-old-session", "body": "stop", "signal": "stop"})
+        tasks = []
+        try:
+            with mock.patch.object(self.adapter._linear, "get_agent_session_delivery_context", side_effect=slow_read) as read:
+                candidate = asyncio.create_task(self.adapter._handle_webhook(self.request_for(competitor)))
+                entered = asyncio.create_task(read_started.wait())
+                tasks.extend((candidate, entered))
+                done, _ = await asyncio.wait(tasks, timeout=2, return_when=asyncio.FIRST_COMPLETED)
+                self.assertTrue(done, "competitor neither rejected nor entered vendor read")
+                stopping = asyncio.create_task(self.adapter._handle_webhook(self.request_for(stop)))
+                tasks.append(stopping)
+                # The vendor barrier remains closed: Stop must interrupt independently.
+                await asyncio.wait_for(interrupted.wait(), 0.25)
+                self.assertEqual(json.loads((await asyncio.wait_for(stopping, 2)).text)["status"], "accepted")
+                self.assertEqual(json.loads((await asyncio.wait_for(candidate, 2)).text)["status"], "issue_session_active")
+                read.assert_not_awaited()
+                self.assertEqual(self.adapter._ledger.get_issue_session(issue_id), old)
+                self.assertEqual([event.source.chat_id for event in self.events], [old])
+        finally:
+            release_read.set()
+            finish.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.wait_for(asyncio.gather(*tasks, *self.adapter._session_tasks.values(), return_exceptions=True), 2)
+
     async def test_created_rotation_requires_exact_terminal_old_session_after_restart(self):
         for status in ("pending", "active", "awaitingInput", "stale", "", "complete", "error"):
             for manager in (False, True):

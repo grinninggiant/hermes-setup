@@ -2685,15 +2685,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         assert self._ledger is not None and self._linear is not None
         previous = self._ledger.get_issue_session(issue_id)
         if previous and previous != session_id:
-            context = await self._linear.get_agent_session_delivery_context(previous)
-            if not (
-                self._linear.actor_id
-                and context.get("id") == previous
-                and context.get("issue_id") == issue_id
-                and context.get("app_user_id") == self._linear.actor_id
-                and context.get("status") in {"complete", "error"}
-            ):
-                return False
             source = self.build_source(chat_id=previous, chat_type="dm")
             extra = getattr(self.config, "extra", None) or {}
             key = build_session_key(
@@ -2702,11 +2693,26 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
                 profile=self._session_key_profile(source),
             )
-            if (self._inflight_session_deliveries.get(previous)
+            def locally_active() -> bool:
+                return bool(
+                    self._inflight_session_deliveries.get(previous)
                     or self._session_lock(previous).locked()
                     or key in self._active_sessions or key in self._pending_messages
                     or previous in self._active_turn_events
-                    or previous in self._pending_turn_deliveries):
+                    or previous in self._pending_turn_deliveries
+                )
+
+            # Reject without vendor I/O under the issue lock: Stop needs it too.
+            if locally_active():
+                return False
+            context = await self._linear.get_agent_session_delivery_context(previous)
+            if not (
+                self._linear.actor_id
+                and context.get("id") == previous
+                and context.get("issue_id") == issue_id
+                and context.get("app_user_id") == self._linear.actor_id
+                and context.get("status") in {"complete", "error"}
+            ) or locally_active():  # Local ownership can change across the read.
                 return False
             # Terminal upstream must not orphan a locally resumable execution.
             for pending in (
@@ -5703,6 +5709,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._active_turn_events.get(chat_id)
             if self._native_goal_continuation_enabled else None
         )
+        if (self._native_goal_continuation_enabled and active_event is None
+                and (chat_id in self._pending_turn_deliveries or not self._progress_chat_is_allowed(chat_id))
+                and not (transient_progress or long_running_heartbeat or trusted_ephemeral_notice)):
+            # Core's generic error send follows FAILURE completion. The durable
+            # terminal/retry fence must survive releasing local turn ownership.
+            return SendResult(success=False, error="Linear final delivery has no live turn", retryable=False)
         if active_event is not None and not (
             transient_progress or long_running_heartbeat or trusted_ephemeral_notice
         ):
@@ -6559,6 +6571,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         if self._ledger is None or event.source is None:
             return
+        # A terminal worker is not local execution ownership. Staged deliveries
+        # retain their own retry fence; never clear a newer event's turn state.
+        if (outcome != ProcessingOutcome.SUCCESS
+                and self._active_turn_events.get(event.source.chat_id) is event):
+            self._active_turn_events.pop(event.source.chat_id, None)
+            self._completed_turn_results.pop(event.source.chat_id, None)
         decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
         if self._native_goal_continuation_enabled and decision_id:
             rejected = str(event.metadata.get("gateway_session_rejected") or "")
