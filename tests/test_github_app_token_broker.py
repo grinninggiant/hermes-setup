@@ -61,6 +61,29 @@ class BrokerTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(BROKER.BrokerError):
                 BROKER.validate_command(command)
 
+    def test_release_controls_are_limited_to_pr99_and_pr22(self):
+        for repo, number in (("hermes-setup", "99"), ("hermes-agent", "22")):
+            root = f"repos/grinninggiant/{repo}/pulls/{number}"
+            ready = [BROKER.GH_BINARY, "pr", "ready", number, "-R", f"grinninggiant/{repo}"]
+            edit = [BROKER.GH_BINARY, "api", root, "-X", "PATCH", "-f", "body=reviewed"]
+            self.assertEqual(BROKER.validate_command(ready), ready)
+            self.assertEqual(BROKER.validate_command(edit), edit)
+            for denied in (
+                ready + ["--undo"],
+                [BROKER.GH_BINARY, "pr", "ready", number, "-R", "grinninggiant/other"],
+                [BROKER.GH_BINARY, "api", root, "-X", "PATCH", "-f", "draft=false"],
+                edit + ["-f", "state=closed"],
+                [BROKER.GH_BINARY, "api", root, "-X", "POST", "-f", "body=reviewed"],
+            ):
+                with self.subTest(denied=denied), self.assertRaises(BROKER.BrokerError):
+                    BROKER.validate_command(denied)
+        for repo, number in (("hermes-setup", "98"), ("hermes-agent", "23"), ("hermes-agent", "99")):
+            with self.subTest(repo=repo, number=number), self.assertRaises(BROKER.BrokerError):
+                BROKER.validate_command([
+                    BROKER.GH_BINARY, "api", f"repos/grinninggiant/{repo}/pulls/{number}",
+                    "-X", "PATCH", "-f", "body=reviewed",
+                ])
+
     def test_normalize_resolved_accepts_only_pinned_installation(self):
         values = BROKER.normalize_resolved(
             {
