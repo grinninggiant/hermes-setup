@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -3920,6 +3921,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         self._outbox_wakeup.set()
                     logger.error("[linear] Outbox dead letter id=%s: %s", item.id, exc)
             except Exception as exc:
+                if isinstance(exc, sqlite3.OperationalError) and (
+                    str(exc) == "Linear ledger is busy"
+                    or getattr(exc, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                ):
+                    exponent = min(max(item.attempts - 1, 0), 16)
+                    delay = min(self._outbox_max_delay, self._outbox_base_delay * (2**exponent))
+                    self._ledger.reschedule_outbox(item.id, str(exc), delay)
+                    logger.warning("[linear] Outbox ledger retry id=%s delay=%.1fs: %s", item.id, delay, exc)
+                    return True
                 cleanup_inserted = self._ledger.dead_letter_outbox(
                     item.id,
                     str(exc),

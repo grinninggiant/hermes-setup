@@ -2969,6 +2969,33 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.adapter._linear.activity_ephemeral, [True])
 
+    async def test_ledger_contention_does_not_dead_letter_or_block_later_activity(self):
+        import sqlite3
+
+        ledger = self.adapter._ledger
+        for n in (1, 2):
+            ledger.enqueue_outbox(
+                f"activity:busy:{n}", "session-busy", "activity.create",
+                {"activity_id": f"busy-{n}", "agent_session_id": "session-busy",
+                 "activity_type": "thought", "body": f"thought {n}"},
+            )
+        original = self.adapter._validate_activity_target
+        async def busy_once(session_id):
+            self.adapter._validate_activity_target = original
+            raise sqlite3.OperationalError("Linear ledger is busy")
+        self.adapter._validate_activity_target = busy_once
+
+        await self.adapter._drain_outbox_once()
+        first = ledger.get_outbox_item("activity:busy:1")
+        self.assertEqual(first["state"], "pending")
+        self.assertIsNone(ledger.claim_due_outbox())  # preserve per-session order
+        ledger.reschedule_outbox("activity:busy:1", "retry now", 0)
+        await self.adapter._drain_outbox_once()
+        await self.adapter._drain_outbox_once()
+        self.assertEqual(ledger.get_outbox_item("activity:busy:1")["state"], "delivered")
+        self.assertEqual(ledger.get_outbox_item("activity:busy:2")["state"], "delivered")
+        self.assertEqual([call[2] for call in self.adapter._linear.calls], ["thought 1", "thought 2"])
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         db_path = str(Path(self.temp.name) / "ledger.sqlite3")
