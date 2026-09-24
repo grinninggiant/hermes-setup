@@ -509,6 +509,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._issue_locks: dict[str, asyncio.Lock] = {}
         self._inflight_session_deliveries: dict[str, set[str]] = {}
+        # A refused claim must not retarget the next local turn on retry.
+        self._stop_delivery_owners: dict[str, tuple[float, tuple[Any, ...]]] = {}
         self.config.typing_indicator = False
 
     @property
@@ -998,6 +1000,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         signal = _activity_signal(payload)
         is_stop = action == "prompted" and signal == "stop"
         delivery_key = _delivery_key(payload, raw)
+        if is_stop:
+            # Only signed, replay-fresh, organization-matched events reach here.
+            now = time.monotonic()
+            for key, (seen_at, _) in list(self._stop_delivery_owners.items()):
+                if now - seen_at > self.replay_window_seconds:
+                    self._stop_delivery_owners.pop(key, None)
+            self._stop_delivery_owners.setdefault(
+                delivery_key, (now, self._linear_processing_owner(agent_session_id)[2:]),
+            )
         claimed = False
         direct_activation_created = False
         inflight: set[str] | None = None
@@ -1150,6 +1161,27 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             ):
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "ignored_self"}, status=200)
+            if is_stop:
+                original = self._stop_delivery_owners[delivery_key][1]
+                current = self._linear_processing_owner(agent_session_id)[2:]
+                same_owner = (
+                    (original[1] is not None or original[2] is not None)
+                    and original[1] is current[1] and original[2] is current[2]
+                )
+                new_owner = (
+                    current[1] is not None or current[2] is not None
+                    or (current[0] is not None and current[0] is not original[0])
+                )
+                replaced = (
+                    (original[0] is not None and current[0] is not original[0])
+                    or (original[3] is not None and current[3] != original[3])
+                ) if same_owner else new_owner and any(
+                    left is not right for left, right in zip(original, current)
+                )
+                if replaced:
+                    # A refused delivery must never fence or cancel its successor.
+                    self._ledger.mark_done(delivery_key)
+                    return web.json_response({"status": "stale_stop"}, status=200)
             if is_stop and (
                 (issue_id and self._issue_lock(issue_id).locked())
                 or self._session_lock(agent_session_id).locked()
@@ -2831,10 +2863,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if self._linear is None or self._ledger is None:
             return web.json_response({"status": "unavailable"}, status=503)
         delivery_key = _delivery_key(payload, raw)
-        if not self._ledger.claim(delivery_key):
-            return self._duplicate_delivery_response(delivery_key)
-        claimed = True
+        claimed = False
         try:
+            if not self._ledger.claim(delivery_key):
+                return self._duplicate_delivery_response(delivery_key)
+            claimed = True
             actor_id, _ = _actor(payload)
             event_type = str(payload.get("type") or "")
             action = str(payload.get("action") or "")
@@ -2980,7 +3013,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             if claimed:
-                self._ledger.release(delivery_key)
+                try:
+                    self._ledger.release(delivery_key)
+                except Exception:
+                    logger.exception("[linear] Failed to release data delivery %s", delivery_key)
             logger.exception("[linear] Data event reconciliation failed: %s", exc)
             return web.json_response({"status": "unavailable"}, status=503)
 
@@ -4319,7 +4355,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             raise WakeNotAccepted("Linear ingress vetoed execution")
         return True
 
-    async def _cancel_linear_session_processing(self, session_id: str) -> None:
+    def _linear_processing_owner(self, session_id: str) -> tuple[Any, ...]:
         source = self.build_source(
             chat_id=session_id,
             chat_name="Linear",
@@ -4336,6 +4372,18 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
             profile=self._session_key_profile(source),
         )
+        active_event = self._active_turn_events.get(str(session_id))
+        owner_task = self._session_tasks.get(session_key)
+        owner_guard = self._active_sessions.get(session_key)
+        owner_generation = getattr(owner_guard, "_hermes_run_generation", None)
+        return source, session_key, active_event, owner_task, owner_guard, owner_generation
+
+    async def _cancel_linear_session_processing(self, session_id: str) -> None:
+        (source, session_key, active_event, owner_task,
+         owner_guard, owner_generation) = self._linear_processing_owner(session_id)
+        owner_session_id = (
+            str(active_event.metadata.get("gateway_session_id") or "") if active_event else ""
+        ) or None
         try:
             if self._ledger is not None:
                 if self._native_goal_continuation_enabled:
@@ -4348,22 +4396,29 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             # Failed persistence keeps HTTP retryable, never execution alive.
             interrupt = getattr(self.gateway_runner, "interrupt_session_processing", None)
             try:
-                if callable(interrupt):
+                owner_changed = (
+                    (owner_task is not None and self._session_tasks.get(session_key) is not owner_task)
+                    or (owner_guard is not None and self._active_sessions.get(session_key) is not owner_guard)
+                )
+                if callable(interrupt) and not owner_changed:
                     # Use the runner's source-scoped async seam and pin the Hermes
                     # identity when this turn has one.
-                    active_event = self._active_turn_events.get(str(session_id))
                     interrupt_source = active_event.source if active_event is not None else source
-                    expected_session_id = (
-                        str(active_event.metadata.get("gateway_session_id") or "")
-                        if active_event is not None else ""
-                    ) or None
                     await interrupt(
                         interrupt_source,
                         reason="linear_authoritative_stop",
-                        expected_session_id=expected_session_id,
+                        expected_session_id=owner_session_id,
+                        expected_run_generation=owner_generation,
                     )
             finally:
-                await self.cancel_session_processing(session_key)
+                if owner_task is None and owner_guard is None:
+                    if (self._session_tasks.get(session_key) is None
+                            and self._active_sessions.get(session_key) is None):
+                        await self.cancel_session_processing(session_key)
+                else:
+                    await self.cancel_session_processing(
+                        session_key, expected_task=owner_task, expected_guard=owner_guard,
+                    )
 
     async def _fence_turn_decisions_for_visibility(self, session_id: str, reason: str) -> int:
         # This is the sole lock shared with tagged activity dispatch; callers

@@ -10,7 +10,7 @@ import sqlite3
 import stat
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -333,6 +333,21 @@ class DeliveryLedger:
         self._secure_state_files()
         if startup_recovery:
             self.prune()
+        # Runtime callers include aiohttp: never wait for another SQLite writer.
+        self._db.execute("PRAGMA busy_timeout=0")
+
+    @contextmanager
+    def _locked(self):
+        # ponytail: refuse contention; callers retry, no queued worker or journal.
+        if not self._lock.acquire(blocking=False):
+            raise sqlite3.OperationalError("Linear ledger is busy")
+        try:
+            yield
+        except BaseException:
+            self._db.rollback()
+            raise
+        finally:
+            self._lock.release()
 
     def _secure_state_files(self) -> None:
         """Keep the database and SQLite sidecars private to the profile owner."""
@@ -349,7 +364,7 @@ class DeliveryLedger:
     ) -> bool:
         """Bind once; replacement requires the exact previously verified session."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cursor = self._db.execute(
                 "INSERT INTO issue_session_bindings(issue_id, session_id, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT(issue_id) DO UPDATE SET "
@@ -362,7 +377,7 @@ class DeliveryLedger:
             return cursor.rowcount == 1
 
     def get_issue_session(self, issue_id: str) -> str | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT session_id FROM issue_session_bindings WHERE issue_id = ?",
                 (issue_id,),
@@ -371,7 +386,7 @@ class DeliveryLedger:
 
     def get_session_issue(self, session_id: str) -> str | None:
         """Return the uniquely bound issue for an AgentSession, failing closed on ambiguity."""
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT issue_id FROM issue_session_bindings WHERE session_id = ? "
                 "ORDER BY updated_at DESC, issue_id LIMIT 2",
@@ -401,7 +416,7 @@ class DeliveryLedger:
     ) -> bool:
         """Durably reserve a source command before any remote authorization lookup."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cursor = self._db.execute(
                 "INSERT OR IGNORE INTO channel_routes("
                 "operation_key, source_platform, source_chat_id, source_thread_id, "
@@ -443,7 +458,7 @@ class DeliveryLedger:
         if limit <= 0:
             return []
         now = time.time() if now is None else float(now)
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT operation_key FROM channel_routes WHERE state='claimed' "
                 "AND next_attempt_at <= ? ORDER BY created_at, operation_key LIMIT ?",
@@ -464,7 +479,7 @@ class DeliveryLedger:
         self, operation_key: str, issue_id: str, session_id: str, *, now: int | None = None,
     ) -> bool:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cursor = self._db.execute(
                 "UPDATE channel_routes SET issue_id=?, session_id=?, updated_at=? "
                 "WHERE operation_key=? AND state='claimed'",
@@ -484,7 +499,7 @@ class DeliveryLedger:
     ) -> bool:
         """Back off a pre-dispatch failure, terminally failing at the fixed attempt bound."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cursor = self._db.execute(
                 "UPDATE channel_routes SET "
                 "state=CASE WHEN attempt_count >= ? THEN 'failed' ELSE 'claimed' END, "
@@ -513,7 +528,7 @@ class DeliveryLedger:
         if state not in transitions:
             raise ValueError(f"Unsupported channel route state: {state}")
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cursor = self._db.execute(
                 "UPDATE channel_routes SET state=?, last_error=?, updated_at=? "
                 "WHERE operation_key=? AND state=?",
@@ -523,7 +538,7 @@ class DeliveryLedger:
         return cursor.rowcount == 1
 
     def get_channel_route(self, operation_key: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT operation_key, source_platform, source_chat_id, source_thread_id, "
                 "source_message_id, source_user_id, source_user_name, issue_ref, command_text, "
@@ -588,7 +603,7 @@ class DeliveryLedger:
         prompt_json = json.dumps(
             prompt, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "INSERT INTO activation_waits("
                 "issue_id, session_id, delivery_key, prompt_json, state, created_at, updated_at) "
@@ -602,7 +617,7 @@ class DeliveryLedger:
             self._db.commit()
 
     def get_activation_wait(self, issue_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT issue_id, session_id, delivery_key, prompt_json, activation_key, "
                 "state, last_error, created_at, updated_at, resumed_at "
@@ -620,7 +635,7 @@ class DeliveryLedger:
     ) -> bool:
         """Fence one activation dispatch; an interrupted call remains ambiguous."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT state, activation_key FROM activation_waits WHERE issue_id = ?",
@@ -645,7 +660,7 @@ class DeliveryLedger:
         self, issue_id: str, *, now: int | None = None,
     ) -> None:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE activation_waits SET state = 'resumed', updated_at = ?, resumed_at = ? "
                 "WHERE issue_id = ? AND state = 'dispatch_unknown'",
@@ -657,7 +672,7 @@ class DeliveryLedger:
         self, issue_id: str, error: str, *, now: int | None = None,
     ) -> None:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE activation_waits SET last_error = ?, updated_at = ? "
                 "WHERE issue_id = ? AND state = 'dispatch_unknown'",
@@ -669,7 +684,7 @@ class DeliveryLedger:
         self, session_id: str, *, now: int | None = None,
     ) -> None:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE activation_waits SET state = 'canceled', updated_at = ? "
                 "WHERE session_id = ? AND state IN ('waiting', 'resuming')",
@@ -681,7 +696,7 @@ class DeliveryLedger:
         self, issue_id: str, *, now: int | None = None,
     ) -> None:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE activation_waits SET state = 'canceled', updated_at = ? "
                 "WHERE issue_id = ? AND state IN ('waiting', 'dispatch_unknown')",
@@ -719,7 +734,7 @@ class DeliveryLedger:
         if any(not isinstance(value, str) or not value for value in values):
             return False
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cursor = self._db.execute(
                 "INSERT OR IGNORE INTO direct_activation_grants("
                 "operation_key, source_platform, source_user_id, source_message_id, "
@@ -739,7 +754,7 @@ class DeliveryLedger:
             return False
         now = int(time.time()) if now is None else int(now)
         cutoff = now - self.processing_timeout_seconds
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE direct_activation_grants SET state='failed', "
                 "last_error='unbound_reservation_expired', updated_at=? "
@@ -770,7 +785,7 @@ class DeliveryLedger:
         self, operation_key: str, error: str, *, now: int | None = None,
     ) -> bool:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cursor = self._db.execute(
                 "UPDATE direct_activation_grants SET state='failed', last_error=?, updated_at=? "
                 "WHERE operation_key=? AND state IN ('reserved', 'granted')",
@@ -791,7 +806,7 @@ class DeliveryLedger:
             return False
         now = int(time.time()) if now is None else int(now)
         cutoff = now - self.processing_timeout_seconds
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE direct_activation_grants SET state='failed', "
                 "last_error='unbound_reservation_expired', updated_at=? "
@@ -825,7 +840,7 @@ class DeliveryLedger:
         prompt_json = json.dumps(
             prompt, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
-        with self._lock:
+        with self._locked():
             cursor = self._db.execute(
                 "INSERT OR IGNORE INTO direct_activation_events("
                 "issue_id, session_id, delivery_key, prompt_json, state, created_at, updated_at) "
@@ -836,7 +851,7 @@ class DeliveryLedger:
         return cursor.rowcount == 1
 
     def get_direct_activation_event(self, issue_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT issue_id, session_id, delivery_key, prompt_json, state, last_error, "
                 "created_at, updated_at FROM direct_activation_events WHERE issue_id=?",
@@ -857,7 +872,7 @@ class DeliveryLedger:
 
     def list_direct_activation_events(self) -> list[dict[str, Any]]:
         now = int(time.time())
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE direct_activation_events SET state='failed', "
                 "last_error='unbound_event_expired', updated_at=? "
@@ -888,7 +903,7 @@ class DeliveryLedger:
         if state not in {"claimed", "dispatched", "failed"}:
             return False
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             if state == "failed":
                 cursor = self._db.execute(
                     "UPDATE direct_activation_events SET state=?, last_error=?, updated_at=? "
@@ -911,7 +926,7 @@ class DeliveryLedger:
         if not session_id:
             return False
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             grant_count = self._db.execute(
                 "UPDATE direct_activation_grants SET state='canceled', "
                 "last_error='session_stopped', updated_at=? "
@@ -928,7 +943,7 @@ class DeliveryLedger:
         return bool(grant_count or event_count)
 
     def get_direct_activation_grant(self, issue_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT operation_key, issue_id, source_platform, source_user_id, "
                 "source_message_id, source_session_id, source_profile, policy_result, "
@@ -964,7 +979,7 @@ class DeliveryLedger:
         if not all((issue_id, session_id, actor_id, team_id)):
             return False
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT operation_key, actor_id, team_id, state FROM direct_activation_grants "
@@ -994,7 +1009,7 @@ class DeliveryLedger:
     ) -> bool:
         """Restore retryability only when Hermes dispatch was not attempted."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             grant_count = self._db.execute(
                 "UPDATE direct_activation_grants SET state='granted', session_id='', "
                 "activation_key='', last_error=?, updated_at=? "
@@ -1014,7 +1029,7 @@ class DeliveryLedger:
     ) -> bool:
         """Fence an attempted dispatch whose acceptance outcome is unknown."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             grant_count = self._db.execute(
                 "UPDATE direct_activation_grants SET state='dispatch_unknown', "
                 "last_error=?, updated_at=? WHERE issue_id=? AND session_id=? "
@@ -1034,7 +1049,7 @@ class DeliveryLedger:
         self, issue_id: str, session_id: str, *, now: int | None = None,
     ) -> bool:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cursor = self._db.execute(
                 "UPDATE direct_activation_grants SET state='dispatched', updated_at=? "
                 "WHERE issue_id=? AND session_id=? AND state='claimed'",
@@ -1056,7 +1071,7 @@ class DeliveryLedger:
         evidence_json = json.dumps(
             evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT activation_key, state FROM manager_activations WHERE issue_id = ?",
@@ -1097,7 +1112,7 @@ class DeliveryLedger:
         evidence_json = json.dumps(
             evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT activation_key, state FROM manager_activations WHERE issue_id=?",
@@ -1127,7 +1142,7 @@ class DeliveryLedger:
             return True
 
     def get_manager_activation(self, issue_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT issue_id, activation_key, state, session_id, evidence_json, "
                 "last_error, created_at, updated_at FROM manager_activations WHERE issue_id=?",
@@ -1165,7 +1180,7 @@ class DeliveryLedger:
         }:
             raise ValueError("invalid manager activation state")
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE manager_activations SET state=?, session_id=COALESCE(?, session_id), "
                 "last_error=?, updated_at=? WHERE issue_id=?",
@@ -1178,7 +1193,7 @@ class DeliveryLedger:
     ) -> bool:
         """CAS one delegated manager issue to one ambiguity-fenced session."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cur = self._db.execute(
                 "UPDATE manager_activations SET state='dispatch_unknown', session_id=?, "
                 "last_error=NULL, updated_at=? WHERE issue_id=? AND state='delegated'",
@@ -1200,7 +1215,7 @@ class DeliveryLedger:
         encoded = json.dumps(
             event, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "INSERT INTO pending_closure_events("
                 "issue_id, event_revision, event_json, created_at, updated_at) "
@@ -1213,7 +1228,7 @@ class DeliveryLedger:
             self._db.commit()
 
     def get_pending_closure_event(self, issue_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT event_revision, event_json FROM pending_closure_events WHERE issue_id = ?",
                 (issue_id,),
@@ -1223,14 +1238,14 @@ class DeliveryLedger:
         return {"event_revision": float(row[0]), "event": json.loads(row[1])}
 
     def pending_closure_count(self) -> int:
-        with self._lock:
+        with self._locked():
             return int(
                 self._db.execute("SELECT COUNT(*) FROM pending_closure_events").fetchone()[0]
             )
 
     def clear_pending_closure_event(self, issue_id: str, event_revision: float) -> bool:
         """Clear only the exact obsolete fence observed by the caller."""
-        with self._lock:
+        with self._locked():
             cur = self._db.execute(
                 "DELETE FROM pending_closure_events WHERE issue_id = ? AND event_revision = ?",
                 (issue_id, float(event_revision)),
@@ -1240,7 +1255,7 @@ class DeliveryLedger:
 
     def claim(self, webhook_id: str, *, now: int | None = None) -> bool:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT state, updated_at FROM deliveries WHERE webhook_id = ?",
@@ -1268,7 +1283,7 @@ class DeliveryLedger:
 
     def bind_clarify_reply(self, webhook_id: str, clarify_id: str) -> str:
         """Pin ingress once: an exact question ID or '' for a normal prompt, across retries."""
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE deliveries SET clarify_id = COALESCE(clarify_id, ?) WHERE webhook_id = ?",
                 (clarify_id, webhook_id),
@@ -1282,7 +1297,7 @@ class DeliveryLedger:
             return str(row[0])
 
     def delivery_is_done(self, webhook_id: str) -> bool:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT state FROM deliveries WHERE webhook_id = ?", (webhook_id,)
             ).fetchone()
@@ -1296,7 +1311,7 @@ class DeliveryLedger:
         # Commit the admitted delivery and its repair obligation together. A
         # failed activity INSERT must never release already admitted execution.
         encoded = json.dumps(acceptance_thought) if acceptance_thought is not None else None
-        with self._lock, self._db:
+        with self._locked(), self._db:
             self._db.execute(
                 "UPDATE deliveries SET state = 'done', updated_at = ?, "
                 "acceptance_thought_json = ? WHERE webhook_id = ?",
@@ -1305,7 +1320,7 @@ class DeliveryLedger:
             self._db.commit()
 
     def pending_acceptance_thoughts(self, webhook_id: str | None = None) -> list[dict[str, Any]]:
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT webhook_id, acceptance_thought_json FROM deliveries "
                 "WHERE state = 'done' AND acceptance_thought_json IS NOT NULL "
@@ -1315,7 +1330,7 @@ class DeliveryLedger:
         return [{**json.loads(row[1]), "delivery_key": row[0]} for row in rows]
 
     def mark_acceptance_thought_scheduled(self, webhook_id: str) -> None:
-        with self._lock, self._db:
+        with self._locked(), self._db:
             self._db.execute(
                 "UPDATE deliveries SET acceptance_thought_json = "
                 "json_set(acceptance_thought_json, '$.scheduled', 1) WHERE webhook_id = ?",
@@ -1323,14 +1338,14 @@ class DeliveryLedger:
             )
 
     def acceptance_thought_is_current(self, webhook_id: str) -> bool:
-        with self._lock:
+        with self._locked():
             return self._db.execute(
                 "SELECT 1 FROM deliveries WHERE webhook_id = ? AND state = 'done' "
                 "AND acceptance_thought_json IS NOT NULL", (webhook_id,),
             ).fetchone() is not None
 
     def cancel_acceptance_thoughts(self, session_id: str) -> None:
-        with self._lock, self._db:
+        with self._locked(), self._db:
             self._db.execute(
                 "UPDATE deliveries SET acceptance_thought_json = NULL "
                 "WHERE json_extract(acceptance_thought_json, '$.agent_session_id') = ?",
@@ -1338,7 +1353,7 @@ class DeliveryLedger:
             )
 
     def release(self, webhook_id: str) -> None:
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "DELETE FROM deliveries WHERE webhook_id = ? AND state = 'processing' AND clarify_id IS NULL",
                 (webhook_id,),
@@ -1361,7 +1376,7 @@ class DeliveryLedger:
         """Persist one operation. A stable item_id makes producer retries idempotent."""
         now = int(time.time()) if now is None else int(now)
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        with self._lock, self._db:
+        with self._locked(), self._db:
             self._db.execute("BEGIN IMMEDIATE")
             if self._db.execute("SELECT 1 FROM outbox WHERE id = ?", (item_id,)).fetchone():
                 self._db.rollback()
@@ -1431,7 +1446,7 @@ class DeliveryLedger:
         evidence_json = json.dumps(
             evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             if self._db.execute(
                 "SELECT 1 FROM closure_reconciliations WHERE closure_key = ?", (closure_key,)
@@ -1539,7 +1554,7 @@ class DeliveryLedger:
             return True
 
     def get_closure(self, closure_key: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT closure_key, issue_id, session_id, outbox_id, evidence_json, state, "
                 "last_error, created_at, updated_at, completed_at "
@@ -1561,7 +1576,7 @@ class DeliveryLedger:
         }
 
     def has_session_closure(self, session_id: str) -> bool:
-        with self._lock:
+        with self._locked():
             return bool(
                 self._db.execute(
                     "SELECT 1 FROM closure_reconciliations WHERE session_id = ? LIMIT 1",
@@ -1570,7 +1585,7 @@ class DeliveryLedger:
             )
 
     def closure_counts(self) -> dict[str, int]:
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT state, COUNT(*) FROM closure_reconciliations GROUP BY state"
             ).fetchall()
@@ -1607,7 +1622,7 @@ class DeliveryLedger:
         """Claim one due head-of-line item; dead activities block completion, dead status writes do not."""
         now = time.time() if now is None else float(now)
         stale_before = int(now - self.outbox_claim_timeout_seconds)
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             continuation_filter = (
                 "" if include_continuations else "AND o.id NOT LIKE 'activity:turn-%' "
@@ -1652,7 +1667,7 @@ class DeliveryLedger:
 
     def mark_outbox_delivered(self, item_id: str, *, now: int | None = None) -> None:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE outbox SET state = 'delivered', last_error = NULL, "
                 "updated_at = ?, delivered_at = ? WHERE id = ?",
@@ -1674,7 +1689,7 @@ class DeliveryLedger:
         now: float | None = None,
     ) -> None:
         now = time.time() if now is None else float(now)
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE outbox SET state = 'pending', next_attempt_at = ?, last_error = ?, "
                 "updated_at = ? WHERE id = ?",
@@ -1696,7 +1711,7 @@ class DeliveryLedger:
             raise ValueError("Closure cleanup activity id and body must be provided together")
         now = int(time.time()) if now is None else int(now)
         truncated_error = error[:1000]
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 self._db.execute(
@@ -1773,7 +1788,7 @@ class DeliveryLedger:
                 raise
 
     def outbox_counts(self) -> dict[str, int]:
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT state, COUNT(*) FROM outbox GROUP BY state"
             ).fetchall()
@@ -1782,7 +1797,7 @@ class DeliveryLedger:
         return result
 
     def get_outbox_item(self, item_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT id, aggregate_key, sequence, operation, payload_json, state, attempts, "
                 "next_attempt_at, last_error, created_at FROM outbox WHERE id = ?",
@@ -1805,7 +1820,7 @@ class DeliveryLedger:
 
     def latest_clarify_timeout(self, session_id: str) -> dict[str, Any] | None:
         """Read the newest normal-question timeout marker; no ledger schema change."""
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT id FROM outbox WHERE aggregate_key = ? "
                 "AND json_type(payload_json, '$.clarify_timeout_goal') = 'object' "
@@ -1819,7 +1834,7 @@ class DeliveryLedger:
         """Merge correlation metadata into an existing outbox payload."""
         if not isinstance(metadata, dict):
             return False
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT payload_json FROM outbox WHERE id = ?", (item_id,)
             ).fetchone()
@@ -1842,7 +1857,7 @@ class DeliveryLedger:
 
     def latest_activity_progress_state(self, aggregate_key: str) -> dict[str, str]:
         """Return durable terminal-fence metadata from the newest session activity."""
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT payload_json FROM outbox WHERE aggregate_key = ? "
                 "AND operation IN ('activity.create', 'activity.transient.create') "
@@ -1865,7 +1880,7 @@ class DeliveryLedger:
     def open_progress_turn(self, aggregate_key: str, turn_key: str) -> bool:
         """Persist a trusted turn; replay of the same fenced key stays fenced."""
         now = int(time.time())
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT turn_key, fenced FROM progress_turns WHERE aggregate_key = ?",
                 (aggregate_key,),
@@ -1892,7 +1907,7 @@ class DeliveryLedger:
     def ensure_progress_turn(self, aggregate_key: str, fallback_turn_key: str) -> str:
         """Atomically return the current key, inserting a terminal sentinel if absent."""
         now = int(time.time())
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT turn_key FROM progress_turns WHERE aggregate_key = ?",
                 (aggregate_key,),
@@ -1908,7 +1923,7 @@ class DeliveryLedger:
         return fallback_turn_key
 
     def current_progress_turn_key(self, aggregate_key: str) -> str:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT turn_key FROM progress_turns WHERE aggregate_key = ?",
                 (aggregate_key,),
@@ -1916,7 +1931,7 @@ class DeliveryLedger:
         return str(row[0]) if row is not None else ""
 
     def progress_is_allowed(self, aggregate_key: str, turn_key: str = "") -> bool:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT turn_key, fenced FROM progress_turns WHERE aggregate_key = ?",
                 (aggregate_key,),
@@ -1933,7 +1948,7 @@ class DeliveryLedger:
         if not turn_key:
             return
         now = int(time.time())
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE progress_turns SET fenced = 1, updated_at = ? "
                 "WHERE aggregate_key = ? AND turn_key = ?",
@@ -1944,7 +1959,7 @@ class DeliveryLedger:
     def requeue_dead_outbox(self, item_id: str, *, now: int | None = None) -> bool:
         """Return one inspected dead letter to the delivery queue."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cur = self._db.execute(
                 "UPDATE outbox SET state = 'pending', next_attempt_at = ?, last_error = NULL, "
                 "updated_at = ? WHERE id = ? AND state = 'dead'",
@@ -1978,7 +1993,7 @@ class DeliveryLedger:
         now = int(time.time()) if now is None else int(now)
         prompt_json = json.dumps(prompt, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         blockers_json = json.dumps(blockers, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        with self._lock:
+        with self._locked():
             if self._db.execute(
                 "SELECT 1 FROM closure_reconciliations WHERE session_id = ? LIMIT 1",
                 (session_id,),
@@ -1998,7 +2013,7 @@ class DeliveryLedger:
             self._db.commit()
 
     def get_wait(self, session_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT session_id, issue_id, delivery_key, prompt_json, blockers_json, state, "
                 "revision, last_error, created_at, updated_at, resumed_at "
@@ -2009,7 +2024,7 @@ class DeliveryLedger:
     def list_waiting(self, *, state: str = "waiting") -> list[dict[str, Any]]:
         if state not in {"waiting", "resumed"}:
             raise ValueError("Unsupported dependency wait state")
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT session_id, issue_id, delivery_key, prompt_json, blockers_json, state, "
                 "revision, last_error, created_at, updated_at, resumed_at "
@@ -2027,7 +2042,7 @@ class DeliveryLedger:
     ) -> bool:
         now = int(time.time()) if now is None else int(now)
         encoded = json.dumps(blockers, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        with self._lock:
+        with self._locked():
             cur = self._db.execute(
                 "UPDATE waiting_executions SET blockers_json = ?, revision = revision + 1, "
                 "updated_at = ? WHERE session_id = ? AND state = 'waiting'",
@@ -2039,7 +2054,7 @@ class DeliveryLedger:
     def claim_wait(self, session_id: str, *, now: int | None = None) -> bool:
         """Grant exactly one resume worker ownership of a waiting session."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cur = self._db.execute(
                 "UPDATE waiting_executions SET state = 'resuming', revision = revision + 1, "
                 "updated_at = ? WHERE session_id = ? AND state = 'waiting'",
@@ -2050,7 +2065,7 @@ class DeliveryLedger:
 
     def requeue_unadmitted_wait(self, session_id: str, revision: int) -> bool:
         """CAS only the exact legacy false-admission record verified by the adapter."""
-        with self._lock:
+        with self._locked():
             cur = self._db.execute(
                 "UPDATE waiting_executions SET state='waiting', updated_at=?, resumed_at=NULL, "
                 "last_error='verified_ingress_not_admitted', revision=revision+1 "
@@ -2062,7 +2077,7 @@ class DeliveryLedger:
 
     def mark_wait_resumed(self, session_id: str, *, now: int | None = None) -> None:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE waiting_executions SET state = 'resumed', updated_at = ?, resumed_at = ? "
                 "WHERE session_id = ? AND state = 'resuming'", (now, now, session_id),
@@ -2071,7 +2086,7 @@ class DeliveryLedger:
 
     def fail_wait(self, session_id: str, error: str, *, now: int | None = None) -> None:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "UPDATE waiting_executions SET state = 'failed', last_error = ?, updated_at = ? "
                 "WHERE session_id = ? AND state IN ('waiting', 'resuming')",
@@ -2081,7 +2096,7 @@ class DeliveryLedger:
 
     def cancel_wait(self, session_id: str, *, now: int | None = None) -> bool:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cur = self._db.execute(
                 "UPDATE waiting_executions SET state = 'canceled', updated_at = ? "
                 "WHERE session_id = ? AND state IN ('waiting', 'resuming')", (now, session_id),
@@ -2091,7 +2106,7 @@ class DeliveryLedger:
 
     def cancel_waits_for_issue(self, issue_id: str, *, now: int | None = None) -> int:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             cur = self._db.execute(
                 "UPDATE waiting_executions SET state = 'canceled', updated_at = ? "
                 "WHERE issue_id = ? AND state IN ('waiting', 'resuming')", (now, issue_id),
@@ -2101,7 +2116,7 @@ class DeliveryLedger:
 
     def waiting_counts(self, *, now: int | None = None) -> dict[str, Any]:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT state, COUNT(*) FROM waiting_executions GROUP BY state"
             ).fetchall()
@@ -2122,7 +2137,7 @@ class DeliveryLedger:
 
     def activation_counts(self, *, now: int | None = None) -> dict[str, Any]:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT state, COUNT(*) FROM activation_waits GROUP BY state"
             ).fetchall()
@@ -2146,14 +2161,14 @@ class DeliveryLedger:
         return result
 
     def channel_route_counts(self) -> dict[str, int]:
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT state, COUNT(*) FROM channel_routes GROUP BY state"
             ).fetchall()
         return {str(state): int(count) for state, count in rows}
 
     def manager_activation_counts(self) -> dict[str, int]:
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT state, COUNT(*) FROM manager_activations GROUP BY state"
             ).fetchall()
@@ -2206,7 +2221,7 @@ class DeliveryLedger:
 
     def direct_activation_counts(self, *, now: int | None = None) -> dict[str, Any]:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT state, COUNT(*) FROM direct_activation_grants GROUP BY state"
             ).fetchall()
@@ -2262,7 +2277,7 @@ class DeliveryLedger:
     def prune(self, *, now: int | None = None) -> int:
         now = int(time.time()) if now is None else int(now)
         cutoff = now - self.retention_seconds
-        with self._lock:
+        with self._locked():
             # A done admission can still owe an acceptance activity/status. Keep
             # its retry receipt and currentness fence until delivery or cancellation.
             inbound = self._db.execute(
@@ -2364,7 +2379,7 @@ class DeliveryLedger:
         """Insert one deterministic decision, or return its exact prior row."""
         now = int(time.time()) if now is None else int(now)
         decision_id = self._turn_decision_id(agent_session_id, goal_generation, ordinal)
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             self._db.execute(
                 "INSERT OR IGNORE INTO turn_decisions("
@@ -2412,7 +2427,7 @@ class DeliveryLedger:
         """Atomically persist the successful response and terminal decision."""
         now = int(time.time()) if now is None else int(now)
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT outcome, dispatch_state, agent_session_id FROM turn_decisions "
@@ -2476,7 +2491,7 @@ class DeliveryLedger:
     ) -> bool:
         """Fence a non-error control decision and its progress in one transaction."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock, self._db:
+        with self._locked(), self._db:
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT agent_session_id, dispatch_state FROM turn_decisions WHERE decision_id=?",
@@ -2529,7 +2544,7 @@ class DeliveryLedger:
             raise ValueError("terminal turn state required")
         now = int(time.time()) if now is None else int(now)
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT agent_session_id, dispatch_state FROM turn_decisions WHERE decision_id=?",
@@ -2605,7 +2620,7 @@ class DeliveryLedger:
         encoded = json.dumps(
             error_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT outcome, dispatch_state, agent_session_id FROM turn_decisions "
@@ -2659,7 +2674,7 @@ class DeliveryLedger:
     ) -> bool:
         """Fence a stale success without emitting any terminal activity."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 "SELECT outcome, dispatch_state, agent_session_id FROM turn_decisions "
@@ -2730,7 +2745,7 @@ class DeliveryLedger:
         """Compare-and-swap a dispatch state without widening its replay window."""
         now = int(time.time()) if now is None else int(now)
         completed_at = now if new_state in {"completed", "fenced"} else None
-        with self._lock:
+        with self._locked():
             changed = self._db.execute(
                 "UPDATE turn_decisions SET dispatch_state=?, error=COALESCE(?, error), updated_at=?, "
                 "completed_at=? WHERE decision_id=? AND dispatch_state=?",
@@ -2750,7 +2765,7 @@ class DeliveryLedger:
     ) -> bool:
         """Classify a pre-reserved decision before any dispatch starts."""
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._locked():
             changed = self._db.execute(
                 "UPDATE turn_decisions SET outcome=?, updated_at=? "
                 "WHERE decision_id=? AND dispatch_state='pending' AND outcome=?",
@@ -2760,7 +2775,7 @@ class DeliveryLedger:
         return bool(changed)
 
     def get_turn_decision(self, decision_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT decision_id, agent_session_id, issue_id, hermes_session_id, "
                 "goal_generation, ordinal, outcome, dispatch_state, error, created_at, "
@@ -2773,7 +2788,7 @@ class DeliveryLedger:
         self, agent_session_id: str, base_goal_generation: int
     ) -> int:
         """Read the non-prunable reset count for one native goal generation."""
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT rollovers FROM goal_budget_rollovers "
                 "WHERE agent_session_id=? AND base_goal_generation=?",
@@ -2790,7 +2805,7 @@ class DeliveryLedger:
     ) -> bool:
         """Atomically consume one durable reset allowance and mark its decision."""
         now = int(time.time())
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             self._db.execute(
                 "INSERT OR IGNORE INTO goal_budget_rollovers("
@@ -2840,7 +2855,7 @@ class DeliveryLedger:
     ) -> bool:
         """Clear only the in-flight marker; the consumed count remains durable."""
         now = int(time.time())
-        with self._lock:
+        with self._locked():
             changed = self._db.execute(
                 "UPDATE goal_budget_rollovers SET pending_decision_id=NULL, updated_at=? "
                 "WHERE agent_session_id=? AND base_goal_generation=? "
@@ -2851,7 +2866,7 @@ class DeliveryLedger:
         return changed == 1
 
     def pending_budget_rollover(self, decision_id: str) -> bool:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT 1 FROM goal_budget_rollovers WHERE pending_decision_id=?",
                 (decision_id,),
@@ -2864,7 +2879,7 @@ class DeliveryLedger:
         """Durably consume one bounded public-wake admission attempt."""
         now = int(time.time())
         limit = max(1, int(max_attempts))
-        with self._lock:
+        with self._locked():
             self._db.execute("BEGIN IMMEDIATE")
             decision = self._db.execute(
                 "SELECT dispatch_state FROM turn_decisions WHERE decision_id=?",
@@ -2887,7 +2902,7 @@ class DeliveryLedger:
         return changed == 1
 
     def turn_admission_attempts(self, decision_id: str) -> int:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT attempts FROM continuation_admissions WHERE decision_id=?",
                 (decision_id,),
@@ -2895,7 +2910,7 @@ class DeliveryLedger:
         return int(row[0]) if row else 0
 
     def goal_resume_phase(self, decision_id: str) -> str | None:
-        with self._lock:
+        with self._locked():
             row = self._db.execute(
                 "SELECT phase FROM goal_resume_recovery WHERE decision_id=?",
                 (decision_id,),
@@ -2905,7 +2920,7 @@ class DeliveryLedger:
     def mark_goal_resume_required(self, decision_id: str) -> bool:
         """Durably announce an unchecked-done resume before touching GoalManager."""
         now = int(time.time())
-        with self._lock:
+        with self._locked():
             self._db.execute(
                 "INSERT OR IGNORE INTO goal_resume_recovery(decision_id, phase, updated_at) "
                 "VALUES (?, 'resume_required', ?)",
@@ -2921,7 +2936,7 @@ class DeliveryLedger:
     def mark_goal_resume_applied(self, decision_id: str) -> bool:
         """Record that GoalManager is observably active after the durable resume intent."""
         now = int(time.time())
-        with self._lock:
+        with self._locked():
             changed = self._db.execute(
                 "UPDATE goal_resume_recovery SET phase='resume_applied', updated_at=? "
                 "WHERE decision_id=? AND phase IN ('resume_required', 'resume_applied')",
@@ -2933,7 +2948,7 @@ class DeliveryLedger:
     def mark_pending_process_wait(self, decision_id: str) -> bool:
         """Persist a native wait barrier without completing the turn decision."""
         now = int(time.time())
-        with self._lock:
+        with self._locked():
             changed = self._db.execute(
                 "UPDATE turn_decisions SET error='native_process_wait', updated_at=? "
                 "WHERE decision_id=? AND outcome='continue' AND dispatch_state='pending' "
@@ -2944,7 +2959,7 @@ class DeliveryLedger:
         return changed == 1
 
     def list_turn_decisions(self, agent_session_id: str) -> list[dict[str, Any]]:
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT decision_id, agent_session_id, issue_id, hermes_session_id, "
                 "goal_generation, ordinal, outcome, dispatch_state, error, created_at, "
@@ -2959,7 +2974,7 @@ class DeliveryLedger:
         include_orphan_success: bool = False,
     ) -> list[dict[str, Any]]:
         after_created, after_id = after or (-1, "")
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT decision_id, agent_session_id, issue_id, hermes_session_id, "
                 "goal_generation, ordinal, outcome, dispatch_state, error, created_at, "
@@ -2978,7 +2993,7 @@ class DeliveryLedger:
         self, *, limit: int = 50, after: tuple[int, str] | None = None
     ) -> list[dict[str, Any]]:
         after_created, after_id = after or (-1, "")
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(
                 "SELECT decision_id, agent_session_id, issue_id, hermes_session_id, "
                 "goal_generation, ordinal, outcome, dispatch_state, error, created_at, "
@@ -2993,7 +3008,7 @@ class DeliveryLedger:
         self, agent_session_id: str, reason: str, *, now: int | None = None
     ) -> int:
         now = int(time.time()) if now is None else int(now)
-        with self._lock, self._db:
+        with self._locked(), self._db:
             changed = self._db.execute(
                 "UPDATE turn_decisions SET dispatch_state='fenced', outcome='stopped', "
                 "error=?, updated_at=?, completed_at=? WHERE agent_session_id=? "
@@ -3056,7 +3071,7 @@ class DeliveryLedger:
         ):
             raise ValueError("Acceptance evidence envelope is invalid or non-qualifying")
         now = int(time.time())
-        lock_context = self._lock if _commit else nullcontext()
+        lock_context = self._locked() if _commit else nullcontext()
         with lock_context:
             existing = self._db.execute(
                 "SELECT accepted_revision FROM acceptance_evidence "
@@ -3120,7 +3135,7 @@ class DeliveryLedger:
                 return set()
             query += " AND accepted_revision=?"
             parameters += (accepted_revision,)
-        with self._lock:
+        with self._locked():
             rows = self._db.execute(query, parameters).fetchall()
         return {str(row[0]) for row in rows}
 
@@ -3130,7 +3145,7 @@ class DeliveryLedger:
         """Return the newest revision and its PASS hashes for one exact delegate."""
         if not issue_id or not actor_id:
             return None
-        with self._lock:
+        with self._locked():
             revision_row = self._db.execute(
                 "SELECT accepted_revision FROM acceptance_evidence "
                 "WHERE issue_id=? AND actor_id=? AND result='PASS' "
@@ -3173,7 +3188,7 @@ class DeliveryLedger:
             or target_timestamp < source_timestamp
         ):
             raise ValueError("Acceptance revision transition is invalid")
-        with self._lock:
+        with self._locked():
             try:
                 self._db.execute("BEGIN IMMEDIATE")
                 existing_revisions = {
