@@ -40,6 +40,195 @@ class CreatedAdmissionDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.status, 200)
         self.assertEqual((await replay.json())["status"], "duplicate")
 
+    async def test_issue_lock_timeout_releases_claim_without_late_dispatch_then_retry_dedups(self):
+        from unittest import mock
+
+        lock = self.adapter._issue_lock("issue-164")
+        await lock.acquire()
+        key = probe.fixtures.adapter_mod._delivery_key(self.payload, self.request_for(self.payload)._body)
+        with mock.patch.object(lock, "acquire", wraps=lock.acquire) as acquire:
+            started = time.monotonic()
+            created = self.post(self.payload)
+            try:
+                # Observe actual lock contention, not merely client submission.
+                async with asyncio.timeout(1):
+                    while not acquire.await_count:
+                        await asyncio.sleep(0)
+                duplicate = await asyncio.wait_for(self.post(self.payload), timeout=1)
+                self.assertEqual(duplicate.status, 503)
+                self.assertEqual((await duplicate.json())["status"], "processing")
+                response = await asyncio.wait_for(asyncio.shield(created), timeout=4.9)
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertEqual(response.status, 503)
+                self.assertEqual((await response.json())["status"], "unavailable")
+                self.assertFalse(self.adapter._ledger.delivery_is_done(key))
+                self.assertFalse(self.handler_entered.is_set())
+                self.assertEqual(self.adapter._linear.calls, [])
+                self.assertFalse(self.adapter._ledger.outbox_counts()["pending"])
+            finally:
+                lock.release()
+            await asyncio.wait_for(asyncio.shield(created), timeout=1)
+            await asyncio.sleep(0)
+            self.assertFalse(self.handler_entered.is_set(), "timed-out lock waiter dispatched later")
+            self.assertIsNone(self.adapter._ledger.get_issue_session("issue-164"))
+            self.assertEqual((await self.post(self.payload)).status, 200)
+            await asyncio.wait_for(self.handler_entered.wait(), timeout=1)
+            self.assertEqual((await (await self.post(self.payload)).json())["status"], "duplicate")
+
+    async def test_prior_owner_timeout_preserves_binding_and_stop_early_late_fences(self):
+        from unittest import mock
+
+        self.adapter._ledger.bind_issue_session("issue-164", "old-session")
+        self.adapter._linear.get_agent_session_delivery_context = self.slow_read
+        with mock.patch.object(self.adapter, "_cancel_linear_session_processing",
+                               wraps=self.adapter._cancel_linear_session_processing) as cancel:
+            started = time.monotonic()
+            created = self.post(self.payload)
+            await asyncio.wait_for(self.entered.wait(), timeout=1)
+            duplicate = await asyncio.wait_for(self.post(self.payload), timeout=1)
+            self.assertEqual(duplicate.status, 503)
+            self.assertEqual((await duplicate.json())["status"], "processing")
+            stopped = self.post({**self.payload, "action": "prompted", "agentActivity": {
+                "id": "stop-prior-owner", "body": "stop", "signal": "stop",
+            }})
+            async with asyncio.timeout(1):
+                while not cancel.await_count:
+                    await asyncio.sleep(0)
+            response = await asyncio.wait_for(asyncio.shield(created), timeout=4.9)
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(response.status, 503)
+            self.assertEqual((await asyncio.wait_for(stopped, timeout=1)).status, 200)
+            self.assertGreaterEqual(cancel.await_count, 2)
+        self.release.set()
+        await asyncio.sleep(0)
+        self.assertEqual(self.adapter._ledger.get_issue_session("issue-164"), "old-session")
+        self.assertFalse(self.handler_entered.is_set())
+        self.assertFalse([call for call in self.adapter._linear.calls if call[1] == "thought"])
+        key = probe.fixtures.adapter_mod._delivery_key(self.payload, self.request_for(self.payload)._body)
+        self.assertIsNone(self.adapter._ledger.get_outbox_item(f"activity:thought:{key}"))
+        self.assertFalse(self.adapter._ledger.pending_acceptance_thoughts(key))
+
+    async def test_issue_lock_and_owner_read_share_original_admission_budget(self):
+        lock = self.adapter._issue_lock("issue-164")
+        await lock.acquire()
+        self.adapter._ledger.bind_issue_session("issue-164", "old-session")
+        self.adapter._linear.get_agent_session_delivery_context = self.slow_read
+        started = time.monotonic()
+        created = self.post(self.payload)
+        try:
+            await asyncio.sleep(2)
+        finally:
+            lock.release()
+        response = await asyncio.wait_for(asyncio.shield(created), timeout=2.9)
+        self.assertTrue(self.entered.is_set())
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(response.status, 503)
+        self.assertEqual(self.adapter._ledger.get_issue_session("issue-164"), "old-session")
+        self.assertFalse(self.handler_entered.is_set())
+        self.assertEqual(self.adapter._linear.calls, [])
+
+    async def test_non_yielding_owner_read_cannot_bind_or_dispatch_after_deadline(self):
+        self.adapter._ledger.bind_issue_session("issue-164", "old-session")
+
+        async def old_owner(session_id):
+            self.assertEqual(session_id, "old-session")
+            time.sleep(4.05)  # An async function need not yield to timeout_at's callback.
+            return {"id": session_id, "issue_id": "issue-164", "status": "complete",
+                    "app_user_id": self.adapter._linear.actor_id}
+
+        self.adapter._linear.get_agent_session_delivery_context = old_owner
+        response = await asyncio.wait_for(self.post(self.payload), timeout=5)
+        self.assertEqual(response.status, 503)
+        self.assertEqual(self.adapter._ledger.get_issue_session("issue-164"), "old-session")
+        self.assertFalse(self.handler_entered.is_set())
+        self.assertEqual(self.adapter._linear.calls, [])
+
+    async def test_non_yielding_native_read_cannot_admit_after_deadline(self):
+        original = self.adapter._linear.get_agent_turn_context
+
+        async def native_read(session_id):
+            time.sleep(4.05)
+            return await original(session_id)
+
+        self.adapter._linear.get_agent_turn_context = native_read
+        response = await asyncio.wait_for(self.post(self.payload), timeout=5)
+        self.assertEqual(response.status, 503)
+        self.assertFalse(self.handler_entered.is_set())
+        self.assertEqual(self.adapter._linear.calls, [])
+        self.assertFalse(self.adapter._ledger.outbox_counts()["pending"])
+
+    def configure_activation(self, kind):
+        ledger = self.adapter._ledger
+        self.adapter._activation_allowed_team_ids = {"team-ops"}
+        self.adapter._planned_owner_ids = {"user-1"}
+        self.adapter._linear.closure_contexts["issue-164"] = {
+            "id": "issue-164", "title": "Deadline", "state": {"type": "unstarted"},
+            "team": {"id": "team-ops"}, "assignee": {"id": "user-1"},
+            "creator": {"id": self.adapter._linear.actor_id},
+            "delegate": {"id": self.adapter._linear.actor_id},
+        }
+        if kind == "manager":
+            ledger.claim_manager_activation("issue-164", "activation", {})
+            ledger.mark_manager_activation("issue-164", "delegated")
+            return ledger.get_manager_activation
+        ledger.reserve_direct_activation_grant(
+            operation_key="activation", source_platform="telegram", source_user_id="user-1",
+            source_message_id="message-1", source_session_id="hermes-session", source_profile="general",
+            actor_id=self.adapter._linear.actor_id, team_id="team-ops",
+            issue_fingerprint=ledger.direct_issue_fingerprint("team-ops", "Deadline"),
+        )
+        ledger.bind_direct_activation_grant("activation", "issue-164")
+        self.payload["actor"] = {"id": self.adapter._linear.actor_id}
+        return ledger.get_direct_activation_grant
+
+    async def test_manager_session_lock_timeout_precedes_ambiguous_dispatch_claim(self):
+        get_activation = self.configure_activation("manager")
+        await self.assert_activation_lock_timeout(get_activation, "delegated")
+
+    async def test_direct_session_lock_timeout_restores_only_unattempted_claim(self):
+        get_activation = self.configure_activation("direct")
+        await self.assert_activation_lock_timeout(get_activation, "granted")
+
+    async def assert_activation_lock_timeout(self, get_activation, retry_state):
+        lock = self.adapter._session_lock("linear-session")
+        await lock.acquire()
+        created = self.post(self.payload)
+        try:
+            response = await asyncio.wait_for(asyncio.shield(created), timeout=4.9)
+            self.assertEqual(response.status, 503)
+            self.assertEqual(get_activation("issue-164")["state"], retry_state)
+            self.assertFalse(self.handler_entered.is_set())
+            self.assertEqual(self.adapter._linear.calls, [])
+            self.assertFalse(self.adapter._ledger.outbox_counts()["pending"])
+        finally:
+            lock.release()
+        await asyncio.wait_for(asyncio.shield(created), timeout=1)
+        await asyncio.sleep(0)
+        self.assertFalse(self.handler_entered.is_set())
+        self.assertEqual((await self.post(self.payload)).status, 200)
+        await asyncio.wait_for(self.handler_entered.wait(), timeout=1)
+        self.assertEqual((await (await self.post(self.payload)).json())["status"], "duplicate")
+
+    async def test_manager_dispatch_is_not_canceled_or_reset_at_pre_admission_deadline(self):
+        await self.assert_dispatch_not_timed_out("manager")
+
+    async def test_direct_dispatch_is_not_canceled_or_reset_at_pre_admission_deadline(self):
+        await self.assert_dispatch_not_timed_out("direct")
+
+    async def assert_dispatch_not_timed_out(self, kind):
+        get_activation = self.configure_activation(kind)
+        self.adapter._linear.get_agent_turn_context = self.slow_read
+        created = self.post(self.payload)
+        await asyncio.wait_for(self.entered.wait(), timeout=1)
+        done, _ = await asyncio.wait({created}, timeout=4.1)
+        self.assertFalse(done, "pre-admission timeout canceled an attempted dispatch")
+        self.assertEqual(get_activation("issue-164")["state"],
+                         "dispatch_unknown" if kind == "manager" else "claimed")
+        self.release.set()
+        self.assertEqual((await asyncio.wait_for(created, timeout=1)).status, 503)
+        self.assertEqual(get_activation("issue-164")["state"], "dispatch_unknown")
+        self.assertFalse(self.handler_entered.is_set())
+
     async def test_sqlite_thought_failure_replays_delivery_without_replaying_execution(self):
         from unittest import mock
 

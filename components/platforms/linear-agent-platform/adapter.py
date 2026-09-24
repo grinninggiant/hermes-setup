@@ -16,7 +16,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable
@@ -41,6 +41,23 @@ from .ledger import DeliveryLedger, OutboxItem
 from .linear_client import LinearAPIError, LinearClient
 
 logger = logging.getLogger(__name__)
+
+
+def _check_admission_deadline(deadline: float | None) -> None:
+    # timeout_at only cancels on a loop tick; an awaited coroutine may never yield.
+    if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+        raise TimeoutError("Linear created admission deadline expired")
+
+
+@asynccontextmanager
+async def _admission_lock(lock: asyncio.Lock, deadline: float | None):
+    async with asyncio.timeout_at(deadline):
+        await lock.acquire()
+    try:
+        _check_admission_deadline(deadline)
+        yield
+    finally:
+        lock.release()
 
 
 def _ops200_profile_fix_active() -> bool:
@@ -1038,6 +1055,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         )
                     async with asyncio.timeout_at(read_deadline):
                         context = await self._linear.get_issue_closure_context(issue_id)
+                    _check_admission_deadline(read_deadline)
                     team_id = str((context.get("team") or {}).get("id") or "")
                     direct_authoritative = bool(
                         self._direct_activation_policy_allows(context, direct_grant)
@@ -1067,6 +1085,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             ):
                 async with asyncio.timeout_at(read_deadline):
                     context = await self._linear.get_issue_closure_context(issue_id)
+                _check_admission_deadline(read_deadline)
                 team_id = str((context.get("team") or {}).get("id") or "")
                 owner_id = str((context.get("assignee") or {}).get("id") or "")
                 creator_id = str((context.get("creator") or {}).get("id") or "")
@@ -1086,8 +1105,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         ),
                     )
                 ):
-                    async with self._issue_lock(issue_id):
-                        if not await self._bind_issue_session(issue_id, agent_session_id):
+                    async with _admission_lock(self._issue_lock(issue_id), read_deadline):
+                        if not await self._bind_issue_session(issue_id, agent_session_id, read_deadline=read_deadline):
                             self._ledger.mark_done(delivery_key)
                             return web.json_response({"status": "issue_session_active"}, status=200)
                         self._ledger.put_direct_activation_event(
@@ -1121,6 +1140,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     webhook_id,
                     issue_id,
                     agent_session_id,
+                    read_deadline=read_deadline,
                 )
             if (
                 event_actor_id
@@ -1140,7 +1160,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 # another admission may finish while Stop waits for those locks.
                 await self._cancel_linear_session_processing(agent_session_id)
             if action == "created" and issue_id:
-                async with self._issue_lock(issue_id):
+                async with _admission_lock(self._issue_lock(issue_id), read_deadline):
                     pending_closure = self._ledger.get_pending_closure_event(issue_id)
                     if pending_closure is not None:
                         closure_status = await self._reconcile_human_completion(
@@ -1157,13 +1177,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                                 issue_id, pending_closure["event_revision"]
                             )
                         else:
-                            await self._bind_issue_session(issue_id, agent_session_id)
+                            await self._bind_issue_session(issue_id, agent_session_id, read_deadline=read_deadline)
                             self._ledger.release(delivery_key)
                             claimed = False
                             return web.json_response(
                                 {"status": "closure_deferred"}, status=503
                             )
-                    if not await self._bind_issue_session(issue_id, agent_session_id):
+                    if not await self._bind_issue_session(issue_id, agent_session_id, read_deadline=read_deadline):
                         if direct_activation_created:
                             self._ledger.reset_direct_activation_claim(
                                 issue_id, agent_session_id, "issue_session_active"
@@ -1230,9 +1250,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 and issue_id
                 and not direct_activation_created
             ):
-                async with self._issue_lock(issue_id):
+                async with _admission_lock(self._issue_lock(issue_id), read_deadline):
                     async with asyncio.timeout_at(read_deadline):
                         context = await self._linear.get_issue_closure_context(issue_id)
+                    _check_admission_deadline(read_deadline)
                     state_type = str((context.get("state") or {}).get("type") or "").casefold()
                     if state_type == "backlog":
                         team_id = str((context.get("team") or {}).get("id") or "")
@@ -1290,10 +1311,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if action == "created" and self._dependency_wait_enabled and issue_id:
                 async with asyncio.timeout_at(read_deadline):
                     blockers = await self._linear.get_open_blockers(issue_id)
+                _check_admission_deadline(read_deadline)
                 if direct_activation_created:
                     direct_issue_lock = self._issue_lock(issue_id)
-                    await direct_issue_lock.acquire()
+                    async with asyncio.timeout_at(read_deadline):
+                        await direct_issue_lock.acquire()
                     direct_issue_lock_held = True
+                    _check_admission_deadline(read_deadline)
                 if (
                     direct_activation_created
                     and not self._direct_activation_claim_is_current(
@@ -1326,8 +1350,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     return web.json_response({"status": "awaiting_input"}, status=200)
             if direct_activation_created and issue_id and not direct_issue_lock_held:
                 direct_issue_lock = self._issue_lock(issue_id)
-                await direct_issue_lock.acquire()
+                async with asyncio.timeout_at(read_deadline):
+                    await direct_issue_lock.acquire()
                 direct_issue_lock_held = True
+                _check_admission_deadline(read_deadline)
                 if not self._direct_activation_claim_is_current(
                     issue_id, agent_session_id
                 ):
@@ -1336,7 +1362,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         {"status": "direct_activation_canceled"}, status=200
                     )
             dispatch_lock = self._session_lock(agent_session_id)
-            await dispatch_lock.acquire()
+            async with asyncio.timeout_at(read_deadline if action == "created" else None):
+                await dispatch_lock.acquire()
             dispatch_lock_held = True
             native_command = (
                 action == "prompted"
@@ -1409,6 +1436,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 # queued event's later pre-handler check gets a fresh read.
                 event._linear_created_read_deadline = read_deadline
             normal_native_prompt = human_preemption and self._native_goal_continuation_enabled
+            if action == "created":
+                _check_admission_deadline(read_deadline)
             if direct_activation_created:
                 direct_dispatch_attempted = True
             await self.handle_message(event)
@@ -1549,16 +1578,20 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         webhook_id: str,
         issue_id: str,
         session_id: str,
+        *,
+        read_deadline: float | None = None,
     ) -> web.Response:
         """CAS and dispatch one native manager session while closure controls are excluded."""
         assert self._ledger is not None and self._linear is not None
-        async with self._issue_lock(issue_id):
+        async with _admission_lock(self._issue_lock(issue_id), read_deadline):
             activation = self._ledger.get_manager_activation(issue_id)
             state = str((activation or {}).get("state") or "")
             evidence = (activation or {}).get("evidence") or {}
             if state == "dispatch_unknown":
                 event_actor_id, _ = _actor(payload)
-                recovery_context = await self._linear.get_issue_closure_context(issue_id)
+                async with asyncio.timeout_at(read_deadline):
+                    recovery_context = await self._linear.get_issue_closure_context(issue_id)
+                _check_admission_deadline(read_deadline)
                 recovery_state = recovery_context.get("state") or {}
                 evidence_state_id = str(evidence.get("current_state_id") or "")
                 evidence_revision = str(evidence.get("event_updated_at") or "")
@@ -1601,9 +1634,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         )
                     except ValueError:
                         native_session_revision = False
+                async with asyncio.timeout_at(read_deadline):
+                    sessions = await self._linear.get_issue_agent_sessions(issue_id)
+                _check_admission_deadline(read_deadline)
                 open_actor_sessions = [
-                    session
-                    for session in await self._linear.get_issue_agent_sessions(issue_id)
+                    session for session in sessions
                     if self._is_execution_capable_open_session(session)
                 ]
                 recovered_reopen = bool(
@@ -1655,7 +1690,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if state == "canceled":
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "activation_policy_denied"}, status=200)
-            context = await self._linear.get_issue_closure_context(issue_id)
+            async with asyncio.timeout_at(read_deadline):
+                context = await self._linear.get_issue_closure_context(issue_id)
+            _check_admission_deadline(read_deadline)
             expected_session_id = str((activation or {}).get("session_id") or "")
             evidence = (activation or {}).get("evidence") or {}
             reopen_activation = bool(
@@ -1682,21 +1719,24 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 self._ledger.mark_manager_activation(issue_id, "canceled")
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "activation_policy_denied"}, status=200)
-            if not await self._bind_issue_session(issue_id, session_id):
+            if not await self._bind_issue_session(issue_id, session_id, read_deadline=read_deadline):
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "issue_session_active"}, status=200)
             if state in {"claimed", "failed", "delegation_unknown"}:
                 self._ledger.mark_manager_activation(issue_id, "delegated")
-            if not self._ledger.claim_manager_session(issue_id, session_id):
-                current = self._ledger.get_manager_activation(issue_id) or {}
-                status = (
-                    "dispatch_ambiguous"
-                    if current.get("state") == "dispatch_unknown"
-                    else "manager_session_duplicate"
-                )
-                self._ledger.mark_done(delivery_key)
-                return web.json_response({"status": status}, status=200)
-            async with self._session_lock(session_id):
+            async with _admission_lock(self._session_lock(session_id), read_deadline):
+                # After this CAS dispatch may be ambiguous: never time out or
+                # reset its owner, even if handle_message itself is slow.
+                _check_admission_deadline(read_deadline)
+                if not self._ledger.claim_manager_session(issue_id, session_id):
+                    current = self._ledger.get_manager_activation(issue_id) or {}
+                    status = (
+                        "dispatch_ambiguous"
+                        if current.get("state") == "dispatch_unknown"
+                        else "manager_session_duplicate"
+                    )
+                    self._ledger.mark_done(delivery_key)
+                    return web.json_response({"status": status}, status=200)
                 event = self._message_event(
                     payload, delivery_key, webhook_id, activation_resume=True
                 )
@@ -2718,7 +2758,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             await self.handle_message(event)
             return True
 
-    async def _bind_issue_session(self, issue_id: str, session_id: str) -> bool:
+    async def _bind_issue_session(
+        self, issue_id: str, session_id: str, *, read_deadline: float | None = None,
+    ) -> bool:
         """One issue execution per profile/app; callers hold the issue lock.
 
         Vendor terminal status must belong to the exact old binding. The SQLite
@@ -2747,7 +2789,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             # Reject without vendor I/O under the issue lock: Stop needs it too.
             if locally_active():
                 return False
-            context = await self._linear.get_agent_session_delivery_context(previous)
+            async with asyncio.timeout_at(read_deadline):
+                context = await self._linear.get_agent_session_delivery_context(previous)
+            _check_admission_deadline(read_deadline)
             if not (
                 self._linear.actor_id
                 and context.get("id") == previous
@@ -2765,6 +2809,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 if (pending and pending.get("session_id") == previous
                         and pending.get("state") in {"waiting", "resuming", "claimed", "dispatch_unknown"}):
                     return False
+        _check_admission_deadline(read_deadline)
         return self._ledger.bind_issue_session(
             issue_id, session_id, expected_session_id=previous,
         )
@@ -4462,6 +4507,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         event._linear_created_read_deadline = None
         async with asyncio.timeout_at(read_deadline):
             context = await self._linear.get_agent_turn_context(session_id)
+        _check_admission_deadline(read_deadline)
         probe = {
             "completed": False,
             "failed": False,
@@ -4528,6 +4574,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     return await self._visible_ingress_veto(event, "late_clarify_unverified")
         if event.metadata.get("linear_dependency_resume") and self._dependency_resume_claim(event) is None:
             return await self._visible_ingress_veto(event, "dependency_resume_fenced")
+        _check_admission_deadline(read_deadline)
         return False
 
     def _dependency_resume_claim(self, event: MessageEvent) -> dict[str, Any] | None:
