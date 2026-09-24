@@ -5,6 +5,7 @@ import hmac
 import importlib.util
 import asyncio
 import contextvars
+from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
 import sys
@@ -37,11 +38,24 @@ class Transport:
         self.fail = fail
         self.retryable = retryable
         self.activities = []
+        self.evidence = {}
+        self.sequence = 0
+
+    def record_activity(self, session_id, activity_id, kind, body, user_id):
+        self.sequence += 1
+        self.evidence[activity_id] = {
+            "id": activity_id, "agentSessionId": session_id,
+            "createdAt": (datetime(2026, 1, 1, tzinfo=timezone.utc)
+                          + timedelta(seconds=self.sequence)).isoformat(),
+            "signal": None, "user": {"id": user_id, "app": user_id == "app-221"},
+            "content": {"__typename": "AgentActivity" + kind.title() + "Content", "body": body},
+        }
 
     async def create_activity(self, session_id, activity_type, body, *, activity_id, ephemeral=False):
         if self.fail:
             raise client_mod.LinearAPIError("vendor rejected activity", retryable=self.retryable)
         self.activities.append((session_id, activity_type, body))
+        self.record_activity(session_id, activity_id, activity_type, body, "app-221")
         return activity_id
 
 
@@ -49,6 +63,18 @@ class Linear:
     organization_id = "org-221"
     actor_id = "app-221"
     actor_name = "Native app"
+    verify_late_clarify_reply = client_mod.LinearClient.verify_late_clarify_reply
+    verify_clarify_reply = client_mod.LinearClient.verify_clarify_reply
+    _agent_activity_evidence = client_mod.LinearClient._agent_activity_evidence
+
+    async def graphql(self, query, variables):
+        assert "LinearAgentActivityEvidence" in query
+        assert variables["after"] is None
+        return {"agentSession": {"id": variables["id"], "activities": {
+            "nodes": [row for row in self.transport.evidence.values()
+                      if row["agentSessionId"] == variables["id"]],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }}}
 
     def __init__(self, transport, state="started", status="active", delegate_id=None):
         self.transport, self.state = transport, state
@@ -96,6 +122,9 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
         self.adapter.gateway_runner = SimpleNamespace(async_session_store=SimpleNamespace(
             lookup_by_session_key=mock.AsyncMock(return_value=SimpleNamespace(
                 session_key=self.key, session_id="hermes-session-221"))))
+        store = self.adapter.gateway_runner.async_session_store
+        store._lock = threading.Lock()
+        store._entries = {self.key: store.lookup_by_session_key.return_value}
 
     def tearDown(self):
         clarify_gateway.clear_session(self.key)
@@ -103,6 +132,7 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def payload(self, actor="user-221", body="2", webhook="webhook-221"):
+        self.transport.record_activity("linear-session-221", f"activity-{webhook}", "prompt", body, actor)
         return {"type": "AgentSessionEvent", "action": "prompted", "organizationId": "org-221",
                 "webhookId": webhook, "webhookTimestamp": time.time(), "actor": {"id": actor},
                 "agentSession": {"id": "linear-session-221", "status": "active", "issue": {"id": "issue-221"}},
@@ -120,6 +150,15 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
 
         self.adapter._signing_secrets = ("secret-221",)
         return await self.adapter._handle_webhook(Request())
+
+    async def publish_question(self, clarify_id, choices):
+        await self.adapter._drain_outbox_once()
+        entry = clarify_gateway.register(clarify_id, self.key, "Target?", choices,
+            turn_owner=("hermes-session-221", "turn-221"))
+        result = await self.adapter.send_clarify(
+            "linear-session-221", "Target?", choices, clarify_id, self.key)
+        self.assertTrue(result.success, result.error)
+        return entry
 
     def _foreground_context(self, turn_id):
         from agent.tool_executor import _ToolCallRef, _pre_tool_block, _resolve_sequential_dispatch
@@ -422,7 +461,9 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(receipts), 1)
 
     async def test_rejected_or_closed_reply_never_enqueues_receipt(self):
-        clarify_gateway.register("rejected", self.key, "Target?", ["yes"], turn_owner=("hermes-session-221", "turn-221"))
+        entry = await self.publish_question("rejected", ["yes"])
+        # Exercise retained native-choice selection validation, before text mode.
+        entry.awaiting_text = False
         for payload, expected in (
             (self.payload(actor="other"), "clarify_actor_mismatch"),
             (self.payload(body="7"), "clarify_rejected"),
@@ -440,13 +481,13 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.adapter._ledger.get_outbox_item("activity:clarify-resolved:rejected"))
 
     async def test_signed_actor_replay_and_wrong_actor(self):
-        clarify_gateway.register("normal", self.key, "Target?", ["staging", "prod"], turn_owner=("hermes-session-221", "turn-221"))
+        await self.publish_question("normal", ["staging", "prod"])
         first = await self.webhook(self.payload())
         self.assertEqual(json.loads(first.text)["status"], "clarify_resolved")
         self.assertEqual(clarify_gateway.wait_for_response("normal", .01), "prod")
         replay = await self.webhook(self.payload())
         self.assertEqual(json.loads(replay.text)["status"], "duplicate")
-        clarify_gateway.register("wrong", self.key, "Target?", ["yes"], turn_owner=("hermes-session-221", "turn-221"))
+        await self.publish_question("wrong", ["yes"])
         wrong = await self.webhook(self.payload(actor="other-user", webhook="webhook-wrong"))
         self.assertEqual(json.loads(wrong.text)["status"], "clarify_actor_mismatch")
 

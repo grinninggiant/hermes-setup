@@ -193,23 +193,52 @@ class CreatedAdmissionDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([call for call in self.adapter._linear.calls if call[1] == "thought"])
 
     async def test_stop_receipt_write_failure_still_interrupts_core_and_retries_truthfully(self):
-        await self._assert_stop_receipt_failure(contended=False)
+        await self._assert_stop_receipt_failure()
 
     async def test_stop_receipt_write_failure_still_interrupts_before_session_lock(self):
-        await self._assert_stop_receipt_failure(contended=True)
+        await self._assert_stop_receipt_failure(self.adapter._session_lock("linear-session"))
 
-    async def _assert_stop_receipt_failure(self, *, contended):
+    async def test_stop_receipt_write_failure_still_interrupts_before_issue_lock(self):
+        await self._assert_stop_receipt_failure(self.adapter._issue_lock("issue-164"))
+
+    async def test_stop_receipt_write_failure_still_interrupts_before_outbox_lock(self):
+        await self._assert_stop_receipt_failure(self.adapter._outbox_drain_lock)
+
+    async def test_stop_fence_write_failure_still_interrupts_core_and_retries_truthfully(self):
+        await self._assert_stop_receipt_failure(fence_failure=True)
+
+    async def test_stop_fence_write_failure_still_interrupts_before_session_lock(self):
+        await self._assert_stop_receipt_failure(
+            self.adapter._session_lock("linear-session"), fence_failure=True,
+        )
+
+    async def _assert_stop_receipt_failure(self, lock=None, *, fence_failure=False):
+        from unittest import mock
+
+        calls = []
+        cancelled = asyncio.Event()
+
+        async def handler(event):
+            calls.append(event)
+            self.handler_entered.set()
+            try:
+                await asyncio.wait_for(self.release.wait(), timeout=15)
+            finally:
+                cancelled.set()
+
+        self.adapter.set_message_handler(handler)
         ledger = self.adapter._ledger
         self.assertEqual((await self.post(self.payload)).status, 200)
         await asyncio.wait_for(self.handler_entered.wait(), timeout=1)
         await self.adapter._wait_for_thought("linear-session")
         core_task, = self.adapter._session_tasks.values()
         decision = ledger.reserve_turn_decision(
-            "linear-session", "issue-164", "hermes-session", 1, 1, "continue",
+            "linear-session", "issue-164", "hermes-session", 123000000, 1, "continue",
+            source=self.adapter._source_snapshot(calls[0].source),
         )
         ledger.transition_turn_decision(decision["decision_id"], "pending", "enqueued")
         ledger._db.execute(
-            "CREATE TRIGGER fail_cancel_receipt BEFORE UPDATE ON deliveries "
+            "CREATE TEMP TRIGGER fail_cancel_receipt BEFORE UPDATE ON deliveries "
             "WHEN OLD.acceptance_thought_json IS NOT NULL "
             "AND NEW.acceptance_thought_json IS NULL "
             "BEGIN SELECT RAISE(FAIL, 'injected cancellation receipt failure'); END"
@@ -218,32 +247,54 @@ class CreatedAdmissionDeadlineTests(unittest.IsolatedAsyncioTestCase):
             "id": "stop-receipt-fault", "body": "stop", "signal": "stop",
         }}
         stop_key = probe.fixtures.adapter_mod._delivery_key(stop, self.request_for(stop)._body)
-        lock = self.adapter._session_lock("linear-session")
-        if contended:
+        if fence_failure:
+            ledger._db.execute(
+                "CREATE TEMP TRIGGER fail_stop_fence BEFORE UPDATE ON turn_decisions "
+                "WHEN NEW.outcome = 'stopped' "
+                "BEGIN SELECT RAISE(FAIL, 'injected Stop fence failure'); END"
+            )
+        if lock is not None:
             await lock.acquire()
         try:
-            response = await asyncio.wait_for(self.post(stop), timeout=2)
+            post = self.post(stop)
+            await asyncio.wait_for(cancelled.wait(), timeout=1)
+            if lock is self.adapter._outbox_drain_lock:
+                # Core finalization needs this lock after the actual handler stops.
+                lock.release()
+                lock = None
+            response = await asyncio.wait_for(post, timeout=2)
             self.assertEqual(response.status, 503)  # Never claim durable cancellation succeeded.
             self.assertGreater(self.adapter.gateway_runner.interrupt_session_processing.await_count, 0)
             self.assertTrue(core_task.done())
             self.assertTrue(core_task.cancelled())
             self.assertFalse(ledger.delivery_is_done(stop_key))
-            self.assertEqual(ledger.get_turn_decision(decision["decision_id"])["dispatch_state"],
-                             "enqueued" if contended else "fenced")
         finally:
-            if contended:
+            if lock is not None:
                 lock.release()
+        # The fault disappears on reopen. Recovery must be safe BEFORE Stop retry,
+        # with an active native goal and live vendor context, not an accidental veto.
         ledger.close()
         self.adapter._ledger = ledger = probe.fixtures.DeliveryLedger(str(ledger.path))
-        self.assertEqual((await self.post(stop)).status, 503)
+        if fence_failure:
+            # A failed durable fence cannot promise restart safety: require a
+            # successful Stop retry after storage repair before recovering work.
+            self.assertEqual(ledger.get_turn_decision(decision["decision_id"])["dispatch_state"], "enqueued")
+            self.assertEqual((await self.post(stop)).status, 200)
+        with mock.patch.multiple(probe.native.FakeGoalManager, existing=True,
+                                 existing_status="active", existing_turns=1):
+            await asyncio.wait_for(self.adapter._recover_turn_decisions(), timeout=2)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        self.assertEqual(len(calls), 1, "Stop recovery started a second real core handler")
+        self.assertFalse(self.adapter._session_tasks)
         self.assertEqual(ledger.get_turn_decision(decision["decision_id"])["dispatch_state"], "fenced")
         self.assertEqual(ledger.get_turn_decision(decision["decision_id"])["outcome"], "stopped")
-        self.assertFalse(ledger.delivery_is_done(stop_key))
-        ledger._db.execute("DROP TRIGGER fail_cancel_receipt")
+        self.assertEqual(ledger.delivery_is_done(stop_key), fence_failure)
         self.assertEqual((await self.post(stop)).status, 200)
         self.assertTrue(ledger.delivery_is_done(stop_key))
         self.assertFalse(ledger.pending_acceptance_thoughts())
         self.assertEqual((await self.post(stop)).status, 200)
+        self.assertEqual(len(calls), 1)
         ledger.prune(now=int(time.time()) + ledger.retention_seconds + 1)
         self.assertFalse(ledger.delivery_is_done(stop_key))
 

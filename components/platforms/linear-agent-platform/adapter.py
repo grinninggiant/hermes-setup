@@ -1211,13 +1211,19 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     self._ledger.cancel_direct_activation_for_session(agent_session_id)
             if action == "prompted" and not is_stop:
                 clarify_status = await self._resolve_clarify_input(
-                    agent_session_id, issue_id, payload
+                    agent_session_id, issue_id, payload, delivery_key=delivery_key
                 )
                 if clarify_status is not None:
+                    if clarify_status == "clarify_unavailable":
+                        self._ledger.release(delivery_key)
+                        claimed = False
+                        return web.json_response({"status": clarify_status}, status=503)
                     self._ledger.mark_done(delivery_key)
                     return web.json_response(
                         {"status": clarify_status}, status=200
                     )
+                if self._native_goal_continuation_enabled and not _activity_body(payload).lstrip().startswith("/"):
+                    self._ledger.bind_clarify_reply(delivery_key, "")
             if (
                 action == "created"
                 and self._planned_activation_enabled
@@ -1355,13 +1361,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     )
                 )
             ):
-                if self._native_goal_continuation_enabled:
-                    await self._fence_turn_decisions_for_visibility(
-                        agent_session_id,
-                        f"linear_{signal or agent_session_status or ('human_prompt' if human_preemption else 'stop')}_signal",
-                    )
-                if is_stop or human_preemption:
-                    await self._cancel_linear_session_processing(agent_session_id)
+                try:
+                    if self._native_goal_continuation_enabled:
+                        await self._fence_turn_decisions_for_visibility(
+                            agent_session_id,
+                            f"linear_{signal or agent_session_status or ('human_prompt' if human_preemption else 'stop')}_signal",
+                        )
+                finally:
+                    if is_stop or human_preemption:
+                        await self._cancel_linear_session_processing(agent_session_id)
             if not is_stop and self._ledger.has_session_closure(agent_session_id):
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "closure_reconciled"}, status=200)
@@ -1385,6 +1393,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             # Private provenance, never a field copied from webhook metadata.
             event._linear_verified_normal_prompt = human_preemption
+            if human_preemption and self._native_goal_continuation_enabled:
+                # Native clarify was already classified above. Core's generic
+                # FIFO interceptor must not answer a successor during fallback.
+                event.allow_gateway_control = False
             if native_command and not self._trusted_native_command_requester(event):
                 # Never let the webhook adapter's synthetic source (or the core
                 # webhook platform exemption) authorize a control command.
@@ -1399,9 +1411,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 # manager/Direct ambiguity-fenced claim. Consume it once so a
                 # queued event's later pre-handler check gets a fresh read.
                 event._linear_created_read_deadline = read_deadline
+            normal_native_prompt = human_preemption and self._native_goal_continuation_enabled
             if direct_activation_created:
                 direct_dispatch_attempted = True
             await self.handle_message(event)
+            if normal_native_prompt and getattr(event, "_gateway_accepted", False) is not True:
+                raise RuntimeError("Linear normal prompt was not admitted")
             if direct_activation_created and issue_id:
                 if not self._ledger.mark_direct_activation_dispatched(
                     issue_id, agent_session_id
@@ -2802,12 +2817,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             self._ledger.mark_manager_activation(entity_id, "canceled")
                         bound_session = self._ledger.get_issue_session(entity_id)
                         if bound_session:
-                            async with self._session_lock(bound_session):
-                                if self._native_goal_continuation_enabled:
-                                    await self._fence_turn_decisions_for_visibility(
-                                        bound_session, f"linear_issue_{event_state_type}"
-                                    )
-                            await self._cancel_linear_session_processing(bound_session)
+                            try:
+                                async with self._session_lock(bound_session):
+                                    if self._native_goal_continuation_enabled:
+                                        await self._fence_turn_decisions_for_visibility(
+                                            bound_session, f"linear_issue_{event_state_type}"
+                                        )
+                            finally:
+                                await self._cancel_linear_session_processing(bound_session)
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "ignored_self"}, status=200)
             notification = payload.get("notification")
@@ -2829,12 +2846,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             self._ledger.mark_manager_activation(entity_id, "canceled")
                         bound_session = self._ledger.get_issue_session(entity_id)
                         if bound_session:
-                            async with self._session_lock(bound_session):
-                                if self._native_goal_continuation_enabled:
-                                    await self._fence_turn_decisions_for_visibility(
-                                        bound_session, f"linear_issue_{event_state_type}"
-                                    )
-                            await self._cancel_linear_session_processing(bound_session)
+                            try:
+                                async with self._session_lock(bound_session):
+                                    if self._native_goal_continuation_enabled:
+                                        await self._fence_turn_decisions_for_visibility(
+                                            bound_session, f"linear_issue_{event_state_type}"
+                                        )
+                            finally:
+                                await self._cancel_linear_session_processing(bound_session)
                     reopen_status = await self._reconcile_human_reopen(
                         payload, entity_id, _issue_locked=True
                     )
@@ -4263,9 +4282,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         )
         try:
             if self._ledger is not None:
+                if self._native_goal_continuation_enabled:
+                    # Commit the execution fence before receipt writes or awaits:
+                    # failed receipt cleanup must not leave recovery able to run.
+                    # The caller's locked visibility fence is still required.
+                    self._ledger.fence_turn_decisions(session_id, "linear_authoritative_stop")
                 self._ledger.cancel_acceptance_thoughts(session_id)
         finally:
-            # A failed receipt must keep HTTP retryable, never keep execution alive.
+            # Failed persistence keeps HTTP retryable, never execution alive.
             interrupt = getattr(self.gateway_runner, "interrupt_session_processing", None)
             try:
                 if callable(interrupt):
@@ -4300,9 +4324,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         session_id = self._ledger.get_issue_session(issue_id)
         if not session_id:
             return False
-        async with self._session_lock(session_id):
-            changed = await self._fence_turn_decisions_for_visibility(session_id, reason)
-        await self._cancel_linear_session_processing(session_id)
+        try:
+            async with self._session_lock(session_id):
+                changed = await self._fence_turn_decisions_for_visibility(session_id, reason)
+        finally:
+            await self._cancel_linear_session_processing(session_id)
         return bool(changed or session_id)
 
     async def _stop_bound_turns_if_blocked(self, issue_id: str) -> bool:
@@ -6096,8 +6122,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if item is None:
                 raise LinearAPIError("Linear clarify delivery was not durably recorded", retryable=True)
             if bool(event.metadata.get("linear_clarify_resolved")):
-                # The answer may win while the activity is still pending. Keep
-                # that monotonic resolution in the already-created outbox row.
+                # Verified vendor publication can precede the transport ACK.
+                # Keep that monotonic resolution in the already-created row.
                 self._ledger.update_outbox_payload_metadata(
                     item_id,
                     {"clarify_resolved": True, "clarify_id": str(clarify_id)},
@@ -6151,11 +6177,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         return "\n".join([f"❓ {question}", "", *numbered, "", hint])
 
     async def _resolve_clarify_input(
-        self, agent_session_id: str, issue_id: str, payload: Mapping[str, Any]
+        self, agent_session_id: str, issue_id: str, payload: Mapping[str, Any],
+        *, delivery_key: str = "",
     ) -> str | None:
         """Resolve a Linear reply through the core registry after local binding checks."""
         if not self._native_goal_continuation_enabled:
             return None
+        if self._ledger is None:
+            return "clarify_unavailable"
         active = self._active_turn_events.get(str(agent_session_id))
         if active is None or active.source is None:
             return None
@@ -6186,9 +6215,34 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         pending = clarify_gateway.get_pending_for_session(
             session_key, include_choice_prompts=True
         )
-        if pending is None or pending.event.is_set():
+        item = self._ledger.get_outbox_item(f"activity:clarify:{pending.clarify_id}") if pending else None
+        captured_clarify_id = str(pending.clarify_id) if (
+            pending is not None and not pending.event.is_set() and item is not None
+            and item["state"] in {"pending", "in_flight", "delivered"}
+            and not item["payload"].get("clarify_suppressed")
+            and not item["payload"].get("clarify_resolved")
+        ) else ""
+        if delivery_key:
+            captured_clarify_id = self._ledger.bind_clarify_reply(delivery_key, captured_clarify_id)
+        if not captured_clarify_id:
+            # Registration precedes publication. An old callback paused in
+            # preflight is not a question the human could have answered.
+            owner = getattr(pending, "turn_owner", None)
+            if pending is not None and item is None and (
+                not isinstance(owner, tuple) or len(owner) != 2
+                or not all(isinstance(value, str) and value for value in owner)
+                or not self._clarify_owner_is_live(active, *owner)
+            ):
+                clarify_gateway.cancel(str(pending.clarify_id))
             return None
-        captured_clarify_id = str(pending.clarify_id)
+        if pending is None or pending.event.is_set() or str(pending.clarify_id) != captured_clarify_id:
+            # The captured question expired, not an invitation to answer the
+            # new FIFO head. Normal ingress owns late-answer validation.
+            return None
+        owner = getattr(pending, "turn_owner", None)
+        if (not isinstance(owner, tuple) or len(owner) != 2
+                or not all(isinstance(value, str) and value for value in owner)):
+            return "clarify_unavailable"
         captured_active = active
         incoming_actor_id, _ = _actor(dict(payload))
         registered_user_id = str(getattr(active.source, "user_id", "") or "")
@@ -6224,18 +6278,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return "clarify_fenced"
         if self._linear is None:
             return "clarify_unavailable"
-        async with self._session_lock(str(agent_session_id)):
-            context = await self._linear.get_agent_turn_context(str(agent_session_id))
-            current = self._active_turn_events.get(str(agent_session_id))
-            current_pending = clarify_gateway.get_pending_for_session(
-                session_key, include_choice_prompts=True
-            )
-            if (
-                current is not captured_active
-                or current_pending is None
-                or str(current_pending.clarify_id) != captured_clarify_id
-            ):
-                return "clarify_fenced"
+        # As with outbound clarify, network/store reads do not hold up Stop.
+        context = await self._linear.get_agent_turn_context(str(agent_session_id))
+        store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
+        lookup = getattr(store, "lookup_by_session_key", None)
         issue = context.get("issue") if isinstance(context, Mapping) else None
         actor_id = str(getattr(self._linear, "actor_id", "") or "")
         if (
@@ -6251,43 +6297,88 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         ):
             return "clarify_fenced"
         if not registered_user_id:
-            owner = issue.get("assignee")
+            human_owner = issue.get("assignee")
             if (
-                not isinstance(owner, dict)
-                or owner.get("app") is not False
-                or not isinstance(owner.get("id"), str)
-                or not owner["id"]
+                not isinstance(human_owner, dict)
+                or human_owner.get("app") is not False
+                or not isinstance(human_owner.get("id"), str)
+                or not human_owner["id"]
                 or not incoming_actor_id
-                or not hmac.compare_digest(owner["id"], incoming_actor_id)
+                or not hmac.compare_digest(human_owner["id"], incoming_actor_id)
                 or not hmac.compare_digest(str(context.get("app_user_id") or ""), actor_id)
                 or hmac.compare_digest(incoming_actor_id, actor_id)
             ):
                 return "clarify_requester_binding_unavailable"
-        coerced, rejection = clarify_gateway._coerce_text_response_detailed(
-            current_pending, body
-        )
-        if coerced is not None and clarify_gateway.resolve_gateway_clarify(
-            captured_clarify_id, coerced
+        # Enqueue/claim (and even a later ACK on replay) cannot prove the
+        # question preceded this prompt. Live waiters allow corrected ordinary
+        # replies; strict late-goal rearm does not. Reads stay outside the Stop lock.
+        activity = payload.get("agentActivity")
+        answer_id = activity.get("id") if isinstance(activity, Mapping) else None
+        if item is None or not isinstance(answer_id, str) or not answer_id or not await self._linear.verify_clarify_reply(
+            str(agent_session_id), str(item["payload"].get("activity_id") or ""),
+            answer_id, incoming_actor_id, body, live_waiter=True,
         ):
-            active.metadata["linear_clarify_resolved"] = True
-            self._ledger.update_outbox_payload_metadata(
-                f"activity:clarify:{captured_clarify_id}",
-                {"clarify_resolved": True, "clarify_id": captured_clarify_id},
-            )
-            # This event is a verified resolution, not model-authored progress.
-            # One fixed, ephemeral receipt per question; no answer content or
-            # reopening of terminal/progress fences. The outbox owns delivery.
-            self._enqueue_activity(
-                str(agent_session_id),
-                "thought",
-                "Yanıt alındı — aynı oturumda çalışmaya devam ediliyor.",
-                item_key=f"clarify-resolved:{captured_clarify_id}",
-                ephemeral=True,
-            )
-            return "clarify_resolved"
-        if rejection == "invalid_selection":
-            return "clarify_rejected"
-        return None
+            return "clarify_unavailable"
+        live_session = await lookup(session_key) if callable(lookup) else None
+        async with self._session_lock(str(agent_session_id)):
+            current_pending = clarify_gateway.get_pending_for_session(session_key, include_choice_prompts=True)
+            item = self._ledger.get_outbox_item(f"activity:clarify:{captured_clarify_id}")
+            if self._ledger.has_session_closure(str(agent_session_id)):
+                return "clarify_fenced"
+            if (
+                self._active_turn_events.get(str(agent_session_id)) is not captured_active
+                or current_pending is not pending
+                or getattr(current_pending, "turn_owner", None) != owner
+                or str(getattr(live_session, "session_key", "")) != session_key
+                or str(getattr(live_session, "session_id", "")) != owner[0]
+                or item is None
+                or item["state"] not in {"pending", "in_flight", "delivered"}
+                or item["payload"].get("clarify_suppressed")
+                or item["payload"].get("clarify_resolved")
+                or not self._clarify_outbox_is_live(OutboxItem(
+                    item["id"], item["aggregate_key"], item["sequence"],
+                    item["operation"], item["payload"], item["attempts"],
+                ))
+            ):
+                return "clarify_unavailable"
+            coerced, rejection = clarify_gateway._coerce_text_response_detailed(current_pending, body)
+            # Async lookup returns a snapshot. Reset/compression can replace it
+            # from a worker even without an await here. Linearize the in-memory
+            # check and registry resolution with the core routing lock; never
+            # wait for that lock on the event loop or hold it during ledger I/O.
+            store_lock = getattr(store, "_lock", None)
+            if store_lock is None or not store_lock.acquire(blocking=False):
+                return "clarify_unavailable"
+            try:
+                current_session = store._entries.get(session_key)
+                if (str(getattr(current_session, "session_key", "")) != session_key
+                        or str(getattr(current_session, "session_id", "")) != owner[0]):
+                    return "clarify_unavailable"
+                resolved = coerced is not None and clarify_gateway.resolve_gateway_clarify(
+                    captured_clarify_id, coerced
+                )
+            finally:
+                store_lock.release()
+            if resolved:
+                active.metadata["linear_clarify_resolved"] = True
+                self._ledger.update_outbox_payload_metadata(
+                    f"activity:clarify:{captured_clarify_id}",
+                    {"clarify_resolved": True, "clarify_id": captured_clarify_id},
+                )
+                # This event is a verified resolution, not model-authored progress.
+                # One fixed, ephemeral receipt per question; no answer content or
+                # reopening of terminal/progress fences. The outbox owns delivery.
+                self._enqueue_activity(
+                    str(agent_session_id),
+                    "thought",
+                    "Yanıt alındı — aynı oturumda çalışmaya devam ediliyor.",
+                    item_key=f"clarify-resolved:{captured_clarify_id}",
+                    ephemeral=True,
+                )
+                return "clarify_resolved"
+            if rejection == "invalid_selection":
+                return "clarify_rejected"
+            return None
 
     def _trusted_native_command_requester(self, event: MessageEvent) -> bool:
         """Require an exact active human source before any native slash dispatch."""

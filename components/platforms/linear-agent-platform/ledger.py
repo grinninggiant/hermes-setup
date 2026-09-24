@@ -98,6 +98,8 @@ class DeliveryLedger:
             row[1] for row in self._db.execute("PRAGMA table_info(deliveries)")
         }:
             self._db.execute("ALTER TABLE deliveries ADD COLUMN acceptance_thought_json TEXT")
+        if "clarify_id" not in {row[1] for row in self._db.execute("PRAGMA table_info(deliveries)")}:
+            self._db.execute("ALTER TABLE deliveries ADD COLUMN clarify_id TEXT")
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS outbox ("
             "id TEXT PRIMARY KEY, "
@@ -1252,15 +1254,32 @@ class DeliveryLedger:
                 self._db.commit()
                 return True
             state, updated_at = row
-            if state == "processing" and now - int(updated_at) > self.processing_timeout_seconds:
+            if state == "retry" or (
+                state == "processing" and now - int(updated_at) > self.processing_timeout_seconds
+            ):
                 self._db.execute(
-                    "UPDATE deliveries SET updated_at = ? WHERE webhook_id = ?",
+                    "UPDATE deliveries SET state = 'processing', updated_at = ? WHERE webhook_id = ?",
                     (now, webhook_id),
                 )
                 self._db.commit()
                 return True
             self._db.rollback()
             return False
+
+    def bind_clarify_reply(self, webhook_id: str, clarify_id: str) -> str:
+        """Pin ingress once: an exact question ID or '' for a normal prompt, across retries."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE deliveries SET clarify_id = COALESCE(clarify_id, ?) WHERE webhook_id = ?",
+                (clarify_id, webhook_id),
+            )
+            row = self._db.execute(
+                "SELECT clarify_id FROM deliveries WHERE webhook_id = ?", (webhook_id,)
+            ).fetchone()
+            self._db.commit()
+            if row is None:
+                raise RuntimeError("Clarify reply has no claimed delivery")
+            return str(row[0])
 
     def delivery_is_done(self, webhook_id: str) -> bool:
         with self._lock:
@@ -1321,7 +1340,11 @@ class DeliveryLedger:
     def release(self, webhook_id: str) -> None:
         with self._lock:
             self._db.execute(
-                "DELETE FROM deliveries WHERE webhook_id = ? AND state = 'processing'",
+                "DELETE FROM deliveries WHERE webhook_id = ? AND state = 'processing' AND clarify_id IS NULL",
+                (webhook_id,),
+            )
+            self._db.execute(
+                "UPDATE deliveries SET state = 'retry' WHERE webhook_id = ? AND state = 'processing'",
                 (webhook_id,),
             )
             self._db.commit()
@@ -2970,7 +2993,7 @@ class DeliveryLedger:
         self, agent_session_id: str, reason: str, *, now: int | None = None
     ) -> int:
         now = int(time.time()) if now is None else int(now)
-        with self._lock:
+        with self._lock, self._db:
             changed = self._db.execute(
                 "UPDATE turn_decisions SET dispatch_state='fenced', outcome='stopped', "
                 "error=?, updated_at=?, completed_at=? WHERE agent_session_id=? "

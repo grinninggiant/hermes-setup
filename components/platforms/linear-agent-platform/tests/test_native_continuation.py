@@ -438,6 +438,30 @@ class DecisionLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.fence_turn_decisions("linear-session", "stopped", now=13), 0)
         self.assertEqual(self.ledger.get_turn_decision(row["decision_id"])["dispatch_state"], "fenced")
 
+    def test_failed_stop_fence_rolls_back_before_unrelated_delivery_commit(self):
+        import sqlite3
+
+        for ordinal in (1, 2):
+            row = self.ledger.reserve_turn_decision(
+                "linear-session", "issue-164", "h1", 1, ordinal, "continue"
+            )
+            self.ledger.transition_turn_decision(row["decision_id"], "pending", "enqueued")
+        self.ledger._db.execute(
+            "CREATE TEMP TRIGGER fail_partial_fence AFTER UPDATE ON turn_decisions "
+            "WHEN NEW.ordinal = 2 BEGIN SELECT RAISE(FAIL, 'partial fence'); END"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "partial fence"):
+            self.ledger.fence_turn_decisions("linear-session", "stop")
+        self.assertFalse(self.ledger._db.in_transaction)
+        self.assertTrue(self.ledger.claim("unrelated"))
+        self.ledger.close()
+        self.ledger = DeliveryLedger(self.path)
+        self.assertEqual(
+            [row["dispatch_state"] for row in self.ledger.list_turn_decisions("linear-session")],
+            ["enqueued", "enqueued"],
+        )
+        self.assertEqual(self.ledger.fence_turn_decisions("linear-session", "stop"), 2)
+
     def test_authoritative_fence_also_stops_running_decision(self):
         row = self.ledger.reserve_turn_decision(
             "linear-session", "issue-164", "h1", 1, 2, "continue", now=10
@@ -2687,7 +2711,8 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._closure_reconciliation_enabled = False
         self.adapter._activation_allowed_team_ids = set()
         self.adapter._planned_owner_ids = set()
-        self.adapter.handle_message = mock.AsyncMock()
+        self.adapter.handle_message = mock.AsyncMock(
+            side_effect=lambda event: setattr(event, "_gateway_accepted", True))
         self.adapter._cancel_linear_session_processing = mock.AsyncMock()
         row = self.adapter._ledger.reserve_turn_decision(
             "linear-session", "issue-164", "hermes-session", 1, 1, "continue"

@@ -94,11 +94,11 @@ The actual path is `_handle_webhook` → policy/dependency reads → `handle_mes
 → `_prepare_bound_linear_ingress` → core scheduling → `mark_done` → HTTP 200.
 `_schedule_thought` persists an outbox item, but `_drain_outbox_once` still reads the
 live activity owner before calling Linear. Policy reads hold an issue lock; native
-admission reads hold a session lock. A signed, tenant-validated Stop now interrupts
-current execution before waiting on a contended issue/session/outbox lock. The original
-locked durable fence and second cancellation remain: an admission already in flight
-can complete while Stop is waiting. This is an interruption-latency mitigation, not a
-new durable Stop/admission boundary. The client’s 8-second per-request timeout is not
+admission reads hold a session lock. A signed, tenant-validated Stop now fences current
+continuation decisions and interrupts execution before waiting on a contended
+issue/session/outbox lock. The original locked visibility fence and second cancellation
+remain: an admission already in flight can complete while Stop is waiting. This is not
+a new session-wide admission barrier. The client’s 8-second per-request timeout is not
 an aggregate ingress or first-activity budget.
 
 The narrow fix here returns **503 `processing`**, not 200, for an unfinished delivery
@@ -135,12 +135,17 @@ acceptance thoughts recheck cancellation after their awaited owner read. The nul
 column is added idempotently to existing databases; old done deliveries do not acquire
 invented acceptance evidence. Pruning retains unscheduled obligations and scheduled
 receipts with undelivered outbox work (including dead letters); delivered or explicitly
-canceled obligations keep normal expiry. A cancellation-receipt write failure still
-interrupts the runner and cancels core processing, but returns 503 rather than claiming
-a durable Stop ACK. If this write fails during early cancellation before the locked
-fence, retry must finish that fence; the interruption-latency mitigation is not a new
-admission barrier. This does not make core dispatch and SQLite atomic: a
-process/storage failure before the durable done commit remains outside this repair.
+canceled obligations keep normal expiry. Cancellation commits the current continuation
+fence before attempting receipt cleanup, independently of that cleanup's transaction.
+A receipt-write failure still interrupts the runner and cancels core processing, and
+returns 503; reopening SQLite and recovering **before Stop retry** cannot replay those
+fenced continuations. The locked visibility fence and second cancellation still cover
+work admitted while Stop awaits locks. If the execution fence itself cannot persist,
+current processing is still canceled but HTTP remains 503: storage repair and a successful
+Stop retry are required for a durable guarantee. Failed fence transactions roll back,
+so unrelated delivery commits cannot accidentally commit a partial fence. This does not
+make core dispatch and SQLite atomic: a process/storage failure before the durable done
+commit remains outside this repair.
 
 The signed-loopback regression uses a real SQLite trigger and real core ingress:
 503 → repeated 503 → database reopen → duplicate + exactly one thought and no second

@@ -22,6 +22,75 @@ Unit/review/vendor-read evidence does not replace post-promotion human reply and
 model-continuation canary evidence. Deployment scope is general only; no fleet
 role, identity, credential or policy rollout is implied.
 
+## Immutable native-owner ingress
+
+Neither registration nor an outbox `pending`/`in_flight` claim proves publication.
+Inbound replies require the unsuppressed outbox row and the same immutable Hermes
+session/turn owner used by outbound delivery. `verify_clarify_reply` proves that
+the exact client-generated question activity precedes the exact human prompt,
+with matching session, activity types, actor and body, and no intervening control.
+Only a live waiter permits earlier ordinary human prompts between that question
+and answer: a rejected requester or invalid choice must not poison the next valid
+reply. Commands, signals, newer/ambiguous prompts, other questions, terminal and
+unknown activity types still fail closed. `verify_late_clarify_reply` retains the
+strict no-intervening-prompt rule for paused-goal rearm.
+[Linear's prompted activity](https://linear.app/developers/agent-interaction) is a
+user message, not a receipt for the outgoing elicitation; its ID alone cannot prove
+which question was visible. No speculative pre-create publication marker is used.
+
+This check runs on retries too: a later create ACK cannot retroactively make an
+older unrelated prompt an answer. Missing/malformed evidence or unavailable vendor
+reads remain HTTP 503 with no consumed waiter, done delivery or resolution receipt.
+The same read admits a genuine published reply before the create transport ACK.
+After vendor evidence, look up the current core session again, then recheck the
+exact active event, waiter object, owner and closure fence under the preemption
+lock. The async lookup is a snapshot, so resolution also checks the live core
+routing entry under its in-memory store lock. That lock is acquired nonblocking
+and released before ledger I/O; contention returns HTTP 503. No await occurs
+between the final check and registry resolution. Reads stay outside the
+preemption lock so Stop can cancel promptly.
+
+The inbound delivery row pins the initial question ID, or an empty string for the
+normal-prompt lane. The additive nullable `deliveries.clarify_id` column is local
+ledger state, not vendor schema. Classified claims survive `release()` as retryable
+rows; a replay cannot bind to a successor question, including after ledger reopen.
+Unclassified claims retain the existing delete-on-release behavior. Completed and
+released retry rows use the existing inbound retention window, except that pending
+acceptance-thought obligations retain their receipt until delivery or cancellation.
+Both nullable migrations (`clarify_id` and `acceptance_thought_json`) are preserved.
+
+An unpublished stale callback is canceled by its own ID and the human input follows
+normal admission. A stale published waiter yields HTTP 503 without marking the
+reply done or emitting a resolution receipt. If the captured waiter expires, normal
+late-answer admission handles the input rather than resolving the new FIFO head.
+Normal fallback disables core's generic interaction interceptor only for that event;
+slash and Stop paths remain unchanged. Its delivery is acknowledged only after the
+core admission receipt, and accepted-work thought is not emitted for a failed/vetoed
+admission. The ordinary webhook path commits that thought obligation with `done`
+before scheduling it; there is no extra pre-dispatch or prompt-only thought. A
+failed thought INSERT retries only delivery, never core admission or clarify binding.
+Actor and authoritative terminal rejections remain non-resolution fences.
+
+`tests/test_inbound_clarify_owner.py` uses signed loopback HTTP, bounded barriers,
+real queued core staging/callback registration, core admission and FIFO interception,
+and a fixture vendor transport. Both stale-consumption races failed before the fix.
+It also covers pending/in-flight pre-create prompts (both reproduced RED), later
+ACK plus ledger reopen, fast replies before vendor ACK, transient evidence-read
+failure, durable retry binding, migration, rotation, completion, Stop, closure,
+actor/delegate/Done and malformed owners. The transport fixture records activity
+creation and human prompt chronology; tests exercise the production vendor-evidence
+parser/verifier, not a verifier mocked to accept.
+`tests/test_inbound_clarify_chronology.py` adds signed wrong-requester→owner,
+nested-author and invalid-choice→correction probes (including before create ACK).
+All three corrections reproduced HTTP 503 before repair; a real core reset
+during vendor evidence reproduced HTTP 200 to the old waiter. The repaired tests
+also cover reset after the final async snapshot, store-lock contention and Stop
+during evidence reads. The same correction remains denied by strict late rearm.
+The paired core is `548f6d6b509d076bc9a0b44eeab12813b659fa3c`. The canonical
+runner passed the full component plus ten affected core clarify/store files:
+39 files, 1,676 tests, zero failures, isolated HOME and file retries disabled.
+These are offline contract results, not deployment or live-vendor acceptance.
+
 ## Late normal answer after timeout (0.8.28)
 
 The distinct late-answer gate was explicitly approved on OPS-238. It is not a
