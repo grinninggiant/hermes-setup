@@ -94,8 +94,12 @@ The actual path is `_handle_webhook` → policy/dependency reads → `handle_mes
 → `_prepare_bound_linear_ingress` → core scheduling → `mark_done` → HTTP 200.
 `_schedule_thought` persists an outbox item, but `_drain_outbox_once` still reads the
 live activity owner before calling Linear. Policy reads hold an issue lock; native
-admission reads hold a session lock. Stop can wait behind those reads. The client’s
-8-second per-request timeout is not an aggregate ingress or first-activity budget.
+admission reads hold a session lock. A signed, tenant-validated Stop now interrupts
+current execution before waiting on a contended issue/session/outbox lock. The original
+locked durable fence and second cancellation remain: an admission already in flight
+can complete while Stop is waiting. This is an interruption-latency mitigation, not a
+new durable Stop/admission boundary. The client’s 8-second per-request timeout is not
+an aggregate ingress or first-activity budget.
 
 The narrow fix here returns **503 `processing`**, not 200, for an unfinished delivery
 claim on both AgentSession and data-event ingress. Only `done` duplicates receive
@@ -118,15 +122,26 @@ TEST_HOME=$(mktemp -d)
 )
 ```
 
-Observed: policy and native-admission HTTP responses were absent at 5 seconds;
-with fast admission but a blocked outbound owner read, no activity attempt occurred
-by 10 seconds; Stop cancellation was still waiting after 250 ms behind the policy
-lock. All four probes fail intentionally against the unresolved behavior; they are
-not skipped/expected-failure tests disguised as GREEN. The ordinary regression suite
-passes separately. Fixing these clocks safely still requires a reviewed durable
-admission/cancellation boundary, rather than acknowledging a mere processing claim
-or bypassing authoritative owner validation. Real vendor `created` delivery, activity
-receipt and deployed-runtime timing remain unverified; no deploy was performed.
+Observed before the Stop mitigation: policy and native-admission HTTP responses were
+absent at 5 seconds; with fast admission but a blocked outbound owner read, no activity
+attempt occurred by 10 seconds; Stop interruption was still waiting after 250 ms behind
+the policy lock. After the mitigation, **the two HTTP probes and first-activity probe
+remain RED**; only the Stop-interruption probe is GREEN. They are not skipped or
+expected-failure tests disguised as vendor acceptance. The ordinary regression
+`tests/test_stop_ingress_contention.py` also exercises signed loopback HTTP with real
+core processing: current work is cancelled with each of the three locks held, no early
+HTTP success bypasses the durable fence, and a late admission is cancelled again after
+issue/session lock release. This does not promise that no new admission can run between
+the first interrupt and the final locked fence.
+
+A blanket coroutine timeout was not introduced: native/manager/Direct/dependency
+callers can persist dispatch state or perform admission across awaits, so cancelling
+without an exact receipt could lose work or permit replay. Fixing the remaining clocks
+safely still requires a reviewed durable admission/cancellation boundary, rather than
+acknowledging a mere processing claim or bypassing authoritative owner validation.
+Unavailable owner evidence beyond ten seconds cannot honestly yield a timely activity
+receipt. Real vendor `created` delivery, activity receipt and deployed-runtime timing
+remain unverified; no deploy was performed.
 
 ## Agent Session creation and execution policy
 

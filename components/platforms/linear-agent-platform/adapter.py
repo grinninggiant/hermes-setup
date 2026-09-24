@@ -1125,6 +1125,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             ):
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "ignored_self"}, status=200)
+            if is_stop and (
+                (issue_id and self._issue_lock(issue_id).locked())
+                or self._session_lock(agent_session_id).locked()
+                or self._outbox_drain_lock.locked()
+            ):
+                # Interrupt current work before slow reads release their locks.
+                # Keep the locked durable fence AND second cancellation below:
+                # another admission may finish while Stop waits for those locks.
+                await self._cancel_linear_session_processing(agent_session_id)
             if action == "created" and issue_id:
                 async with self._issue_lock(issue_id):
                     pending_closure = self._ledger.get_pending_closure_event(issue_id)
