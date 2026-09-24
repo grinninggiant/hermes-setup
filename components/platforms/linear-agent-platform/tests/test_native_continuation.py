@@ -2197,6 +2197,34 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
             "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"error\"%'"
         ).fetchone()[0], 1)
 
+    async def test_delayed_success_does_not_overwrite_live_input_wait_with_error(self):
+        FakeGoalManager.existing = True
+        FakeGoalManager.existing_status = "done"
+        checked = await FakeLinear(
+            description="## Acceptance\n- [x] tests pass\n- [X] restart is safe"
+        ).get_agent_turn_context("linear-session")
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=checked)
+        self.adapter._linear.create_activity = mock.AsyncMock()
+        event = turn_event()
+        event._gateway_turn_result = MappingProxyType(
+            {**dict(event._gateway_turn_result), "completed": True}
+        )
+        await self.adapter._prepare_native_owned_turn_delivery(
+            event, "accepted evidence", event._gateway_turn_result
+        )
+        self.adapter._linear.get_agent_turn_context = mock.AsyncMock(
+            return_value={**checked, "status": "awaitingInput"}
+        )
+
+        self.assertTrue(await LinearPlatformAdapter._drain_outbox_once(self.adapter))
+        self.adapter._linear.create_activity.assert_not_awaited()
+        decision = self.adapter._ledger.get_turn_decision(event._linear_turn_decision_id)
+        self.assertEqual(decision["dispatch_state"], "fenced")
+        self.assertNotEqual(decision["outcome"], "success")
+        self.assertEqual(self.adapter._ledger._db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"error\"%'"
+        ).fetchone()[0], 0)
+
     async def test_delayed_success_unknown_blocked_reason_retains_error_activity(self):
         FakeGoalManager.existing = True
         FakeGoalManager.existing_status = "done"
@@ -2464,6 +2492,24 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.admitted), 1)
         self.assertEqual(self.admitted[0].text, "NATIVE CANONICAL CONTINUATION")
         self.assertEqual(self.admitted[0].message_id, row["decision_id"])
+
+    async def test_restart_recovery_preserves_live_input_wait_without_error(self):
+        row = self.adapter._ledger.reserve_turn_decision(
+            "linear-session", "issue-164", "hermes-session", 123000000, 2, "continue"
+        )
+        self.adapter._linear = FakeLinear(status="awaitingInput")
+        FakeGoalManager.existing = True
+
+        await self.adapter._recover_turn_decisions()
+        await self.adapter._recover_turn_decisions()
+
+        decision = self.adapter._ledger.get_turn_decision(row["decision_id"])
+        self.assertEqual((decision["dispatch_state"], decision["outcome"]),
+                         ("fenced", "awaiting_input"))
+        self.assertEqual(self.admitted, [])
+        self.assertEqual(self.adapter._ledger._db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"error\"%'"
+        ).fetchone()[0], 0)
 
     async def test_restart_recovery_preserves_exact_public_session_source(self):
         original = SessionSource(
