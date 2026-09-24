@@ -29,13 +29,13 @@ MAX_CHILD_RELATION_PAGES = 100
 MAX_BLOCKER_RELATION_PAGES = 100
 MAX_ISSUE_QUOTA_PAGES = 100
 
-_ANGLE_LINK = re.compile(r"(?<!!)\[([^\[\]\\\n]+)\]\(<(https?://[^\s<>()\[\]]+)>\)")
+_ANGLE_LINK = re.compile(r"(?<!!)\[([^\[\]\\\n]+)\]\(<(https?://[^\s<>()\[\]]+)>(\s+(?:\"[^\"\n]*\"|'[^'\n]*'))?\)")
 
 
 def _same_response_link_serialization(expected: str, actual: str) -> bool:
     """Accept only the known inline-link destination angle-bracket serialization."""
     def unwrap(source: str) -> str:
-        return _ANGLE_LINK.sub(lambda match: f"[{match[1]}]({match[2]})", source)
+        return _ANGLE_LINK.sub(lambda match: f"[{match[1]}]({match[2]}{match[3] or ''})", source)
 
     if unwrap(expected) != unwrap(actual):
         return False

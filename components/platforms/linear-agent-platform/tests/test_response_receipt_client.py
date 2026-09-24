@@ -52,6 +52,8 @@ class ResponseReceiptTests(unittest.IsolatedAsyncioTestCase):
         cases = [
             ("[![report](https://example.com/report)](https://example.com/target)",
              "[![report](<https://example.com/report>)](https://example.com/target)"),
+            ('`[report](https://example.com/report "source")`',
+             '`[report](<https://example.com/report> "source")`'),
             ("> " * 20 + f"`{plain}`", "> " * 20 + f"`{link}`"),
             (f"```{plain}\nresult\n```", f"```{link}\nresult\n```"),
             (unused.replace(link, plain) + "\n\nresult", unused + "\n\nresult"),
@@ -78,6 +80,13 @@ class ResponseReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await client.verify_response_receipt("activity", "session", expected))
         receipt["content"]["body"] = expected
         self.assertTrue(await client.verify_response_receipt("activity", "session", "Evidence [report](<https://example.com/report?q=1#part>) end"))
+        titled = 'Evidence [report](https://example.com/report?q=1#part "source") end'
+        receipt["content"]["body"] = 'Evidence [report](<https://example.com/report?q=1#part> "source") end'
+        self.assertTrue(await client.verify_response_receipt("activity", "session", titled))
+        receipt["content"]["body"] = titled
+        self.assertTrue(await client.verify_response_receipt(
+            "activity", "session", 'Evidence [report](<https://example.com/report?q=1#part> "source") end'
+        ))
         for actual, sent in [
             ("Evidence [other](<https://example.com/report?q=1#part>) end", expected),
             ("Evidence [report](<https://example.com/report?q=2#part>) end", expected),
