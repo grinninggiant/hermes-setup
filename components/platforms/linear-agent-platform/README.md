@@ -174,11 +174,13 @@ the first interrupt and the final locked fence.
 
 A blanket coroutine timeout was not introduced: manager/Direct/dependency callers can
 persist dispatch state or perform admission across awaits, so cancelling without an
-exact receipt could lose work or permit replay. The four-second budget does not cover
-lock contention, closure reconciliation, manager admission, Direct post-claim native
-admission, gateway-store/goal awaits, or core dispatch. Those paths and the sibling
-manager/activation/recovery thought producers are unchanged; this is not an end-to-end
-deadline or universal no-false-progress guarantee. Fixing those boundaries still
+exact receipt could lose work or permit replay. The four-second budget covers created
+pre-admission issue/session lock waits and exact prior-owner reads, including their
+manager/Direct pre-claim portions; it does not cover ledger contention, closure
+reconciliation, post-claim manager/Direct native admission, gateway-store/goal awaits,
+or core dispatch. Those paths and the sibling manager/activation/recovery thought
+producers are unchanged; this is not an end-to-end deadline or universal
+no-false-progress guarantee. Fixing those boundaries still
 requires reviewed admission receipts, not acknowledging a mere processing claim.
 Unavailable owner evidence beyond ten seconds cannot honestly yield a timely activity
 receipt. Real vendor `created` delivery, activity receipt and deployed-runtime timing
