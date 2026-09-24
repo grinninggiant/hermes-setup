@@ -303,10 +303,14 @@ def validate_command(command: Sequence[str]) -> list[str]:
         raise BrokerError("only the pinned gh binary is allowed")
     if args[1:] == ["auth", "status"]:
         return args
-    if args[1:] == ["pr", "ready", "17", "-R", f"{ALLOWED_OWNER}/hermes-agent"]:
+    if args[1:] in (
+        ["pr", "ready", "17", "-R", f"{ALLOWED_OWNER}/hermes-agent"],
+        ["pr", "ready", "99", "-R", f"{ALLOWED_OWNER}/hermes-setup"],
+        ["pr", "ready", "22", "-R", f"{ALLOWED_OWNER}/hermes-agent"],
+    ):
         return args
     if len(args) < 3 or args[1] != "api":
-        raise BrokerError("only gh auth status, exact PR 17 ready, and pinned gh api routes are allowed")
+        raise BrokerError("only gh auth status, approved PR ready, and pinned gh api routes are allowed")
     endpoint = args[2]
     if (
         not re.fullmatch(r"[A-Za-z0-9._~!$&'()*+,;=:@/-]+", endpoint)
@@ -394,6 +398,13 @@ def validate_command(command: Sequence[str]) -> list[str]:
         allowed_fields = {"base", "body", "draft", "head", "title"}
         if not {"base", "head", "title"}.issubset(raw_fields):
             raise BrokerError("pull request creation fields are incomplete")
+    elif method == "PATCH" and (repo_root, relative) in {
+        (f"repos/{ALLOWED_OWNER}/hermes-setup", "pulls/99"),
+        (f"repos/{ALLOWED_OWNER}/hermes-agent", "pulls/22"),
+    }:
+        allowed_fields = {"body"}
+        if set(raw_fields) != {"body"} or not raw_fields["body"].strip():
+            raise BrokerError("approved pull request edit requires a nonempty body only")
     elif method == "PUT" and re.fullmatch(r"pulls/[1-9][0-9]*/merge", relative):
         allowed_fields = {"commit_message", "commit_title", "merge_method", "sha"}
     elif method == "POST" and re.fullmatch(r"issues/[1-9][0-9]*/comments", relative):
