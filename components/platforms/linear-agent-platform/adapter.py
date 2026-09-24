@@ -11,12 +11,13 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
 from collections import deque
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable
@@ -41,6 +42,30 @@ from .ledger import DeliveryLedger, OutboxItem
 from .linear_client import LinearAPIError, LinearClient
 
 logger = logging.getLogger(__name__)
+
+
+def _ledger_busy(exc: Exception) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and (
+        str(exc) == "Linear ledger is busy"
+        or getattr(exc, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    )
+
+
+def _check_admission_deadline(deadline: float | None) -> None:
+    # timeout_at only cancels on a loop tick; an awaited coroutine may never yield.
+    if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+        raise TimeoutError("Linear created admission deadline expired")
+
+
+@asynccontextmanager
+async def _admission_lock(lock: asyncio.Lock, deadline: float | None):
+    async with asyncio.timeout_at(deadline):
+        await lock.acquire()
+    try:
+        _check_admission_deadline(deadline)
+        yield
+    finally:
+        lock.release()
 
 
 def _ops200_profile_fix_active() -> bool:
@@ -491,6 +516,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         self._outbox_drain_lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._issue_locks: dict[str, asyncio.Lock] = {}
+        self._inflight_session_deliveries: dict[str, set[str]] = {}
+        # A refused claim must not retarget the next local turn on retry.
+        self._stop_delivery_owners: dict[str, tuple[float, tuple[Any, ...]]] = {}
         self.config.typing_indicator = False
 
     @property
@@ -910,7 +938,17 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             status=200 if healthy else 503,
         )
 
+    def _duplicate_delivery_response(self, delivery_key: str) -> web.Response:
+        # A processing claim is not durable admission: keep vendor retries alive.
+        done = self._ledger is not None and self._ledger.delivery_is_done(delivery_key)
+        if done:
+            self._repair_acceptance_thoughts(delivery_key)
+        return web.json_response(
+            {"status": "duplicate" if done else "processing"}, status=200 if done else 503
+        )
+
     async def _handle_webhook(self, request: web.Request) -> web.Response:
+        read_deadline = asyncio.get_running_loop().time() + 4.0
         raw = await request.read()
         signature = request.headers.get("Linear-Signature", "").strip().lower()
         logger.info(
@@ -970,8 +1008,18 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         signal = _activity_signal(payload)
         is_stop = action == "prompted" and signal == "stop"
         delivery_key = _delivery_key(payload, raw)
+        if is_stop:
+            # Only signed, replay-fresh, organization-matched events reach here.
+            now = time.monotonic()
+            for key, (seen_at, _) in list(self._stop_delivery_owners.items()):
+                if now - seen_at > self.replay_window_seconds:
+                    self._stop_delivery_owners.pop(key, None)
+            self._stop_delivery_owners.setdefault(
+                delivery_key, (now, self._linear_processing_owner(agent_session_id)[2:]),
+            )
         claimed = False
         direct_activation_created = False
+        inflight: set[str] | None = None
         direct_dispatch_attempted = False
         direct_issue_lock: asyncio.Lock | None = None
         direct_issue_lock_held = False
@@ -984,8 +1032,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     webhook_id,
                     delivery_key,
                 )
-                return web.json_response({"status": "duplicate"}, status=200)
+                return self._duplicate_delivery_response(delivery_key)
             claimed = True
+            inflight = self._inflight_session_deliveries.setdefault(agent_session_id, set())
+            inflight.add(delivery_key)
             event_actor_id, _ = _actor(payload)
             manager_activation = (
                 self._ledger.get_manager_activation(issue_id)
@@ -1022,7 +1072,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         return web.json_response(
                             {"status": "direct_activation_policy_denied"}, status=200
                         )
-                    context = await self._linear.get_issue_closure_context(issue_id)
+                    async with asyncio.timeout_at(read_deadline):
+                        context = await self._linear.get_issue_closure_context(issue_id)
+                    _check_admission_deadline(read_deadline)
                     team_id = str((context.get("team") or {}).get("id") or "")
                     direct_authoritative = bool(
                         self._direct_activation_policy_allows(context, direct_grant)
@@ -1050,7 +1102,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 and self._linear.actor_id
                 and hmac.compare_digest(event_actor_id, self._linear.actor_id)
             ):
-                context = await self._linear.get_issue_closure_context(issue_id)
+                async with asyncio.timeout_at(read_deadline):
+                    context = await self._linear.get_issue_closure_context(issue_id)
+                _check_admission_deadline(read_deadline)
                 team_id = str((context.get("team") or {}).get("id") or "")
                 owner_id = str((context.get("assignee") or {}).get("id") or "")
                 creator_id = str((context.get("creator") or {}).get("id") or "")
@@ -1070,10 +1124,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         ),
                     )
                 ):
-                    self._ledger.put_direct_activation_event(
-                        issue_id, agent_session_id, delivery_key, payload
-                    )
-                    self._ledger.bind_issue_session(issue_id, agent_session_id)
+                    async with _admission_lock(self._issue_lock(issue_id), read_deadline):
+                        if not await self._bind_issue_session(issue_id, agent_session_id, read_deadline=read_deadline):
+                            self._ledger.mark_done(delivery_key)
+                            return web.json_response({"status": "issue_session_active"}, status=200)
+                        self._ledger.put_direct_activation_event(
+                            issue_id, agent_session_id, delivery_key, payload
+                        )
                     self._ledger.mark_done(delivery_key)
                     return web.json_response(
                         {"status": "direct_activation_waiting_for_grant"}, status=200
@@ -1102,6 +1159,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     webhook_id,
                     issue_id,
                     agent_session_id,
+                    read_deadline=read_deadline,
                 )
             if (
                 event_actor_id
@@ -1111,8 +1169,38 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             ):
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "ignored_self"}, status=200)
+            if is_stop:
+                original = self._stop_delivery_owners[delivery_key][1]
+                current = self._linear_processing_owner(agent_session_id)[2:]
+                same_owner = (
+                    (original[1] is not None or original[2] is not None)
+                    and original[1] is current[1] and original[2] is current[2]
+                )
+                new_owner = (
+                    current[1] is not None or current[2] is not None
+                    or (current[0] is not None and current[0] is not original[0])
+                )
+                replaced = (
+                    (original[0] is not None and current[0] is not original[0])
+                    or (original[3] is not None and current[3] != original[3])
+                ) if same_owner else new_owner and any(
+                    left is not right for left, right in zip(original, current)
+                )
+                if replaced:
+                    # A refused delivery must never fence or cancel its successor.
+                    self._ledger.mark_done(delivery_key)
+                    return web.json_response({"status": "stale_stop"}, status=200)
+            if is_stop and (
+                (issue_id and self._issue_lock(issue_id).locked())
+                or self._session_lock(agent_session_id).locked()
+                or self._outbox_drain_lock.locked()
+            ):
+                # Interrupt current work before slow reads release their locks.
+                # Keep the locked durable fence AND second cancellation below:
+                # another admission may finish while Stop waits for those locks.
+                await self._cancel_linear_session_processing(agent_session_id)
             if action == "created" and issue_id:
-                async with self._issue_lock(issue_id):
+                async with _admission_lock(self._issue_lock(issue_id), read_deadline):
                     pending_closure = self._ledger.get_pending_closure_event(issue_id)
                     if pending_closure is not None:
                         closure_status = await self._reconcile_human_completion(
@@ -1129,15 +1217,25 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                                 issue_id, pending_closure["event_revision"]
                             )
                         else:
-                            self._ledger.bind_issue_session(issue_id, agent_session_id)
+                            await self._bind_issue_session(issue_id, agent_session_id, read_deadline=read_deadline)
                             self._ledger.release(delivery_key)
                             claimed = False
                             return web.json_response(
                                 {"status": "closure_deferred"}, status=503
                             )
-                    self._ledger.bind_issue_session(issue_id, agent_session_id)
+                    if not await self._bind_issue_session(issue_id, agent_session_id, read_deadline=read_deadline):
+                        if direct_activation_created:
+                            self._ledger.reset_direct_activation_claim(
+                                issue_id, agent_session_id, "issue_session_active"
+                            )
+                        self._ledger.mark_done(delivery_key)
+                        return web.json_response({"status": "issue_session_active"}, status=200)
             if action == "prompted" and issue_id:
                 async with self._issue_lock(issue_id):
+                    if (not is_stop and self._ledger.get_issue_session(issue_id)
+                            not in (None, agent_session_id)):
+                        self._ledger.mark_done(delivery_key)
+                        return web.json_response({"status": "issue_session_active"}, status=200)
                     pending_closure = self._ledger.get_pending_closure_event(issue_id)
                     if pending_closure is not None:
                         closure_status = await self._reconcile_human_completion(
@@ -1173,21 +1271,29 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     self._ledger.cancel_direct_activation_for_session(agent_session_id)
             if action == "prompted" and not is_stop:
                 clarify_status = await self._resolve_clarify_input(
-                    agent_session_id, issue_id, payload
+                    agent_session_id, issue_id, payload, delivery_key=delivery_key
                 )
                 if clarify_status is not None:
+                    if clarify_status == "clarify_unavailable":
+                        self._ledger.release(delivery_key)
+                        claimed = False
+                        return web.json_response({"status": clarify_status}, status=503)
                     self._ledger.mark_done(delivery_key)
                     return web.json_response(
                         {"status": clarify_status}, status=200
                     )
+                if self._native_goal_continuation_enabled and not _activity_body(payload).lstrip().startswith("/"):
+                    self._ledger.bind_clarify_reply(delivery_key, "")
             if (
                 action == "created"
                 and self._planned_activation_enabled
                 and issue_id
                 and not direct_activation_created
             ):
-                async with self._issue_lock(issue_id):
-                    context = await self._linear.get_issue_closure_context(issue_id)
+                async with _admission_lock(self._issue_lock(issue_id), read_deadline):
+                    async with asyncio.timeout_at(read_deadline):
+                        context = await self._linear.get_issue_closure_context(issue_id)
+                    _check_admission_deadline(read_deadline)
                     state_type = str((context.get("state") or {}).get("type") or "").casefold()
                     if state_type == "backlog":
                         team_id = str((context.get("team") or {}).get("id") or "")
@@ -1243,11 +1349,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             {"status": "waiting_for_activation"}, status=200
                         )
             if action == "created" and self._dependency_wait_enabled and issue_id:
-                blockers = await self._linear.get_open_blockers(issue_id)
+                async with asyncio.timeout_at(read_deadline):
+                    blockers = await self._linear.get_open_blockers(issue_id)
+                _check_admission_deadline(read_deadline)
                 if direct_activation_created:
                     direct_issue_lock = self._issue_lock(issue_id)
-                    await direct_issue_lock.acquire()
+                    async with asyncio.timeout_at(read_deadline):
+                        await direct_issue_lock.acquire()
                     direct_issue_lock_held = True
+                    _check_admission_deadline(read_deadline)
                 if (
                     direct_activation_created
                     and not self._direct_activation_claim_is_current(
@@ -1275,16 +1385,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     )
                     self._enqueue_status(agent_session_id, issue_id, "blocked", delivery_key)
                     self._ledger.mark_done(delivery_key)
-                    # Close the race where the last blocker completed between the
-                    # initial query and the durable wait commit.
-                    resumed = await self._reconcile_wait(agent_session_id)
-                    return web.json_response(
-                        {"status": "accepted" if resumed else "awaiting_input"}, status=200
-                    )
+                    # The existing dependency loop recovers a completion missed
+                    # before put_wait; do not put vendor I/O after durable ACK state.
+                    return web.json_response({"status": "awaiting_input"}, status=200)
             if direct_activation_created and issue_id and not direct_issue_lock_held:
                 direct_issue_lock = self._issue_lock(issue_id)
-                await direct_issue_lock.acquire()
+                async with asyncio.timeout_at(read_deadline):
+                    await direct_issue_lock.acquire()
                 direct_issue_lock_held = True
+                _check_admission_deadline(read_deadline)
                 if not self._direct_activation_claim_is_current(
                     issue_id, agent_session_id
                 ):
@@ -1293,8 +1402,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         {"status": "direct_activation_canceled"}, status=200
                     )
             dispatch_lock = self._session_lock(agent_session_id)
-            await dispatch_lock.acquire()
+            async with asyncio.timeout_at(read_deadline if action == "created" else None):
+                await dispatch_lock.acquire()
             dispatch_lock_held = True
+            if action == "created":
+                # Readiness only: keep fresh outbox validation after admission.
+                async with asyncio.timeout_at(read_deadline):
+                    await self._validate_activity_target(agent_session_id)
+                _check_admission_deadline(read_deadline)
             native_command = (
                 action == "prompted"
                 and _activity_body(payload).lstrip().startswith("/")
@@ -1315,13 +1430,15 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     )
                 )
             ):
-                if self._native_goal_continuation_enabled:
-                    await self._fence_turn_decisions_for_visibility(
-                        agent_session_id,
-                        f"linear_{signal or agent_session_status or ('human_prompt' if human_preemption else 'stop')}_signal",
-                    )
-                if is_stop or human_preemption:
-                    await self._cancel_linear_session_processing(agent_session_id)
+                try:
+                    if self._native_goal_continuation_enabled:
+                        await self._fence_turn_decisions_for_visibility(
+                            agent_session_id,
+                            f"linear_{signal or agent_session_status or ('human_prompt' if human_preemption else 'stop')}_signal",
+                        )
+                finally:
+                    if is_stop or human_preemption:
+                        await self._cancel_linear_session_processing(agent_session_id)
             if not is_stop and self._ledger.has_session_closure(agent_session_id):
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "closure_reconciled"}, status=200)
@@ -1345,6 +1462,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             # Private provenance, never a field copied from webhook metadata.
             event._linear_verified_normal_prompt = human_preemption
+            if human_preemption and self._native_goal_continuation_enabled:
+                # Native clarify was already classified above. Core's generic
+                # FIFO interceptor must not answer a successor during fallback.
+                event.allow_gateway_control = False
             if native_command and not self._trusted_native_command_requester(event):
                 # Never let the webhook adapter's synthetic source (or the core
                 # webhook platform exemption) authorize a control command.
@@ -1354,16 +1475,19 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"status": "native_command_requester_unavailable"}, status=200
                 )
-            if not is_stop:
-                self._schedule_thought(
-                    agent_session_id,
-                    issue_id,
-                    delivery_key,
-                    include_queued=action == "created",
-                )
+            if action == "created" and not direct_activation_created:
+                # Bound only a read before admission, never core dispatch or a
+                # manager/Direct ambiguity-fenced claim. Consume it once so a
+                # queued event's later pre-handler check gets a fresh read.
+                event._linear_created_read_deadline = read_deadline
+            normal_native_prompt = human_preemption and self._native_goal_continuation_enabled
+            if action == "created":
+                _check_admission_deadline(read_deadline)
             if direct_activation_created:
                 direct_dispatch_attempted = True
             await self.handle_message(event)
+            if normal_native_prompt and getattr(event, "_gateway_accepted", False) is not True:
+                raise RuntimeError("Linear normal prompt was not admitted")
             if direct_activation_created and issue_id:
                 if not self._ledger.mark_direct_activation_dispatched(
                     issue_id, agent_session_id
@@ -1373,7 +1497,16 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 self._ledger.mark_manager_activation(
                     issue_id, "session_started", session_id=agent_session_id
                 )
-            self._ledger.mark_done(delivery_key)
+            acceptance_thought = None
+            if (not is_stop and getattr(event, "_gateway_accepted", False)
+                and not getattr(event, "_linear_ingress_vetoed", False)):
+                acceptance_thought = {
+                    "agent_session_id": agent_session_id,
+                    "issue_id": issue_id,
+                    "include_queued": action == "created",
+                }
+            self._ledger.mark_done(delivery_key, acceptance_thought=acceptance_thought)
+            self._repair_acceptance_thoughts(delivery_key)
             logger.info(
                 "[linear] accepted subscription_id=%s delivery_key=%s action=%s signal=%s agent_session_id=%s",
                 webhook_id,
@@ -1412,6 +1545,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             return web.json_response({"status": "unavailable"}, status=503)
         finally:
+            if inflight is not None:
+                inflight.discard(delivery_key)
+                if not inflight:
+                    self._inflight_session_deliveries.pop(agent_session_id, None)
             if dispatch_lock_held and dispatch_lock is not None:
                 dispatch_lock.release()
             if direct_issue_lock_held and direct_issue_lock is not None:
@@ -1486,16 +1623,20 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         webhook_id: str,
         issue_id: str,
         session_id: str,
+        *,
+        read_deadline: float | None = None,
     ) -> web.Response:
         """CAS and dispatch one native manager session while closure controls are excluded."""
         assert self._ledger is not None and self._linear is not None
-        async with self._issue_lock(issue_id):
+        async with _admission_lock(self._issue_lock(issue_id), read_deadline):
             activation = self._ledger.get_manager_activation(issue_id)
             state = str((activation or {}).get("state") or "")
             evidence = (activation or {}).get("evidence") or {}
             if state == "dispatch_unknown":
                 event_actor_id, _ = _actor(payload)
-                recovery_context = await self._linear.get_issue_closure_context(issue_id)
+                async with asyncio.timeout_at(read_deadline):
+                    recovery_context = await self._linear.get_issue_closure_context(issue_id)
+                _check_admission_deadline(read_deadline)
                 recovery_state = recovery_context.get("state") or {}
                 evidence_state_id = str(evidence.get("current_state_id") or "")
                 evidence_revision = str(evidence.get("event_updated_at") or "")
@@ -1538,9 +1679,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         )
                     except ValueError:
                         native_session_revision = False
+                async with asyncio.timeout_at(read_deadline):
+                    sessions = await self._linear.get_issue_agent_sessions(issue_id)
+                _check_admission_deadline(read_deadline)
                 open_actor_sessions = [
-                    session
-                    for session in await self._linear.get_issue_agent_sessions(issue_id)
+                    session for session in sessions
                     if self._is_execution_capable_open_session(session)
                 ]
                 recovered_reopen = bool(
@@ -1592,7 +1735,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if state == "canceled":
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "activation_policy_denied"}, status=200)
-            context = await self._linear.get_issue_closure_context(issue_id)
+            async with asyncio.timeout_at(read_deadline):
+                context = await self._linear.get_issue_closure_context(issue_id)
+            _check_admission_deadline(read_deadline)
             expected_session_id = str((activation or {}).get("session_id") or "")
             evidence = (activation or {}).get("evidence") or {}
             reopen_activation = bool(
@@ -1619,19 +1764,26 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 self._ledger.mark_manager_activation(issue_id, "canceled")
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "activation_policy_denied"}, status=200)
+            if not await self._bind_issue_session(issue_id, session_id, read_deadline=read_deadline):
+                self._ledger.mark_done(delivery_key)
+                return web.json_response({"status": "issue_session_active"}, status=200)
             if state in {"claimed", "failed", "delegation_unknown"}:
                 self._ledger.mark_manager_activation(issue_id, "delegated")
-            if not self._ledger.claim_manager_session(issue_id, session_id):
-                current = self._ledger.get_manager_activation(issue_id) or {}
-                status = (
-                    "dispatch_ambiguous"
-                    if current.get("state") == "dispatch_unknown"
-                    else "manager_session_duplicate"
-                )
-                self._ledger.mark_done(delivery_key)
-                return web.json_response({"status": status}, status=200)
-            self._ledger.bind_issue_session(issue_id, session_id)
-            async with self._session_lock(session_id):
+            async with _admission_lock(self._session_lock(session_id), read_deadline):
+                async with asyncio.timeout_at(read_deadline):
+                    await self._validate_activity_target(session_id)
+                # After this CAS dispatch may be ambiguous: never time out or
+                # reset its owner, even if handle_message itself is slow.
+                _check_admission_deadline(read_deadline)
+                if not self._ledger.claim_manager_session(issue_id, session_id):
+                    current = self._ledger.get_manager_activation(issue_id) or {}
+                    status = (
+                        "dispatch_ambiguous"
+                        if current.get("state") == "dispatch_unknown"
+                        else "manager_session_duplicate"
+                    )
+                    self._ledger.mark_done(delivery_key)
+                    return web.json_response({"status": status}, status=200)
                 event = self._message_event(
                     payload, delivery_key, webhook_id, activation_resume=True
                 )
@@ -2224,8 +2376,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             logger.info("[linear] terminal fenced issue=%s reason=session_unbound", issue_id)
             return "terminal_fenced"
-        if not persisted_session_id:
-            self._ledger.bind_issue_session(issue_id, session_id)
+        if not persisted_session_id and not await self._bind_issue_session(issue_id, session_id):
+            return "closure_deferred"
         material = "\0".join(
             (
                 issue_id,
@@ -2533,7 +2685,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     return False
                 if not self._ledger.mark_channel_route(operation_key, "dispatching"):
                     return False
-                self._ledger.bind_issue_session(issue_id, session_id)
                 return True
 
             accepted = await self.dispatch_channel_route(
@@ -2635,7 +2786,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         authorize_dispatch: Callable[[], bool] | None = None,
     ) -> bool:
         """Revalidate and serialize cross-channel dispatch with native intake."""
-        async with self._session_lock(expected_session_id):
+        async with self._issue_lock(expected_issue_id), self._session_lock(expected_session_id):
             target = await self.get_channel_route_target(issue_ref)
             if (
                 target.get("routable") is not True
@@ -2647,10 +2798,68 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return False
             if authorize_dispatch is not None and not authorize_dispatch():
                 return False
+            if not await self._bind_issue_session(expected_issue_id, expected_session_id):
+                return False
             if before_dispatch is not None and not before_dispatch():
                 raise LinearAPIError("Cross-channel durable dispatch boundary was not acquired")
             await self.handle_message(event)
             return True
+
+    async def _bind_issue_session(
+        self, issue_id: str, session_id: str, *, read_deadline: float | None = None,
+    ) -> bool:
+        """One issue execution per profile/app; callers hold the issue lock.
+
+        Vendor terminal status must belong to the exact old binding. The SQLite
+        CAS also protects against another ledger connection replacing it mid-read.
+        """
+        assert self._ledger is not None and self._linear is not None
+        previous = self._ledger.get_issue_session(issue_id)
+        if previous and previous != session_id:
+            source = self.build_source(chat_id=previous, chat_type="dm")
+            extra = getattr(self.config, "extra", None) or {}
+            key = build_session_key(
+                source,
+                group_sessions_per_user=extra.get("group_sessions_per_user", True),
+                thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+                profile=self._session_key_profile(source),
+            )
+            def locally_active() -> bool:
+                return bool(
+                    self._inflight_session_deliveries.get(previous)
+                    or self._session_lock(previous).locked()
+                    or key in self._active_sessions or key in self._pending_messages
+                    or previous in self._active_turn_events
+                    or previous in self._pending_turn_deliveries
+                )
+
+            # Reject without vendor I/O under the issue lock: Stop needs it too.
+            if locally_active():
+                return False
+            async with asyncio.timeout_at(read_deadline):
+                context = await self._linear.get_agent_session_delivery_context(previous)
+            _check_admission_deadline(read_deadline)
+            if not (
+                self._linear.actor_id
+                and context.get("id") == previous
+                and context.get("issue_id") == issue_id
+                and context.get("app_user_id") == self._linear.actor_id
+                and context.get("status") in {"complete", "error"}
+            ) or locally_active():  # Local ownership can change across the read.
+                return False
+            # Terminal upstream must not orphan a locally resumable execution.
+            for pending in (
+                self._ledger.get_wait(previous),
+                self._ledger.get_activation_wait(issue_id),
+                self._ledger.get_direct_activation_event(issue_id),
+            ):
+                if (pending and pending.get("session_id") == previous
+                        and pending.get("state") in {"waiting", "resuming", "claimed", "dispatch_unknown"}):
+                    return False
+        _check_admission_deadline(read_deadline)
+        return self._ledger.bind_issue_session(
+            issue_id, session_id, expected_session_id=previous,
+        )
 
     def _issue_lock(self, issue_id: str) -> asyncio.Lock:
         lock = self._issue_locks.get(issue_id)
@@ -2669,10 +2878,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if self._linear is None or self._ledger is None:
             return web.json_response({"status": "unavailable"}, status=503)
         delivery_key = _delivery_key(payload, raw)
-        if not self._ledger.claim(delivery_key):
-            return web.json_response({"status": "duplicate"}, status=200)
-        claimed = True
+        claimed = False
         try:
+            if not self._ledger.claim(delivery_key):
+                return self._duplicate_delivery_response(delivery_key)
+            claimed = True
             actor_id, _ = _actor(payload)
             event_type = str(payload.get("type") or "")
             action = str(payload.get("action") or "")
@@ -2697,12 +2907,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             self._ledger.mark_manager_activation(entity_id, "canceled")
                         bound_session = self._ledger.get_issue_session(entity_id)
                         if bound_session:
-                            async with self._session_lock(bound_session):
-                                if self._native_goal_continuation_enabled:
-                                    await self._fence_turn_decisions_for_visibility(
-                                        bound_session, f"linear_issue_{event_state_type}"
-                                    )
-                            await self._cancel_linear_session_processing(bound_session)
+                            try:
+                                async with self._session_lock(bound_session):
+                                    if self._native_goal_continuation_enabled:
+                                        await self._fence_turn_decisions_for_visibility(
+                                            bound_session, f"linear_issue_{event_state_type}"
+                                        )
+                            finally:
+                                await self._cancel_linear_session_processing(bound_session)
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "ignored_self"}, status=200)
             notification = payload.get("notification")
@@ -2724,12 +2936,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             self._ledger.mark_manager_activation(entity_id, "canceled")
                         bound_session = self._ledger.get_issue_session(entity_id)
                         if bound_session:
-                            async with self._session_lock(bound_session):
-                                if self._native_goal_continuation_enabled:
-                                    await self._fence_turn_decisions_for_visibility(
-                                        bound_session, f"linear_issue_{event_state_type}"
-                                    )
-                            await self._cancel_linear_session_processing(bound_session)
+                            try:
+                                async with self._session_lock(bound_session):
+                                    if self._native_goal_continuation_enabled:
+                                        await self._fence_turn_decisions_for_visibility(
+                                            bound_session, f"linear_issue_{event_state_type}"
+                                        )
+                            finally:
+                                await self._cancel_linear_session_processing(bound_session)
                     reopen_status = await self._reconcile_human_reopen(
                         payload, entity_id, _issue_locked=True
                     )
@@ -2814,7 +3028,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             if claimed:
-                self._ledger.release(delivery_key)
+                try:
+                    self._ledger.release(delivery_key)
+                except Exception:
+                    logger.exception("[linear] Failed to release data delivery %s", delivery_key)
             logger.exception("[linear] Data event reconciliation failed: %s", exc)
             return web.json_response({"status": "unavailable"}, status=503)
 
@@ -2994,19 +3211,49 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             try:
                 if self._ledger is not None:
                     for pending in self._ledger.list_direct_activation_events():
-                        await self._reconcile_direct_activation_event(pending["issue_id"])
+                        try:
+                            await self._reconcile_direct_activation_event(pending["issue_id"])
+                        except Exception:
+                            logger.exception("[linear] Direct recovery failed issue=%s", pending["issue_id"])
                     if self._dependency_wait_enabled:
                         if self._native_goal_continuation_enabled:
                             for wait in self._ledger.list_waiting(state="resumed"):
-                                await self._recover_unadmitted_dependency_wait(wait["session_id"])
+                                try:
+                                    await self._recover_unadmitted_dependency_wait(wait["session_id"])
+                                except Exception:
+                                    logger.exception(
+                                        "[linear] Unadmitted wait recovery failed session=%s", wait["session_id"]
+                                    )
                         for wait in self._ledger.list_waiting():
-                            await self._reconcile_wait(wait["session_id"])
+                            try:
+                                await self._reconcile_wait(wait["session_id"])
+                            except Exception as exc:
+                                logger.exception(
+                                    "[linear] Dependency recovery failed session=%s issue=%s: %s",
+                                    wait["session_id"], wait["issue_id"], exc,
+                                )
                 await asyncio.sleep(self._dependency_poll_seconds)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.exception("[linear] Dependency recovery loop failed: %s", exc)
                 await asyncio.sleep(self._dependency_poll_seconds)
+
+    def _repair_acceptance_thoughts(self, delivery_key: str | None = None) -> None:
+        if self._ledger is None:
+            return
+        for receipt in self._ledger.pending_acceptance_thoughts(delivery_key):
+            key = receipt["delivery_key"]
+            try:
+                self._schedule_thought(
+                    receipt["agent_session_id"], receipt["issue_id"], key,
+                    include_queued=receipt["include_queued"], acceptance_delivery_key=key,
+                )
+                self._ledger.mark_acceptance_thought_scheduled(key)
+            except Exception:
+                if delivery_key is not None:
+                    raise  # HTTP replay stays 503; unrelated outbox work must not stall.
+                logger.warning("[linear] Acceptance thought repair failed key=%s", key, exc_info=True)
 
     def _schedule_thought(
         self,
@@ -3016,6 +3263,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         *,
         include_queued: bool,
         body: str | None = None,
+        acceptance_delivery_key: str = "",
     ) -> None:
         if body is None:
             actor_name = getattr(self._linear, "actor_name", None) or "Hermes"
@@ -3025,10 +3273,17 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             "thought",
             body,
             item_key=f"thought:{delivery_key}",
+            metadata={"acceptance_delivery_key": acceptance_delivery_key} if acceptance_delivery_key else None,
         )
         if include_queued:
-            self._enqueue_status(agent_session_id, issue_id, "queued", delivery_key)
-        self._enqueue_status(agent_session_id, issue_id, "running", delivery_key)
+            self._enqueue_status(
+                agent_session_id, issue_id, "queued", delivery_key,
+                acceptance_delivery_key=acceptance_delivery_key,
+            )
+        self._enqueue_status(
+            agent_session_id, issue_id, "running", delivery_key,
+            acceptance_delivery_key=acceptance_delivery_key,
+        )
         task = asyncio.create_task(self._post_thought(agent_session_id))
         bucket = self._ack_tasks.setdefault(agent_session_id, set())
         bucket.add(task)
@@ -3118,6 +3373,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             self._outbox_wakeup.set()
             if terminal_activity:
+                self._ledger.cancel_acceptance_thoughts(agent_session_id)
                 self._notify_terminal_progress_fence(
                     agent_session_id, expected_turn_key=turn_key
                 )
@@ -3187,6 +3443,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 session_id,
                 payload,
             )
+            self._ledger.cancel_acceptance_thoughts(session_id)
             self._outbox_wakeup.set()
             self._notify_terminal_progress_fence(
                 session_id, expected_turn_key=turn_key
@@ -3201,6 +3458,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         issue_id: str,
         execution_state: str,
         delivery_key: str,
+        *,
+        acceptance_delivery_key: str = "",
     ) -> None:
         if (
             not self._status_writeback_enabled
@@ -3216,6 +3475,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "issue_id": issue_id,
                 "execution_state": execution_state,
+                "acceptance_delivery_key": acceptance_delivery_key,
                 "state_name": self._status_mapping[execution_state],
                 "state_rank": self._status_ranks[execution_state],
                 "state_ranks": {
@@ -3242,6 +3502,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
     async def _outbox_loop(self) -> None:
         while self._running:
             try:
+                self._repair_acceptance_thoughts()
                 delivered = await self._drain_outbox_once()
                 if delivered:
                     continue
@@ -3414,6 +3675,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             if item is None:
                 return False
+            acceptance_key = item.payload.get("acceptance_delivery_key")
+            if acceptance_key and not self._ledger.acceptance_thought_is_current(acceptance_key):
+                self._ledger.mark_outbox_delivered(item.id)
+                return True
             turn_success_item = item.id.startswith("activity:turn-success:")
             if item.payload.get("activity_type") == "response" and item.attempts > 1:
                 # A prior create may already have completed the vendor session.
@@ -3588,6 +3853,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     # Recheck after the final awaited target validation and
                     # immediately before vendor create: the waiter or turn
                     # may disappear while that validation is in flight.
+                    acceptance_key = item.payload.get("acceptance_delivery_key")
+                    if acceptance_key and not self._ledger.acceptance_thought_is_current(acceptance_key):
+                        self._ledger.mark_outbox_delivered(item.id)
+                        return True
                     if (
                         str(item.payload.get("activity_type") or "") == "elicitation"
                         and item.payload.get("clarify_id")
@@ -3666,6 +3935,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         self._outbox_wakeup.set()
                     logger.error("[linear] Outbox dead letter id=%s: %s", item.id, exc)
             except Exception as exc:
+                if _ledger_busy(exc):
+                    exponent = min(max(item.attempts - 1, 0), 16)
+                    delay = min(self._outbox_max_delay, self._outbox_base_delay * (2**exponent))
+                    self._ledger.reschedule_outbox(item.id, str(exc), delay)
+                    logger.warning("[linear] Outbox ledger retry id=%s delay=%.1fs: %s", item.id, delay, exc)
+                    return True
                 cleanup_inserted = self._ledger.dead_letter_outbox(
                     item.id,
                     str(exc),
@@ -3736,7 +4011,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         """Fail closed when a normal activity target changed app-user owner."""
         if self._linear is None:
             raise LinearAPIError("Linear client is unavailable", retryable=True)
-        context = await self._linear.get_agent_session_delivery_context(agent_session_id)
+        try:
+            async with asyncio.timeout(4.0):
+                context = await self._linear.get_agent_session_delivery_context(agent_session_id)
+        except TimeoutError as exc:
+            raise LinearAPIError("Linear activity owner read timed out", retryable=True) from exc
         if not self._linear.actor_id or not hmac.compare_digest(
             str(context.get("app_user_id") or ""), self._linear.actor_id
         ):
@@ -4077,6 +4356,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         source_profile = str(getattr(event.source, "profile", "") or "").strip()
         if profile and source_profile and profile != source_profile:
             return
+        # A queued recursive turn can reuse this event. Keep completed owners
+        # until the event retires; a late old end hook cannot erase a newer fence.
+        completed_owners = getattr(event, "_linear_completed_turn_owners", None)
+        if completed_owners is None:
+            completed_owners = event._linear_completed_turn_owners = set()
+        completed_owners.add((str(hermes_session_id or ""), str(turn_id or "")))
         self._completed_turn_results[str(chat_id)] = {
             "completed": bool(completed),
             "failed": bool(failed),
@@ -4095,7 +4380,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             raise WakeNotAccepted("Linear ingress vetoed execution")
         return True
 
-    async def _cancel_linear_session_processing(self, session_id: str) -> None:
+    def _linear_processing_owner(self, session_id: str) -> tuple[Any, ...]:
         source = self.build_source(
             chat_id=session_id,
             chat_name="Linear",
@@ -4112,22 +4397,53 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
             profile=self._session_key_profile(source),
         )
-        interrupt = getattr(self.gateway_runner, "interrupt_session_processing", None)
-        if callable(interrupt):
-            # Use the runner's source-scoped async seam and pin the Hermes
-            # identity when this turn has one.
-            active_event = self._active_turn_events.get(str(session_id))
-            interrupt_source = active_event.source if active_event is not None else source
-            expected_session_id = (
-                str(active_event.metadata.get("gateway_session_id") or "")
-                if active_event is not None else ""
-            ) or None
-            await interrupt(
-                interrupt_source,
-                reason="linear_authoritative_stop",
-                expected_session_id=expected_session_id,
-            )
-        await self.cancel_session_processing(session_key)
+        active_event = self._active_turn_events.get(str(session_id))
+        owner_task = self._session_tasks.get(session_key)
+        owner_guard = self._active_sessions.get(session_key)
+        owner_generation = getattr(owner_guard, "_hermes_run_generation", None)
+        return source, session_key, active_event, owner_task, owner_guard, owner_generation
+
+    async def _cancel_linear_session_processing(self, session_id: str) -> None:
+        (source, session_key, active_event, owner_task,
+         owner_guard, owner_generation) = self._linear_processing_owner(session_id)
+        owner_session_id = (
+            str(active_event.metadata.get("gateway_session_id") or "") if active_event else ""
+        ) or None
+        try:
+            if self._ledger is not None:
+                if self._native_goal_continuation_enabled:
+                    # Commit the execution fence before receipt writes or awaits:
+                    # failed receipt cleanup must not leave recovery able to run.
+                    # The caller's locked visibility fence is still required.
+                    self._ledger.fence_turn_decisions(session_id, "linear_authoritative_stop")
+                self._ledger.cancel_acceptance_thoughts(session_id)
+        finally:
+            # Failed persistence keeps HTTP retryable, never execution alive.
+            interrupt = getattr(self.gateway_runner, "interrupt_session_processing", None)
+            try:
+                owner_changed = (
+                    (owner_task is not None and self._session_tasks.get(session_key) is not owner_task)
+                    or (owner_guard is not None and self._active_sessions.get(session_key) is not owner_guard)
+                )
+                if callable(interrupt) and not owner_changed:
+                    # Use the runner's source-scoped async seam and pin the Hermes
+                    # identity when this turn has one.
+                    interrupt_source = active_event.source if active_event is not None else source
+                    await interrupt(
+                        interrupt_source,
+                        reason="linear_authoritative_stop",
+                        expected_session_id=owner_session_id,
+                        expected_run_generation=owner_generation,
+                    )
+            finally:
+                if owner_task is None and owner_guard is None:
+                    if (self._session_tasks.get(session_key) is None
+                            and self._active_sessions.get(session_key) is None):
+                        await self.cancel_session_processing(session_key)
+                else:
+                    await self.cancel_session_processing(
+                        session_key, expected_task=owner_task, expected_guard=owner_guard,
+                    )
 
     async def _fence_turn_decisions_for_visibility(self, session_id: str, reason: str) -> int:
         # This is the sole lock shared with tagged activity dispatch; callers
@@ -4144,9 +4460,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         session_id = self._ledger.get_issue_session(issue_id)
         if not session_id:
             return False
-        async with self._session_lock(session_id):
-            changed = await self._fence_turn_decisions_for_visibility(session_id, reason)
-        await self._cancel_linear_session_processing(session_id)
+        try:
+            async with self._session_lock(session_id):
+                changed = await self._fence_turn_decisions_for_visibility(session_id, reason)
+        finally:
+            await self._cancel_linear_session_processing(session_id)
         return bool(changed or session_id)
 
     async def _stop_bound_turns_if_blocked(self, issue_id: str) -> bool:
@@ -4265,7 +4583,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 "gateway_session_strict": True,
             }
         )
-        context = await self._linear.get_agent_turn_context(session_id)
+        read_deadline = getattr(event, "_linear_created_read_deadline", None)
+        event._linear_created_read_deadline = None
+        async with asyncio.timeout_at(read_deadline):
+            context = await self._linear.get_agent_turn_context(session_id)
+        _check_admission_deadline(read_deadline)
         probe = {
             "completed": False,
             "failed": False,
@@ -4332,6 +4654,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     return await self._visible_ingress_veto(event, "late_clarify_unverified")
         if event.metadata.get("linear_dependency_resume") and self._dependency_resume_claim(event) is None:
             return await self._visible_ingress_veto(event, "dependency_resume_fenced")
+        _check_admission_deadline(read_deadline)
         return False
 
     def _dependency_resume_claim(self, event: MessageEvent) -> dict[str, Any] | None:
@@ -4881,7 +5204,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     event, turn_result, context
                 )
             except Exception as exc:
-                if isinstance(exc, LinearAPIError) and exc.retryable:
+                if (isinstance(exc, LinearAPIError) and exc.retryable) or _ledger_busy(exc):
                     raise
                 logger.warning(
                     "[linear] authoritative turn read-back failed closed session=%s: %s",
@@ -4897,7 +5220,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     event.source, hermes_session_id
                 )
             except Exception as exc:
-                if isinstance(exc, LinearAPIError) and exc.retryable:
+                if (isinstance(exc, LinearAPIError) and exc.retryable) or _ledger_busy(exc):
                     raise
                 logger.warning(
                     "[linear] native goal read failed closed session=%s: %s",
@@ -5221,7 +5544,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         ):
             return
         self._turn_recovery_requested = False
-        staged_retry_needed = await self._recover_staged_turn_deliveries()
+        staged_retry_needed, ledger_busy = await self._recover_staged_turn_deliveries()
+        if ledger_busy:
+            if self._running:
+                self._turn_recovery_task = asyncio.create_task(
+                    self._delayed_turn_decision_recovery()
+                )
+            return  # Other recovery scans cannot read the ledger yet either.
         cursor: tuple[int, str] | None = None
         while True:
             rows = self._ledger.running_turn_decisions(
@@ -5512,13 +5841,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._ledger.fence_turn_success_without_activity(decision_id, message)
         return False
 
-    async def _recover_staged_turn_deliveries(self) -> bool:
+    async def _recover_staged_turn_deliveries(self) -> tuple[bool, bool]:
         """Retry staged finals through the same native decision boundary.
 
         The response remains intentionally process-local until the authoritative
         read succeeds; orphan recovery handles text lost across process restart.
         """
         retry_needed = False
+        ledger_busy = False
         for chat_id, retry_state in list(self._staged_delivery_attempts.items()):
             pending_delivery, previous_attempts = retry_state
             if (
@@ -5584,13 +5914,20 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     )
                 self._remove_owned_staged_delivery(chat_id, pending_delivery)
             except Exception as exc:
+                if _ledger_busy(exc):
+                    if self._pending_turn_deliveries.get(chat_id) is pending_delivery:
+                        # Contention spends no delivery attempt; retry rechecks ownership.
+                        self._staged_delivery_attempts[chat_id] = (pending_delivery, previous_attempts)
+                        retry_needed = True
+                        ledger_busy = True
+                    continue
                 logger.warning(
                     "[linear] staged final recovery failed session=%s: %s",
                     chat_id,
                     exc,
                 )
                 self._remove_owned_staged_delivery(chat_id, pending_delivery)
-        return retry_needed
+        return retry_needed, ledger_busy
 
     def _remove_owned_staged_delivery(
         self, chat_id: str, pending_delivery: tuple[MessageEvent, str, dict[str, Any]]
@@ -5634,6 +5971,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._active_turn_events.get(chat_id)
             if self._native_goal_continuation_enabled else None
         )
+        if (self._native_goal_continuation_enabled and active_event is None
+                and (chat_id in self._pending_turn_deliveries or not self._progress_chat_is_allowed(chat_id))
+                and not (transient_progress or long_running_heartbeat or trusted_ephemeral_notice)):
+            # Core's generic error send follows FAILURE completion. The durable
+            # terminal/retry fence must survive releasing local turn ownership.
+            return SendResult(success=False, error="Linear final delivery has no live turn", retryable=False)
         if active_event is not None and not (
             transient_progress or long_running_heartbeat or trusted_ephemeral_notice
         ):
@@ -5868,7 +6211,21 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 in {"completed", "canceled", "cancelled"}
             ):
                 raise LinearAPIError("Linear clarify live issue ownership check failed", retryable=False)
-            if self._ledger.has_session_closure(str(chat_id)) or str(chat_id) in self._completed_turn_results:
+            # Core captures this immutable pair before bounded hooks can yield.
+            # Missing ownership (including older cores) must never use latest progress.
+            owner = getattr(entry, "turn_owner", None)
+            if (not isinstance(owner, tuple) or len(owner) != 2
+                    or not all(isinstance(value, str) and value for value in owner)):
+                raise LinearAPIError("Linear clarify native turn owner is missing or malformed", retryable=False)
+            if not self._clarify_owner_is_live(event, *owner):
+                raise LinearAPIError("Linear clarify turn owner is no longer live", retryable=False)
+            store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
+            lookup = getattr(store, "lookup_by_session_key", None)
+            live_session = await lookup(str(session_key)) if callable(lookup) else None
+            if (str(getattr(live_session, "session_key", "")) != str(session_key)
+                    or str(getattr(live_session, "session_id", "")) != owner[0]):
+                raise LinearAPIError("Linear clarify Hermes session rotated", retryable=False)
+            if self._ledger.has_session_closure(str(chat_id)):
                 raise LinearAPIError("Linear clarify is fenced by terminal turn state", retryable=False)
 
             item_id = f"activity:clarify:{clarify_id}"
@@ -5882,7 +6239,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 )
                 if (
                     current_event is not event
-                    or current_entry is None
+                    or not self._clarify_owner_is_live(event, *owner)
+                    or current_entry is not entry
                     or current_entry.event.is_set()
                     or str(current_entry.clarify_id) != str(clarify_id)
                     or str(current_entry.question) != str(question)
@@ -5906,6 +6264,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         "clarify_id": str(clarify_id),
                         "clarify_session_key": str(session_key),
                         "clarify_question": str(question),
+                        "clarify_hermes_session_id": owner[0],
+                        "clarify_hermes_turn_id": owner[1],
                         "clarify_turn_key": str(event.metadata.get("linear_delivery_key") or event.message_id or event.metadata.get("linear_clarify_turn_key") or ""),
                     },
                 )
@@ -5914,8 +6274,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if item is None:
                 raise LinearAPIError("Linear clarify delivery was not durably recorded", retryable=True)
             if bool(event.metadata.get("linear_clarify_resolved")):
-                # The answer may win while the activity is still pending. Keep
-                # that monotonic resolution in the already-created outbox row.
+                # Verified vendor publication can precede the transport ACK.
+                # Keep that monotonic resolution in the already-created row.
                 self._ledger.update_outbox_payload_metadata(
                     item_id,
                     {"clarify_resolved": True, "clarify_id": str(clarify_id)},
@@ -5969,11 +6329,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         return "\n".join([f"❓ {question}", "", *numbered, "", hint])
 
     async def _resolve_clarify_input(
-        self, agent_session_id: str, issue_id: str, payload: Mapping[str, Any]
+        self, agent_session_id: str, issue_id: str, payload: Mapping[str, Any],
+        *, delivery_key: str = "",
     ) -> str | None:
         """Resolve a Linear reply through the core registry after local binding checks."""
         if not self._native_goal_continuation_enabled:
             return None
+        if self._ledger is None:
+            return "clarify_unavailable"
         active = self._active_turn_events.get(str(agent_session_id))
         if active is None or active.source is None:
             return None
@@ -6004,9 +6367,34 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         pending = clarify_gateway.get_pending_for_session(
             session_key, include_choice_prompts=True
         )
-        if pending is None or pending.event.is_set():
+        item = self._ledger.get_outbox_item(f"activity:clarify:{pending.clarify_id}") if pending else None
+        captured_clarify_id = str(pending.clarify_id) if (
+            pending is not None and not pending.event.is_set() and item is not None
+            and item["state"] in {"pending", "in_flight", "delivered"}
+            and not item["payload"].get("clarify_suppressed")
+            and not item["payload"].get("clarify_resolved")
+        ) else ""
+        if delivery_key:
+            captured_clarify_id = self._ledger.bind_clarify_reply(delivery_key, captured_clarify_id)
+        if not captured_clarify_id:
+            # Registration precedes publication. An old callback paused in
+            # preflight is not a question the human could have answered.
+            owner = getattr(pending, "turn_owner", None)
+            if pending is not None and item is None and (
+                not isinstance(owner, tuple) or len(owner) != 2
+                or not all(isinstance(value, str) and value for value in owner)
+                or not self._clarify_owner_is_live(active, *owner)
+            ):
+                clarify_gateway.cancel(str(pending.clarify_id))
             return None
-        captured_clarify_id = str(pending.clarify_id)
+        if pending is None or pending.event.is_set() or str(pending.clarify_id) != captured_clarify_id:
+            # The captured question expired, not an invitation to answer the
+            # new FIFO head. Normal ingress owns late-answer validation.
+            return None
+        owner = getattr(pending, "turn_owner", None)
+        if (not isinstance(owner, tuple) or len(owner) != 2
+                or not all(isinstance(value, str) and value for value in owner)):
+            return "clarify_unavailable"
         captured_active = active
         incoming_actor_id, _ = _actor(dict(payload))
         registered_user_id = str(getattr(active.source, "user_id", "") or "")
@@ -6042,18 +6430,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return "clarify_fenced"
         if self._linear is None:
             return "clarify_unavailable"
-        async with self._session_lock(str(agent_session_id)):
-            context = await self._linear.get_agent_turn_context(str(agent_session_id))
-            current = self._active_turn_events.get(str(agent_session_id))
-            current_pending = clarify_gateway.get_pending_for_session(
-                session_key, include_choice_prompts=True
-            )
-            if (
-                current is not captured_active
-                or current_pending is None
-                or str(current_pending.clarify_id) != captured_clarify_id
-            ):
-                return "clarify_fenced"
+        # As with outbound clarify, network/store reads do not hold up Stop.
+        context = await self._linear.get_agent_turn_context(str(agent_session_id))
+        store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
+        lookup = getattr(store, "lookup_by_session_key", None)
         issue = context.get("issue") if isinstance(context, Mapping) else None
         actor_id = str(getattr(self._linear, "actor_id", "") or "")
         if (
@@ -6069,43 +6449,88 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         ):
             return "clarify_fenced"
         if not registered_user_id:
-            owner = issue.get("assignee")
+            human_owner = issue.get("assignee")
             if (
-                not isinstance(owner, dict)
-                or owner.get("app") is not False
-                or not isinstance(owner.get("id"), str)
-                or not owner["id"]
+                not isinstance(human_owner, dict)
+                or human_owner.get("app") is not False
+                or not isinstance(human_owner.get("id"), str)
+                or not human_owner["id"]
                 or not incoming_actor_id
-                or not hmac.compare_digest(owner["id"], incoming_actor_id)
+                or not hmac.compare_digest(human_owner["id"], incoming_actor_id)
                 or not hmac.compare_digest(str(context.get("app_user_id") or ""), actor_id)
                 or hmac.compare_digest(incoming_actor_id, actor_id)
             ):
                 return "clarify_requester_binding_unavailable"
-        coerced, rejection = clarify_gateway._coerce_text_response_detailed(
-            current_pending, body
-        )
-        if coerced is not None and clarify_gateway.resolve_gateway_clarify(
-            captured_clarify_id, coerced
+        # Enqueue/claim (and even a later ACK on replay) cannot prove the
+        # question preceded this prompt. Live waiters allow corrected ordinary
+        # replies; strict late-goal rearm does not. Reads stay outside the Stop lock.
+        activity = payload.get("agentActivity")
+        answer_id = activity.get("id") if isinstance(activity, Mapping) else None
+        if item is None or not isinstance(answer_id, str) or not answer_id or not await self._linear.verify_clarify_reply(
+            str(agent_session_id), str(item["payload"].get("activity_id") or ""),
+            answer_id, incoming_actor_id, body, live_waiter=True,
         ):
-            active.metadata["linear_clarify_resolved"] = True
-            self._ledger.update_outbox_payload_metadata(
-                f"activity:clarify:{captured_clarify_id}",
-                {"clarify_resolved": True, "clarify_id": captured_clarify_id},
-            )
-            # This event is a verified resolution, not model-authored progress.
-            # One fixed, ephemeral receipt per question; no answer content or
-            # reopening of terminal/progress fences. The outbox owns delivery.
-            self._enqueue_activity(
-                str(agent_session_id),
-                "thought",
-                "Yanıt alındı — aynı oturumda çalışmaya devam ediliyor.",
-                item_key=f"clarify-resolved:{captured_clarify_id}",
-                ephemeral=True,
-            )
-            return "clarify_resolved"
-        if rejection == "invalid_selection":
-            return "clarify_rejected"
-        return None
+            return "clarify_unavailable"
+        live_session = await lookup(session_key) if callable(lookup) else None
+        async with self._session_lock(str(agent_session_id)):
+            current_pending = clarify_gateway.get_pending_for_session(session_key, include_choice_prompts=True)
+            item = self._ledger.get_outbox_item(f"activity:clarify:{captured_clarify_id}")
+            if self._ledger.has_session_closure(str(agent_session_id)):
+                return "clarify_fenced"
+            if (
+                self._active_turn_events.get(str(agent_session_id)) is not captured_active
+                or current_pending is not pending
+                or getattr(current_pending, "turn_owner", None) != owner
+                or str(getattr(live_session, "session_key", "")) != session_key
+                or str(getattr(live_session, "session_id", "")) != owner[0]
+                or item is None
+                or item["state"] not in {"pending", "in_flight", "delivered"}
+                or item["payload"].get("clarify_suppressed")
+                or item["payload"].get("clarify_resolved")
+                or not self._clarify_outbox_is_live(OutboxItem(
+                    item["id"], item["aggregate_key"], item["sequence"],
+                    item["operation"], item["payload"], item["attempts"],
+                ))
+            ):
+                return "clarify_unavailable"
+            coerced, rejection = clarify_gateway._coerce_text_response_detailed(current_pending, body)
+            # Async lookup returns a snapshot. Reset/compression can replace it
+            # from a worker even without an await here. Linearize the in-memory
+            # check and registry resolution with the core routing lock; never
+            # wait for that lock on the event loop or hold it during ledger I/O.
+            store_lock = getattr(store, "_lock", None)
+            if store_lock is None or not store_lock.acquire(blocking=False):
+                return "clarify_unavailable"
+            try:
+                current_session = store._entries.get(session_key)
+                if (str(getattr(current_session, "session_key", "")) != session_key
+                        or str(getattr(current_session, "session_id", "")) != owner[0]):
+                    return "clarify_unavailable"
+                resolved = coerced is not None and clarify_gateway.resolve_gateway_clarify(
+                    captured_clarify_id, coerced
+                )
+            finally:
+                store_lock.release()
+            if resolved:
+                active.metadata["linear_clarify_resolved"] = True
+                self._ledger.update_outbox_payload_metadata(
+                    f"activity:clarify:{captured_clarify_id}",
+                    {"clarify_resolved": True, "clarify_id": captured_clarify_id},
+                )
+                # This event is a verified resolution, not model-authored progress.
+                # One fixed, ephemeral receipt per question; no answer content or
+                # reopening of terminal/progress fences. The outbox owns delivery.
+                self._enqueue_activity(
+                    str(agent_session_id),
+                    "thought",
+                    "Yanıt alındı — aynı oturumda çalışmaya devam ediliyor.",
+                    item_key=f"clarify-resolved:{captured_clarify_id}",
+                    ephemeral=True,
+                )
+                return "clarify_resolved"
+            if rejection == "invalid_selection":
+                return "clarify_rejected"
+            return None
 
     def _trusted_native_command_requester(self, event: MessageEvent) -> bool:
         """Require an exact active human source before any native slash dispatch."""
@@ -6408,6 +6833,20 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and not bool(payload.get("clarify_resolved"))
         )
 
+    def _clarify_owner_is_live(self, event: MessageEvent, session_id: str, turn_id: str) -> bool:
+        """Validate captured native identity against current progress and terminal state."""
+        cached = self._completed_turn_results.get(str(event.source.chat_id))
+        return bool(
+            session_id and turn_id
+            and str(event.metadata.get("gateway_session_id") or "") == session_id
+            and self._current_progress_turn_key(str(event.source.chat_id)) == turn_id
+            and (session_id, turn_id) not in getattr(event, "_linear_completed_turn_owners", ())
+            and (cached is None or (
+                cached.get("session_id") == session_id
+                and cached.get("turn_id") and cached["turn_id"] != turn_id
+            ))
+        )
+
     def _clarify_outbox_is_live(self, item: OutboxItem) -> bool:
         """Allow clarification delivery only with its exact live waiter/turn."""
         payload = item.payload
@@ -6428,6 +6867,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and str(pending.clarify_id) == clarify_id
             and str(pending.question) == str(payload.get("clarify_question") or "")
             and active is not None
+            and getattr(pending, "turn_owner", None) == (
+                payload.get("clarify_hermes_session_id"), payload.get("clarify_hermes_turn_id"))
+            and self._clarify_owner_is_live(
+                active, str(payload.get("clarify_hermes_session_id") or ""),
+                str(payload.get("clarify_hermes_turn_id") or ""),
+            )
             and str(active.metadata.get("linear_delivery_key") or active.message_id or active.metadata.get("linear_clarify_turn_key") or "") == turn_key
         )
 
@@ -6490,6 +6935,12 @@ class LinearPlatformAdapter(BasePlatformAdapter):
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         if self._ledger is None or event.source is None:
             return
+        # A terminal worker is not local execution ownership. Staged deliveries
+        # retain their own retry fence; never clear a newer event's turn state.
+        if (outcome != ProcessingOutcome.SUCCESS
+                and self._active_turn_events.get(event.source.chat_id) is event):
+            self._active_turn_events.pop(event.source.chat_id, None)
+            self._completed_turn_results.pop(event.source.chat_id, None)
         decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
         if self._native_goal_continuation_enabled and decision_id:
             rejected = str(event.metadata.get("gateway_session_rejected") or "")

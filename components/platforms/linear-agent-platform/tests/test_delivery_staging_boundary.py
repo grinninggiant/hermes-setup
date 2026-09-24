@@ -85,6 +85,29 @@ class StagedDeliveryBoundaryTests(NativeContinuationTests):
         ).fetchone()[0]
         self.assertEqual(response_rows, 1)
 
+    async def test_ledger_contention_retains_staged_final_until_recovery(self):
+        event = await self._stage_review_success()
+        pending = self.adapter._pending_turn_deliveries["linear-session"]
+        self.adapter._staged_delivery_attempts["linear-session"] = (pending, 0)
+        lock = self.adapter._ledger._lock
+        self.assertTrue(lock.acquire(blocking=False))
+        try:
+            await self.adapter._recover_turn_decisions()
+            self.assertIs(self.adapter._pending_turn_deliveries.get("linear-session"), pending)
+            self.assertIn("linear-session", self.adapter._staged_delivery_attempts)
+            retry = self.adapter._turn_recovery_task
+            self.assertIsNotNone(retry)
+        finally:
+            lock.release()
+        await retry
+        self.assertNotIn("linear-session", self.adapter._pending_turn_deliveries)
+        rows = self.adapter._ledger.list_turn_decisions("linear-session")
+        self.assertEqual(len(rows), 1)
+        response_rows = self.adapter._ledger._db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"response\"%'"
+        ).fetchone()[0]
+        self.assertEqual(response_rows, 1)
+
     async def test_stop_between_staged_retries_fences_without_success_or_loop(self):
         from test_native_continuation import FakeGoalManager, LinearAPIError
 

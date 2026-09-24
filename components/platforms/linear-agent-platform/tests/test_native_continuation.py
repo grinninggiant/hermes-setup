@@ -438,6 +438,30 @@ class DecisionLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.fence_turn_decisions("linear-session", "stopped", now=13), 0)
         self.assertEqual(self.ledger.get_turn_decision(row["decision_id"])["dispatch_state"], "fenced")
 
+    def test_failed_stop_fence_rolls_back_before_unrelated_delivery_commit(self):
+        import sqlite3
+
+        for ordinal in (1, 2):
+            row = self.ledger.reserve_turn_decision(
+                "linear-session", "issue-164", "h1", 1, ordinal, "continue"
+            )
+            self.ledger.transition_turn_decision(row["decision_id"], "pending", "enqueued")
+        self.ledger._db.execute(
+            "CREATE TEMP TRIGGER fail_partial_fence AFTER UPDATE ON turn_decisions "
+            "WHEN NEW.ordinal = 2 BEGIN SELECT RAISE(FAIL, 'partial fence'); END"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "partial fence"):
+            self.ledger.fence_turn_decisions("linear-session", "stop")
+        self.assertFalse(self.ledger._db.in_transaction)
+        self.assertTrue(self.ledger.claim("unrelated"))
+        self.ledger.close()
+        self.ledger = DeliveryLedger(self.path)
+        self.assertEqual(
+            [row["dispatch_state"] for row in self.ledger.list_turn_decisions("linear-session")],
+            ["enqueued", "enqueued"],
+        )
+        self.assertEqual(self.ledger.fence_turn_decisions("linear-session", "stop"), 2)
+
     def test_authoritative_fence_also_stops_running_decision(self):
         row = self.ledger.reserve_turn_decision(
             "linear-session", "issue-164", "h1", 1, 2, "continue", now=10
@@ -807,7 +831,12 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._linear.create_activity = create_activity
 
         async def handler(received):
-            clarify_gateway.register("native-wake-question", key, "Fixture question", None)
+            # This handler stands in for the model turn; the dispatcher/callback
+            # ownership handoff itself is exercised in test_native_clarify.
+            self.adapter.open_progress_turn("linear-session", "native-wake-turn")
+            clarify_gateway.register(
+                "native-wake-question", key, "Fixture question", None,
+                turn_owner=("hermes-session", "native-wake-turn"))
             observed.append(await self.adapter.send_clarify(
                 "linear-session", "Fixture question", None, "native-wake-question", key
             ))
@@ -2682,7 +2711,8 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._closure_reconciliation_enabled = False
         self.adapter._activation_allowed_team_ids = set()
         self.adapter._planned_owner_ids = set()
-        self.adapter.handle_message = mock.AsyncMock()
+        self.adapter.handle_message = mock.AsyncMock(
+            side_effect=lambda event: setattr(event, "_gateway_accepted", True))
         self.adapter._cancel_linear_session_processing = mock.AsyncMock()
         row = self.adapter._ledger.reserve_turn_decision(
             "linear-session", "issue-164", "hermes-session", 1, 1, "continue"
@@ -2812,17 +2842,79 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(activity["payload"]["activity_type"], "error")
 
-    async def test_failure_completion_keeps_turn_fence_until_generic_error_send(self):
-        event = turn_event()
-        await self.adapter.on_processing_start(event)
+    async def test_failed_core_turn_releases_issue_binding_without_generic_success(self):
+        import asyncio
 
-        await self.adapter.on_processing_complete(event, ProcessingOutcome.FAILURE)
-        self.assertIn("linear-session", self.adapter._active_turn_events)
-        result = await self.adapter.send(
-            "linear-session", "Hermes encountered an unexpected processing error."
-        )
+        self.drain_patch.stop()
+        del self.adapter.handle_message
+        self.adapter._signing_secrets = ("s" * 32,)
+        self.adapter._linear.description = "No acceptance criteria"
+        self.adapter._linear.create_activity = mock.AsyncMock(side_effect=lambda *args, **kw: kw["activity_id"])
+        original_context = self.adapter._linear.get_agent_session_delivery_context
+        terminal = False
+        executed = []
 
-        self.assertFalse(result.success)
+        async def delivery_context(session_id):
+            context = await original_context(session_id)
+            return {**context, "status": "error" if terminal and session_id == "linear-session" else "active"}
+
+        self.adapter._linear.get_agent_session_delivery_context = delivery_context
+
+        async def handler(event):
+            executed.append(event)
+            if event.source.chat_id == "linear-session":
+                raise RuntimeError("controlled handler failure")
+
+        self.adapter.set_message_handler(handler)
+
+        async def post(session_id):
+            return await asyncio.wait_for(self.adapter._handle_webhook(FakeRequest({
+                "type": "AgentSessionEvent", "action": "created",
+                "webhookId": "webhook-failed-core", "webhookTimestamp": int(time.time() * 1000),
+                "organizationId": "org", "actor": {"id": "human-1"},
+                "agentSession": {"id": session_id, "issue": {"id": "issue-164"}},
+            })), 2)
+
+        try:
+            first = await post("linear-session")
+            self.assertEqual(json.loads(first.text)["status"], "accepted")
+            await asyncio.wait_for(asyncio.gather(*self.adapter._session_tasks.values()), 2)
+            self.assertEqual([event.source.chat_id for event in executed], ["linear-session"])
+            self.assertEqual(self.adapter._active_sessions, {})
+            self.assertEqual(self.adapter._session_tasks, {})
+            terminal = True
+            self.adapter.gateway_runner.async_session_store.entry.session_key = "agent:main:webhook:dm:replacement-session"
+            replacement = await post("replacement-session")
+            self.assertEqual(json.loads(replacement.text)["status"], "accepted")
+            await asyncio.wait_for(asyncio.gather(*self.adapter._session_tasks.values()), 2)
+            self.assertNotIn("linear-session", self.adapter._active_turn_events)
+            self.assertEqual(self.adapter._ledger.get_issue_session("issue-164"), "replacement-session")
+            self.assertEqual([event.source.chat_id for event in executed], ["linear-session", "replacement-session"])
+            activities = self.adapter._linear.create_activity.await_args_list
+            self.assertTrue(any(call.args[1] == "error" for call in activities))
+            self.assertFalse(any(call.args[1] == "response" for call in activities))
+        finally:
+            await asyncio.wait_for(asyncio.gather(*self.adapter._session_tasks.values(), return_exceptions=True), 2)
+            await asyncio.wait_for(asyncio.gather(*(task for tasks in self.adapter._ack_tasks.values() for task in tasks)), 2)
+
+    async def test_terminal_completion_releases_only_its_owned_turn(self):
+        for outcome in (ProcessingOutcome.FAILURE, ProcessingOutcome.CANCELLED):
+            for replaced in (False, True):
+                with self.subTest(outcome=outcome, replaced=replaced):
+                    event, newer = turn_event(), turn_event()
+                    await self.adapter.on_processing_start(event)
+                    if replaced:
+                        await self.adapter.on_processing_start(newer)
+                    await self.adapter.on_processing_complete(event, outcome)
+                    if replaced:
+                        self.assertIs(self.adapter._active_turn_events["linear-session"], newer)
+                    else:
+                        self.assertNotIn("linear-session", self.adapter._active_turn_events)
+                    if outcome == ProcessingOutcome.FAILURE:
+                        result = await self.adapter.send(
+                            "linear-session", "Hermes encountered an unexpected processing error."
+                        )
+                        self.assertFalse(result.success)
         response_rows = self.adapter._ledger._db.execute(
             "SELECT COUNT(*) FROM outbox "
             "WHERE payload_json LIKE '%\"activity_type\":\"response\"%'"

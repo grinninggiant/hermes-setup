@@ -84,6 +84,120 @@ flowchart LR
 - Human terminal reconciliation uses a second durable key over the authoritative issue revision (`updatedAt`), workflow state, human assignee, delegate, and team. Provider `completedAt` is audit-only. Duplicate webhook revisions therefore converge on one ordered pair: an ephemeral `thought` indicator followed by the final `response`.
 - Linear issue, comment, and prompt content is labeled as untrusted user input, never as trusted instructions.
 
+## Created webhook deadline audit (partial, not vendor acceptance)
+
+[Linear Agent Interaction](https://linear.app/developers/agent-interaction) specifies
+**5 seconds for the HTTP response** and, independently, **10 seconds after `created`
+for an activity or external URL update**. A fast HTTP response is not activity proof.
+
+The actual path is `_handle_webhook` → policy/dependency reads → `handle_message`
+→ `_prepare_bound_linear_ingress` → core scheduling → `mark_done` → HTTP 200.
+`_schedule_thought` persists an outbox item, but `_drain_outbox_once` still reads the
+live activity owner before calling Linear. Policy reads hold an issue lock; native
+admission reads hold a session lock. A signed, tenant-validated Stop now fences current
+continuation decisions and interrupts execution before waiting on a contended
+issue/session/outbox lock. The original locked visibility fence and second cancellation
+remain: an admission already in flight can complete while Stop is waiting. This is not
+a new session-wide admission barrier. The client’s 8-second per-request timeout is not
+an aggregate ingress or first-activity budget.
+
+Before ordinary/Direct core dispatch or the manager dispatch CAS, `created` now
+reuses the existing authoritative activity-target read within the same absolute
+four-second admission budget. A stalled initial owner read returns 503, without
+execution, a done receipt or an acceptance thought; retry still admits once. This
+is a readiness check, not cached send authorization. The shared send-time owner
+read is separately bounded to four seconds and reports a retryable `LinearAPIError`,
+so the existing outbox reschedules rather than dead-letters a read timeout. Fresh
+send-time validation and the existing Stop, terminal and rotation fences remain.
+A second read or activity write can still fail after admission: **unconditional
+10-second first activity is not solved**. The unchanged original diagnostic remains
+RED (its slow-owner case now receives 503 instead of the required 200/activity).
+
+The narrow fix here returns **503 `processing`**, not 200, for an unfinished delivery
+claim on both AgentSession and data-event ingress. Only `done` duplicates receive
+200. Existing stale-claim recovery, authorization, Stop and owner guards are unchanged;
+there is no new inbox, early-success ACK or background admission promise.
+
+`diagnostics/created_deadline_probe.py` remains an explicit **partial/RED diagnostic**, outside
+normal regression discovery. It uses signed loopback HTTP, real adapter/core ingress
+and real outbox validation with fixture remote reads; no Linear write or model call.
+Run from the checkout with the intended Hermes core (not an arbitrary installed core):
+
+```bash
+CORE=/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-5cc98f1f2ce11bc4c4368ae7e7fabf9c86e81abe-general
+TEST_HOME=$(mktemp -d)
+(
+  trap 'rm -rf "$TEST_HOME"' EXIT
+  env -i HOME="$TEST_HOME" HERMES_HOME="$TEST_HOME" PATH=/usr/bin:/bin \
+    PYTHONPATH="$CORE" "$CORE/venv/bin/python" \
+    components/platforms/linear-agent-platform/diagnostics/created_deadline_probe.py -v
+)
+```
+
+The deadline candidate bounds the early created policy/blocker reads and the ordinary
+created native-context read to one absolute four-second read budget. Timeout becomes
+an ordinary exception before dispatch, so the existing handler returns 503 and releases
+the processing claim; it never cancels the whole handler. Ordinary ingress schedules
+its acceptance thought only after core acceptance. The durable `done` commit now also
+stores the exact acceptance-thought obligation in the delivery row. A failed thought
+INSERT still returns 503, but replay repairs only that obligation (using stable outbox
+IDs), never execution. The existing outbox poll repairs it after restart even without a
+webhook retry. Stop/preemption and terminal output cancel these obligations; tagged
+acceptance thoughts recheck cancellation after their awaited owner read. The nullable receipt
+column is added idempotently to existing databases; old done deliveries do not acquire
+invented acceptance evidence. Pruning retains unscheduled obligations and scheduled
+receipts with undelivered outbox work (including dead letters); delivered or explicitly
+canceled obligations keep normal expiry. Cancellation commits the current continuation
+fence before attempting receipt cleanup, independently of that cleanup's transaction.
+A receipt-write failure still interrupts the runner and cancels core processing, and
+returns 503; reopening SQLite and recovering **before Stop retry** cannot replay those
+fenced continuations. The locked visibility fence and second cancellation still cover
+work admitted while Stop awaits locks. If the execution fence itself cannot persist,
+current processing is still canceled but HTTP remains 503: storage repair and a successful
+Stop retry are required for a durable guarantee. Failed fence transactions roll back,
+so unrelated delivery commits cannot accidentally commit a partial fence. This does not
+make core dispatch and SQLite atomic: a process/storage failure before the durable done
+commit remains outside this repair.
+
+The signed-loopback regression uses a real SQLite trigger and real core ingress:
+503 → repeated 503 → database reopen → duplicate + exactly one thought and no second
+core admission. It also covers poll recovery, Stop after the fault, Stop during an
+outbound owner read, a five-second Stop HTTP bound behind the bounded policy read,
+timeout → retry → done duplicate, and one shared budget across two admission reads.
+
+A blocked `created` request returns 200 `awaiting_input` immediately after persisting
+its dependency wait, elicitation/status outbox items and done receipt. It no longer
+re-reads blockers inline after that commit. If completion raced the wait commit,
+existing dependency events or the tracked recovery loop resume the same wait; the
+poll interval defaults to 60 seconds, not immediate reconciliation. Signed-loopback
+regressions cover the five-second ACK with a suspended second blocker read, SQLite
+reopen, eventual real core admission, duplicate/single-active suppression, and
+Stop/closure while recovery is reading. No new worker or scheduling surface is added.
+
+**The two HTTP probes and Stop-interruption probe are GREEN; first-activity remains
+RED** when the outbound owner read is unavailable for ten seconds. That read is still
+mandatory: no cached-owner fallback, fabricated activity or early 200 was added. The
+probes are not skipped or expected failures disguised as vendor acceptance. The ordinary regression
+`tests/test_stop_ingress_contention.py` also exercises signed loopback HTTP with real
+core processing: current work is cancelled with each of the three locks held, no early
+HTTP success bypasses the durable fence, and a late admission is cancelled again after
+issue/session lock release. This does not promise that no new admission can run between
+the first interrupt and the final locked fence.
+
+A blanket coroutine timeout was not introduced: manager/Direct/dependency callers can
+persist dispatch state or perform admission across awaits, so cancelling without an
+exact receipt could lose work or permit replay. The four-second budget covers created
+pre-admission issue/session lock waits and exact prior-owner reads, including their
+manager/Direct pre-claim portions; it does not cover ledger contention, closure
+reconciliation, post-claim manager/Direct native admission, gateway-store/goal awaits,
+or core dispatch. Those paths and the sibling manager/activation/recovery thought
+producers are unchanged; this is not an end-to-end deadline or universal
+no-false-progress guarantee. Fixing those boundaries still
+requires reviewed admission receipts, not acknowledging a mere processing claim.
+Unavailable owner evidence beyond ten seconds cannot honestly yield a timely activity
+receipt. Real vendor `created` delivery, activity receipt and deployed-runtime timing
+remain unverified; no deploy was performed.
+
 ## Agent Session creation and execution policy
 
 An Agent Session and a Hermes execution are different objects. Linear normally creates the native Agent Session when a human delegates or explicitly mentions an app-user. The sole adapter-initiated exception is the exact signed human terminal-to-started reopen contract documented below, which uses Linear's native `agentSessionCreateOnIssue` mutation after durable exactly-once and live authorization gates. The adapter may bind an accepted vendor session to an issue, but binding alone is not permission to run a model.
@@ -597,6 +711,22 @@ Run with an immutable cutoff so repeated runs over the same validated evidence e
 ```
 
 The two complete issue-and-comment evidence passes and the final ordered team-membership pass must match exactly; any identity, revision, comment, relation, attachment, ordering, membership, or other evidence drift aborts before classification and manifest writing. Each comment must have an ID, body, app-authorship classification, creation timestamp, and update timestamp. Missing, malformed, future, or pre-issue comment timestamps fail closed. Linear may report a comment `updatedAt` a fraction of a second before its `createdAt`, so those two vendor timestamps are validated independently and activity uses their maximum. Issue activity is the latest issue creation, update, completion/cancellation, comment creation, or comment update timestamp. Validation freezes all issue, comment, successor, cutoff, age, and team evidence into one immutable envelope; classification owns that envelope, and manifest construction accepts only the immutable classification result, never the mutable API inventory. The manifest sorts candidates by identifier and ID, and its `sha256` is computed from canonical JSON for every other manifest field. Terminal state, a coherent matching terminal timestamp no later than the immutable cutoff, minimum age, the verified successor, and an empty relationship graph are all required. Every issue referenced as a valid verified successor is retained, including in successor chains and cycles. Active/nonterminal issues, Operations inbox markers, human or ambiguous comment authorship, decision/security/incident terms, any parent/child/relation, attachment, document, HTTP or non-HTTP canonical pointers, young records, and malformed evidence are protected. Review the manifest; it is evidence only and is never input to an automatic deletion or archive workflow.
+
+## Native clarify core dependency
+
+Native goal-continuation clarify requires Hermes to capture `(session_id, turn_id)`
+and the clarify callback before pre-tool hooks, then pass that immutable pair as
+`turn_owner` through `TurnRunner._clarify_callback_sync` to the clarify registry.
+The adapter validates `entry.turn_owner` against current progress, session rotation,
+completed/stopped owners, and closure state, and rechecks it before enqueue and
+outbox delivery. A queued follow-up may clarify after an earlier turn completes;
+a delayed callback from that earlier turn may not.
+
+**Do not deploy this plugin patch alone on an older core.** In particular, core
+`5cc98f1f2ce11bc4c4368ae7e7fabf9c86e81abe` without the native owner patch is
+incompatible: missing/malformed owners fail closed, with no native elicitation.
+There is no ContextVar or latest-progress fallback. Offline dispatcher/callback
+checks do not replace live delivery, reply, and Stop acceptance for the paired release.
 
 ## Tests
 

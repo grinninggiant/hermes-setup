@@ -14,6 +14,7 @@ class OwnerBindingTests(NativeClarifyTests):
         context = await self.adapter._linear.get_agent_turn_context('linear-session-221')
         context['issue']['assignee'] = {'id': 'user-221', 'app': False}
         self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=context)
+        await self.publish_question('vendor-shape', ['yes'])
         payload = self.payload(body='1', webhook='vendor-shape')
         payload.pop('actor')
         payload['agentActivity'].update({
@@ -22,7 +23,6 @@ class OwnerBindingTests(NativeClarifyTests):
             'content': {'type': 'prompt', 'body': '1'},
         })
         payload['agentActivity'].pop('body')
-        clarify_gateway.register('vendor-shape', self.key, 'Target?', ['yes'])
         response = await self.webhook(payload)
         self.assertEqual(json.loads(response.text)['status'], 'clarify_resolved')
         self.assertEqual(clarify_gateway.wait_for_response('vendor-shape', .01), 'yes')
@@ -61,7 +61,7 @@ class OwnerBindingTests(NativeClarifyTests):
             with self.subTest(name=name):
                 payload = copy.deepcopy(base)
                 payload['agentActivity'].update(changes, id=name)
-                clarify_gateway.register(name, self.key, 'Target?', ['yes'])
+                await self.publish_question(name, ['yes'])
                 response = await self.webhook(payload)
                 self.assertNotEqual(json.loads(response.text)['status'], 'clarify_resolved')
                 self.assertFalse(clarify_gateway.get_pending_for_session(self.key, include_choice_prompts=True).event.is_set())
@@ -74,7 +74,7 @@ class OwnerBindingTests(NativeClarifyTests):
         context = await self.adapter._linear.get_agent_turn_context('linear-session-221')
         context['issue']['assignee'] = {'id': 'user-221', 'app': False}
         self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=context)
-        clarify_gateway.register('owner-gap', self.key, 'Target?', ['yes', 'no'])
+        await self.publish_question('owner-gap', ['yes', 'no'])
         response = await self.webhook(self.payload(body='1'))
         self.assertEqual(json.loads(response.text)['status'], 'clarify_resolved')
         self.assertEqual(clarify_gateway.wait_for_response('owner-gap', .01), 'yes')
@@ -114,15 +114,16 @@ class OwnerBindingTests(NativeClarifyTests):
                     context['issue'][field] = value
                 else:
                     context[field] = value
+                self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=base)
+                await self.publish_question(name, ['yes'])
                 self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=context)
-                clarify_gateway.register(name, self.key, 'Target?', ['yes'])
                 response = await self.webhook(self.payload(body='1', webhook=name))
                 self.assertNotEqual(json.loads(response.text)['status'], 'clarify_resolved')
                 self.assertFalse(clarify_gateway.get_pending_for_session(self.key, include_choice_prompts=True).event.is_set())
                 clarify_gateway.clear_session(self.key)
         active.metadata['linear_direct_activation'] = True
         self.adapter._linear.get_agent_turn_context = mock.AsyncMock(return_value=base)
-        clarify_gateway.register('direct-owner', self.key, 'Target?', ['yes'])
+        await self.publish_question('direct-owner', ['yes'])
         response = await self.webhook(self.payload(body='1', webhook='direct-owner'))
         self.assertEqual(json.loads(response.text)['status'], 'clarify_resolved')
         self.assertIsNone(active.source.user_id)

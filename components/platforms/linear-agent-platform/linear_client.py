@@ -773,6 +773,13 @@ query LinearAgentActivityEvidence($id: String!, $after: String) {
         self, session_id: str, question_id: str, answer_id: str, owner_id: str, body: str
     ) -> bool:
         """Verify exact question/answer and no intervening control or newer prompt."""
+        return await self.verify_clarify_reply(session_id, question_id, answer_id, owner_id, body)
+
+    async def verify_clarify_reply(
+        self, session_id: str, question_id: str, answer_id: str, owner_id: str, body: str,
+        *, live_waiter: bool = False,
+    ) -> bool:
+        """Prove publication and signed reply identity; only live waiters allow corrections."""
         if not all((session_id, question_id, answer_id, owner_id, body)) or question_id == answer_id:
             return False
         rows = await self._agent_activity_evidence(session_id)
@@ -795,6 +802,15 @@ query LinearAgentActivityEvidence($id: String!, $after: String) {
             return False
         for row_id, (stamp, row) in rows.items():
             if stamp < qt or row_id in {question_id, answer_id}:
+                continue
+            # A rejected ordinary prompt does not retire a live question. Do not
+            # extend this to late-goal rearm, commands, controls or newer prompts.
+            if (live_waiter and qt < stamp < at and not row.get("signal")
+                    and row["content"].get("__typename") == "AgentActivityPromptContent"
+                    and (row.get("user") or {}).get("app") is False
+                    and isinstance(row["user"].get("id"), str) and row["user"]["id"]
+                    and isinstance(row["content"].get("body"), str)
+                    and not row["content"]["body"].lstrip().startswith("/")):
                 continue
             # A later question/answer, Stop, approval elicitation, error or final
             # invalidates this narrow rearm. Unknown activity types fail closed.
