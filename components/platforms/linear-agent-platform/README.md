@@ -101,6 +101,18 @@ remain: an admission already in flight can complete while Stop is waiting. This 
 a new session-wide admission barrier. The client’s 8-second per-request timeout is not
 an aggregate ingress or first-activity budget.
 
+Before ordinary/Direct core dispatch or the manager dispatch CAS, `created` now
+reuses the existing authoritative activity-target read within the same absolute
+four-second admission budget. A stalled initial owner read returns 503, without
+execution, a done receipt or an acceptance thought; retry still admits once. This
+is a readiness check, not cached send authorization. The shared send-time owner
+read is separately bounded to four seconds and reports a retryable `LinearAPIError`,
+so the existing outbox reschedules rather than dead-letters a read timeout. Fresh
+send-time validation and the existing Stop, terminal and rotation fences remain.
+A second read or activity write can still fail after admission: **unconditional
+10-second first activity is not solved**. The unchanged original diagnostic remains
+RED (its slow-owner case now receives 503 instead of the required 200/activity).
+
 The narrow fix here returns **503 `processing`**, not 200, for an unfinished delivery
 claim on both AgentSession and data-event ingress. Only `done` duplicates receive
 200. Existing stale-claim recovery, authorization, Stop and owner guards are unchanged;

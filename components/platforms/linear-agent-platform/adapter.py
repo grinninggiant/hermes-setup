@@ -1398,6 +1398,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             async with asyncio.timeout_at(read_deadline if action == "created" else None):
                 await dispatch_lock.acquire()
             dispatch_lock_held = True
+            if action == "created":
+                # Readiness only: keep fresh outbox validation after admission.
+                async with asyncio.timeout_at(read_deadline):
+                    await self._validate_activity_target(agent_session_id)
+                _check_admission_deadline(read_deadline)
             native_command = (
                 action == "prompted"
                 and _activity_body(payload).lstrip().startswith("/")
@@ -1758,6 +1763,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if state in {"claimed", "failed", "delegation_unknown"}:
                 self._ledger.mark_manager_activation(issue_id, "delegated")
             async with _admission_lock(self._session_lock(session_id), read_deadline):
+                async with asyncio.timeout_at(read_deadline):
+                    await self._validate_activity_target(session_id)
                 # After this CAS dispatch may be ambiguous: never time out or
                 # reset its owner, even if handle_message itself is slow.
                 _check_admission_deadline(read_deadline)
@@ -4000,7 +4007,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         """Fail closed when a normal activity target changed app-user owner."""
         if self._linear is None:
             raise LinearAPIError("Linear client is unavailable", retryable=True)
-        context = await self._linear.get_agent_session_delivery_context(agent_session_id)
+        try:
+            async with asyncio.timeout(4.0):
+                context = await self._linear.get_agent_session_delivery_context(agent_session_id)
+        except TimeoutError as exc:
+            raise LinearAPIError("Linear activity owner read timed out", retryable=True) from exc
         if not self._linear.actor_id or not hmac.compare_digest(
             str(context.get("app_user_id") or ""), self._linear.actor_id
         ):

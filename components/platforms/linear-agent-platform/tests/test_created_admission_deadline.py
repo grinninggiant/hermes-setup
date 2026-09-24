@@ -544,9 +544,13 @@ class CreatedAdmissionDeadlineTests(unittest.IsolatedAsyncioTestCase):
         original = self.adapter._linear.get_agent_session_delivery_context
         owner_release = asyncio.Event()
 
+        key = probe.fixtures.adapter_mod._delivery_key(self.payload, self.request_for(self.payload)._body)
+
         async def delayed_owner(session_id):
-            self.entered.set()
-            await asyncio.wait_for(owner_release.wait(), timeout=5)
+            # Readiness succeeds; pause the fresh send-time read, not admission.
+            if self.adapter._ledger.delivery_is_done(key):
+                self.entered.set()
+                await asyncio.wait_for(owner_release.wait(), timeout=5)
             return await original(session_id)
 
         cancelled = asyncio.Event()
