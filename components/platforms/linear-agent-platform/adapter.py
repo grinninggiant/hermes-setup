@@ -3115,13 +3115,27 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             try:
                 if self._ledger is not None:
                     for pending in self._ledger.list_direct_activation_events():
-                        await self._reconcile_direct_activation_event(pending["issue_id"])
+                        try:
+                            await self._reconcile_direct_activation_event(pending["issue_id"])
+                        except Exception:
+                            logger.exception("[linear] Direct recovery failed issue=%s", pending["issue_id"])
                     if self._dependency_wait_enabled:
                         if self._native_goal_continuation_enabled:
                             for wait in self._ledger.list_waiting(state="resumed"):
-                                await self._recover_unadmitted_dependency_wait(wait["session_id"])
+                                try:
+                                    await self._recover_unadmitted_dependency_wait(wait["session_id"])
+                                except Exception:
+                                    logger.exception(
+                                        "[linear] Unadmitted wait recovery failed session=%s", wait["session_id"]
+                                    )
                         for wait in self._ledger.list_waiting():
-                            await self._reconcile_wait(wait["session_id"])
+                            try:
+                                await self._reconcile_wait(wait["session_id"])
+                            except Exception as exc:
+                                logger.exception(
+                                    "[linear] Dependency recovery failed session=%s issue=%s: %s",
+                                    wait["session_id"], wait["issue_id"], exc,
+                                )
                 await asyncio.sleep(self._dependency_poll_seconds)
             except asyncio.CancelledError:
                 raise
