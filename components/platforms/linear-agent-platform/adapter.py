@@ -3561,6 +3561,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         return True
                     live_outcome, live_reason = "stopped", "session_rotation"
                 if live_outcome == "stopped" or (
+                    live_outcome == "awaiting_input" and context.get("status") == "awaitingInput"
+                ) or (
                     live_outcome == "blocked" and live_reason in _SILENT_CONTROL_REASONS
                 ):
                     error = f"Delayed Linear success was fenced by live gate: {live_reason}"
@@ -5619,6 +5621,21 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             },
                         )
                         live_outcome = self._classify_turn_outcome(probe, synthetic_result, context)
+                        if live_outcome == "awaiting_input" and context.get("status") == "awaitingInput":
+                            session_id = row["agent_session_id"]
+                            turn_key = self._current_progress_turn_key(session_id)
+                            if not turn_key:
+                                turn_key = self._ledger.ensure_progress_turn(
+                                    session_id, f"wait:{row['decision_id']}"
+                                )
+                            if self._ledger.fence_turn_without_activity(
+                                row["decision_id"], row["dispatch_state"], session_id,
+                                turn_key, outcome="awaiting_input", reason="awaiting_input",
+                            ):
+                                self._notify_terminal_progress_fence(
+                                    session_id, expected_turn_key=turn_key
+                                )
+                            continue
                         if live_outcome != "continue":
                             raise RuntimeError(
                                 f"authoritative Linear continuation gate: {live_outcome}"
