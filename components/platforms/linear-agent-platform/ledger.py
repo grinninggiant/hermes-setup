@@ -2240,8 +2240,14 @@ class DeliveryLedger:
         now = int(time.time()) if now is None else int(now)
         cutoff = now - self.retention_seconds
         with self._lock:
+            # A done admission can still owe an acceptance activity/status. Keep
+            # its retry receipt and currentness fence until delivery or cancellation.
             inbound = self._db.execute(
-                "DELETE FROM deliveries WHERE state = 'done' AND updated_at < ?",
+                "DELETE FROM deliveries WHERE state = 'done' AND updated_at < ? "
+                "AND (acceptance_thought_json IS NULL OR ("
+                "json_extract(acceptance_thought_json, '$.scheduled') = 1 "
+                "AND NOT EXISTS (SELECT 1 FROM outbox WHERE state != 'delivered' "
+                "AND json_extract(payload_json, '$.acceptance_delivery_key') = deliveries.webhook_id)))",
                 (cutoff,),
             ).rowcount
             outbound = self._db.execute(

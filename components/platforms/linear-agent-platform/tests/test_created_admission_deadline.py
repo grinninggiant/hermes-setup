@@ -64,6 +64,9 @@ class CreatedAdmissionDeadlineTests(unittest.IsolatedAsyncioTestCase):
             # Reopen SQLite: no in-memory retry receipt can make this pass.
             ledger.close()
             self.adapter._ledger = probe.fixtures.DeliveryLedger(str(ledger.path))
+            self.adapter._ledger.prune(now=int(time.time()) + ledger.retention_seconds + 1)
+            self.assertTrue(self.adapter._ledger.delivery_is_done(key))
+            self.assertTrue(self.adapter._ledger.pending_acceptance_thoughts(key))
             replay = await asyncio.wait_for(self.post(self.payload), timeout=5)
             self.assertEqual(replay.status, 200)
             self.assertEqual((await replay.json())["status"], "duplicate")
@@ -188,6 +191,91 @@ class CreatedAdmissionDeadlineTests(unittest.IsolatedAsyncioTestCase):
             await self.adapter._wait_for_thought("linear-session")
             ingress.assert_not_awaited()
         self.assertFalse([call for call in self.adapter._linear.calls if call[1] == "thought"])
+
+    async def test_stop_receipt_write_failure_still_interrupts_core_and_retries_truthfully(self):
+        await self._assert_stop_receipt_failure(contended=False)
+
+    async def test_stop_receipt_write_failure_still_interrupts_before_session_lock(self):
+        await self._assert_stop_receipt_failure(contended=True)
+
+    async def _assert_stop_receipt_failure(self, *, contended):
+        ledger = self.adapter._ledger
+        self.assertEqual((await self.post(self.payload)).status, 200)
+        await asyncio.wait_for(self.handler_entered.wait(), timeout=1)
+        await self.adapter._wait_for_thought("linear-session")
+        core_task, = self.adapter._session_tasks.values()
+        decision = ledger.reserve_turn_decision(
+            "linear-session", "issue-164", "hermes-session", 1, 1, "continue",
+        )
+        ledger.transition_turn_decision(decision["decision_id"], "pending", "enqueued")
+        ledger._db.execute(
+            "CREATE TRIGGER fail_cancel_receipt BEFORE UPDATE ON deliveries "
+            "WHEN OLD.acceptance_thought_json IS NOT NULL "
+            "AND NEW.acceptance_thought_json IS NULL "
+            "BEGIN SELECT RAISE(FAIL, 'injected cancellation receipt failure'); END"
+        )
+        stop = {**self.payload, "action": "prompted", "agentActivity": {
+            "id": "stop-receipt-fault", "body": "stop", "signal": "stop",
+        }}
+        stop_key = probe.fixtures.adapter_mod._delivery_key(stop, self.request_for(stop)._body)
+        lock = self.adapter._session_lock("linear-session")
+        if contended:
+            await lock.acquire()
+        try:
+            response = await asyncio.wait_for(self.post(stop), timeout=2)
+            self.assertEqual(response.status, 503)  # Never claim durable cancellation succeeded.
+            self.assertGreater(self.adapter.gateway_runner.interrupt_session_processing.await_count, 0)
+            self.assertTrue(core_task.done())
+            self.assertTrue(core_task.cancelled())
+            self.assertFalse(ledger.delivery_is_done(stop_key))
+            self.assertEqual(ledger.get_turn_decision(decision["decision_id"])["dispatch_state"],
+                             "enqueued" if contended else "fenced")
+        finally:
+            if contended:
+                lock.release()
+        ledger.close()
+        self.adapter._ledger = ledger = probe.fixtures.DeliveryLedger(str(ledger.path))
+        self.assertEqual((await self.post(stop)).status, 503)
+        self.assertEqual(ledger.get_turn_decision(decision["decision_id"])["dispatch_state"], "fenced")
+        self.assertEqual(ledger.get_turn_decision(decision["decision_id"])["outcome"], "stopped")
+        self.assertFalse(ledger.delivery_is_done(stop_key))
+        ledger._db.execute("DROP TRIGGER fail_cancel_receipt")
+        self.assertEqual((await self.post(stop)).status, 200)
+        self.assertTrue(ledger.delivery_is_done(stop_key))
+        self.assertFalse(ledger.pending_acceptance_thoughts())
+        self.assertEqual((await self.post(stop)).status, 200)
+        ledger.prune(now=int(time.time()) + ledger.retention_seconds + 1)
+        self.assertFalse(ledger.delivery_is_done(stop_key))
+
+    async def test_prune_retains_scheduled_receipt_until_outbox_obligations_finish(self):
+        ledger = self.adapter._ledger
+        key = probe.fixtures.adapter_mod._delivery_key(self.payload, self.request_for(self.payload)._body)
+        thought_id = f"activity:thought:{key}"
+        async with self.adapter._outbox_drain_lock:
+            self.assertEqual((await self.post(self.payload)).status, 200)
+            await asyncio.wait_for(self.handler_entered.wait(), timeout=1)
+            ledger.close()
+            self.adapter._ledger = ledger = probe.fixtures.DeliveryLedger(str(ledger.path))
+            expiry = int(time.time()) + ledger.retention_seconds + 1
+            for state in ("pending", "in_flight", "dead"):
+                with self.subTest(outbox_state=state):
+                    if state == "in_flight":
+                        self.assertEqual(ledger.claim_due_outbox().id, thought_id)
+                    elif state == "dead":
+                        ledger.dead_letter_outbox(thought_id, "fixture delivery failure")
+                    self.assertEqual(ledger.prune(now=expiry), 0)
+                    self.assertTrue(ledger.delivery_is_done(key))
+                    self.assertTrue(ledger.acceptance_thought_is_current(key))
+                    self.assertEqual(ledger.get_outbox_item(thought_id)["state"], state)
+            ledger.reschedule_outbox(thought_id, "fixture retry", 0)
+            self.assertEqual(self.adapter._linear.calls, [])
+        await asyncio.wait_for(self.adapter._wait_for_thought("linear-session"), timeout=2)
+        self.assertEqual(len(self.adapter._linear.calls), 1)
+        self.assertEqual(self.adapter._linear.calls[0][1], "thought")
+        self.assertEqual(ledger.get_outbox_item(thought_id)["state"], "delivered")
+        ledger.prune(now=int(time.time()) + ledger.retention_seconds + 1)
+        self.assertFalse(ledger.delivery_is_done(key))
+        self.assertIsNone(ledger.get_outbox_item(thought_id))
 
     async def test_stop_suppresses_thought_after_pending_owner_read(self):
         original = self.adapter._linear.get_agent_session_delivery_context

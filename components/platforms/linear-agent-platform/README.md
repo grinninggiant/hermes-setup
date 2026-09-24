@@ -133,7 +133,13 @@ IDs), never execution. The existing outbox poll repairs it after restart even wi
 webhook retry. Stop/preemption and terminal output cancel these obligations; tagged
 acceptance thoughts recheck cancellation after their awaited owner read. The nullable receipt
 column is added idempotently to existing databases; old done deliveries do not acquire
-invented acceptance evidence. This does not make core dispatch and SQLite atomic: a
+invented acceptance evidence. Pruning retains unscheduled obligations and scheduled
+receipts with undelivered outbox work (including dead letters); delivered or explicitly
+canceled obligations keep normal expiry. A cancellation-receipt write failure still
+interrupts the runner and cancels core processing, but returns 503 rather than claiming
+a durable Stop ACK. If this write fails during early cancellation before the locked
+fence, retry must finish that fence; the interruption-latency mitigation is not a new
+admission barrier. This does not make core dispatch and SQLite atomic: a
 process/storage failure before the durable done commit remains outside this repair.
 
 The signed-loopback regression uses a real SQLite trigger and real core ingress:

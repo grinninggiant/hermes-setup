@@ -4245,8 +4245,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         return True
 
     async def _cancel_linear_session_processing(self, session_id: str) -> None:
-        if self._ledger is not None:
-            self._ledger.cancel_acceptance_thoughts(session_id)
         source = self.build_source(
             chat_id=session_id,
             chat_name="Linear",
@@ -4263,22 +4261,29 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
             profile=self._session_key_profile(source),
         )
-        interrupt = getattr(self.gateway_runner, "interrupt_session_processing", None)
-        if callable(interrupt):
-            # Use the runner's source-scoped async seam and pin the Hermes
-            # identity when this turn has one.
-            active_event = self._active_turn_events.get(str(session_id))
-            interrupt_source = active_event.source if active_event is not None else source
-            expected_session_id = (
-                str(active_event.metadata.get("gateway_session_id") or "")
-                if active_event is not None else ""
-            ) or None
-            await interrupt(
-                interrupt_source,
-                reason="linear_authoritative_stop",
-                expected_session_id=expected_session_id,
-            )
-        await self.cancel_session_processing(session_key)
+        try:
+            if self._ledger is not None:
+                self._ledger.cancel_acceptance_thoughts(session_id)
+        finally:
+            # A failed receipt must keep HTTP retryable, never keep execution alive.
+            interrupt = getattr(self.gateway_runner, "interrupt_session_processing", None)
+            try:
+                if callable(interrupt):
+                    # Use the runner's source-scoped async seam and pin the Hermes
+                    # identity when this turn has one.
+                    active_event = self._active_turn_events.get(str(session_id))
+                    interrupt_source = active_event.source if active_event is not None else source
+                    expected_session_id = (
+                        str(active_event.metadata.get("gateway_session_id") or "")
+                        if active_event is not None else ""
+                    ) or None
+                    await interrupt(
+                        interrupt_source,
+                        reason="linear_authoritative_stop",
+                        expected_session_id=expected_session_id,
+                    )
+            finally:
+                await self.cancel_session_processing(session_key)
 
     async def _fence_turn_decisions_for_visibility(self, session_id: str, reason: str) -> int:
         # This is the sole lock shared with tagged activity dispatch; callers
