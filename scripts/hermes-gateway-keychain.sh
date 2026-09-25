@@ -8,9 +8,13 @@ case "$profile" in
   *) print -u2 -- "Unsupported Hermes profile: $profile"; exit 64 ;;
 esac
 
-hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-d25b0bc3d9e884ddde6550c6d1fd250e98b97a09-baseline-deps/venv/bin/hermes"
+hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-6f80745da16cc84d3f2ee125e14c00e1d775d61d-coder/venv/bin/hermes"
 if [[ "$profile" == "general" ]]; then
-  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-e71401b20dcb449e653e3a2c771d16bbcd95dbc7/venv/bin/hermes"
+  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-97c26fd50d7ebc644c7ee70a1bb9dcf9d59848bd-general/venv/bin/hermes"
+elif [[ "$profile" == "assistant" ]]; then
+  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-665e8a0206bae1d5b5ce19646eb024f05241dfeb-fleet-youtube/venv/bin/hermes"
+elif [[ "$profile" == "coder" ]]; then
+  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-6f80745da16cc84d3f2ee125e14c00e1d775d61d-coder/venv/bin/hermes"
 fi
 
 service="com.polatcangames.hermes.op-service-account"
