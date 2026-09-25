@@ -136,6 +136,7 @@ class BrokerTests(unittest.TestCase):
                     "administration": "write",
                     "contents": "write",
                     "pull_requests": "write",
+                    "workflows": "write",
                 }
             },
         )
@@ -155,6 +156,7 @@ class BrokerTests(unittest.TestCase):
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "workflows": "write",
                     },
                 }
             )
@@ -177,6 +179,7 @@ class BrokerTests(unittest.TestCase):
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "workflows": "write",
                     },
                 }
             )
@@ -187,6 +190,27 @@ class BrokerTests(unittest.TestCase):
                 installation_id=160545271,
                 opener=wrong_owner,
             )
+
+        for scope in (None, "read", "write-extra"):
+            def wrong_permissions(_request, _timeout):
+                permissions = dict(BROKER.EXPECTED_PERMISSIONS)
+                if scope is None:
+                    del permissions["workflows"]
+                else:
+                    permissions["workflows"] = scope
+                return FakeResponse({
+                    "account": {"login": "grinninggiant"},
+                    "target_type": "Organization",
+                    "repository_selection": "all",
+                    "permissions": permissions,
+                })
+
+            with self.subTest(workflows=scope), self.assertRaises(BROKER.BrokerError):
+                BROKER.verify_installation(
+                    jwt="app-jwt",
+                    installation_id=160545271,
+                    opener=wrong_permissions,
+                )
 
     def test_build_child_environment_strips_credentials_and_sets_only_gh_token(self):
         child = BROKER.build_child_environment(

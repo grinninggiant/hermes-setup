@@ -36,6 +36,7 @@ EXPECTED_PERMISSIONS = {
     "contents": "write",
     "metadata": "read",
     "pull_requests": "write",
+    "workflows": "write",
 }
 REQUEST_TIMEOUT_SECONDS = 30
 VAULT_ID = "7ubnofdpw4kdjj43vjvyknjuva"
@@ -217,6 +218,7 @@ def mint_installation_token(
                 "administration": "write",
                 "contents": "write",
                 "pull_requests": "write",
+                "workflows": "write",
             }
         },
         separators=(",", ":"),
