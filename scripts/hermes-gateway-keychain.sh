@@ -8,14 +8,7 @@ case "$profile" in
   *) print -u2 -- "Unsupported Hermes profile: $profile"; exit 64 ;;
 esac
 
-hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-6f80745da16cc84d3f2ee125e14c00e1d775d61d-coder/venv/bin/hermes"
-if [[ "$profile" == "general" ]]; then
-  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-97c26fd50d7ebc644c7ee70a1bb9dcf9d59848bd-general/venv/bin/hermes"
-elif [[ "$profile" == "assistant" || "$profile" == "researcher" || "$profile" == "writer" || "$profile" == "producer" || "$profile" == "marketing" || "$profile" == "health" || "$profile" == "finance" ]]; then
-  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-665e8a0206bae1d5b5ce19646eb024f05241dfeb-fleet-youtube/venv/bin/hermes"
-elif [[ "$profile" == "coder" ]]; then
-  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-665e8a0206bae1d5b5ce19646eb024f05241dfeb-fleet-youtube/venv/bin/hermes"
-fi
+hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-665e8a0206bae1d5b5ce19646eb024f05241dfeb-fleet-youtube/venv/bin/hermes"
 
 service="com.polatcangames.hermes.op-service-account"
 token=$(/usr/bin/security find-generic-password -s "$service" -a "$profile" -w)
