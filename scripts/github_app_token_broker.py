@@ -371,7 +371,8 @@ def validate_command(command: Sequence[str]) -> list[str]:
         return args
     if (len(args) == 6 and args[1:3] == ["pr", "ready"]
             and re.fullmatch(r"[1-9][0-9]{0,17}", args[3])
-            and args[4:] == ["-R", f"{ALLOWED_OWNER}/hermes-agent"]):
+            and args[4] == "-R"
+            and args[5] in {f"{ALLOWED_OWNER}/hermes-agent", f"{ALLOWED_OWNER}/hermes-setup"}):
         return args
     if len(args) < 3 or args[1] != "api":
         raise BrokerError("only gh auth status, scoped PR ready, and pinned gh api routes are allowed")

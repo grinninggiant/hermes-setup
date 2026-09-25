@@ -47,21 +47,22 @@ class BrokerTests(unittest.TestCase):
         with self.assertRaises(BROKER.BrokerError):
             BROKER.validate_command([BROKER.GH_BINARY, 'api', 'repos/grinninggiant/hermes-setup/issues/1/comments', '-X', 'POST', '-f', 'body=fixture', '-F', 'draft=false'])
 
-    def test_ready_for_review_accepts_canonical_pr_number_only_in_hermes_agent(self):
-        for number in ("17", "23", "105"):
-            command = [BROKER.GH_BINARY, "pr", "ready", number, "-R", "grinninggiant/hermes-agent"]
-            with self.subTest(number=number):
-                self.assertEqual(BROKER.validate_command(command), command)
-                self.assertEqual(BROKER.token_permissions_for_command(command, {"pull_requests": "write"}),
-                                 {"pull_requests": "write"})
-                with self.assertRaises(BROKER.BrokerError):
-                    BROKER.token_permissions_for_command(command, {"pull_requests": "read"})
+    def test_ready_for_review_accepts_canonical_pr_number_only_in_two_approved_repos(self):
+        for repo in ("hermes-agent", "hermes-setup"):
+            for number in ("17", "23", "103", "105"):
+                command = [BROKER.GH_BINARY, "pr", "ready", number, "-R", f"grinninggiant/{repo}"]
+                with self.subTest(repo=repo, number=number):
+                    self.assertEqual(BROKER.validate_command(command), command)
+                    self.assertEqual(BROKER.token_permissions_for_command(command, {"pull_requests": "write"}),
+                                     {"pull_requests": "write"})
+                    with self.assertRaises(BROKER.BrokerError):
+                        BROKER.token_permissions_for_command(command, {"pull_requests": "read"})
         allowed = [BROKER.GH_BINARY, "pr", "ready", "23", "-R", "grinninggiant/hermes-agent"]
         for command in (
             [BROKER.GH_BINARY, "api", "repos/grinninggiant/hermes-agent/pulls/23/ready_for_review", "-X", "POST"],
             *([BROKER.GH_BINARY, "pr", "ready", number, "-R", "grinninggiant/hermes-agent"]
               for number in ("0", "01", "-1", "+1", "1.0", "123/merge", "9999999999999999999999999999")),
-            [BROKER.GH_BINARY, "pr", "ready", "23", "-R", "grinninggiant/hermes-setup"],
+            [BROKER.GH_BINARY, "pr", "ready", "23", "-R", "grinninggiant/other"],
             [BROKER.GH_BINARY, "pr", "ready", "23", "-R", "other/hermes-agent"],
             allowed + ["--undo"],
             allowed + ["--repo", "grinninggiant/hermes-agent"],
