@@ -292,21 +292,57 @@ def token_permissions_for_git(granted: Mapping[str, str]) -> dict[str, str]:
     return _require_permissions(granted, required)
 
 
+def _api_method(command: Sequence[str]) -> str:
+    tail = command[3:]
+    methods = []
+    for index, arg in enumerate(tail):
+        if arg in {"-X", "--method"}:
+            if index + 1 >= len(tail):
+                raise BrokerError("missing gh api method")
+            methods.append(tail[index + 1].upper())
+        elif arg.startswith("--method="):
+            methods.append(arg.split("=", 1)[1].upper())
+    if len(methods) > 1:
+        raise BrokerError("duplicate gh api method")
+    if methods:
+        return methods[0]
+    return "POST" if any(arg in {"-f", "--raw-field", "-F"} or arg.startswith("--raw-field=")
+                         for arg in tail) else "GET"
+
+
+_GET_ROUTE_PERMISSIONS = (
+    (r"", "metadata"),
+    (r"pulls(?:/[1-9][0-9]*(?:/(?:files|reviews|comments))?)?", "pull_requests"),
+    (r"issues/[1-9][0-9]*/comments", "pull_requests"),
+    (r"branches/[A-Za-z0-9._-]+", "contents"),
+    (r"commits/[A-Za-z0-9._-]+/check-runs", "checks"),
+    (r"commits/[A-Za-z0-9._-]+/status", "statuses"),
+    (r"actions/runs", "actions"),
+    (r"actions/permissions", "administration"),
+    (r"rulesets", "metadata"),
+)
+
+
+def _get_route_permission(endpoint: str, repo_root: str) -> str:
+    relative = "" if endpoint == repo_root else endpoint.removeprefix(f"{repo_root}/")
+    for pattern, permission in _GET_ROUTE_PERMISSIONS:
+        if re.fullmatch(pattern, relative):
+            return permission
+    raise BrokerError("GitHub API read route is not allowed")
+
+
 def token_permissions_for_command(command: Sequence[str], granted: Mapping[str, str]) -> dict[str, str]:
     """Only call after validate_command; GitHub is authoritative for the available grants."""
     if command[1:] == ["auth", "status"]:
-        return {}
+        return _require_permissions(granted, {"metadata": "read"})
     if command[1:3] == ["pr", "ready"]:
         return _require_permissions(granted, {"pull_requests": "write"})
     endpoint = command[2]
     if endpoint == "installation/repositories":
-        return {}
-    tail = command[3:]
-    mutating = any(arg in {"-f", "--raw-field", "-F", "POST", "PUT"}
-                   or arg.startswith(("--raw-field=", "--method=POST", "--method=PUT"))
-                   for arg in tail)
-    if not mutating:
-        return {name: "read" for name in granted if name != "metadata"}
+        return _require_permissions(granted, {"metadata": "read"})
+    if _api_method(command) == "GET":
+        repo_root = "/".join(endpoint.split("/")[:3])
+        return _require_permissions(granted, {_get_route_permission(endpoint, repo_root): "read"})
     if endpoint.endswith("/pulls") or re.fullmatch(rf"repos/{ALLOWED_OWNER}/[^/]+/issues/[1-9][0-9]*/comments", endpoint):
         return _require_permissions(granted, {"pull_requests": "write"})
     return _require_permissions(granted, {"contents": "write", "pull_requests": "write"})
@@ -357,8 +393,7 @@ def validate_command(command: Sequence[str]) -> list[str]:
         ):
             raise BrokerError("GitHub API route is outside the approved organization")
         repo_root = "/".join(parts[:3])
-    method = "GET"
-    method_explicit = False
+    method = _api_method(args)
     raw_fields: dict[str, str] = {}
     tail = args[3:]
     index = 0
@@ -370,13 +405,9 @@ def validate_command(command: Sequence[str]) -> list[str]:
         if argument in {"-X", "--method"}:
             if index + 1 >= len(tail):
                 raise BrokerError("missing gh api method")
-            method = tail[index + 1].upper()
-            method_explicit = True
             index += 2
             continue
         if argument.startswith("--method="):
-            method = argument.split("=", 1)[1].upper()
-            method_explicit = True
             index += 1
             continue
         if argument == "-F":
@@ -405,8 +436,6 @@ def validate_command(command: Sequence[str]) -> list[str]:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name) or name in raw_fields:
             raise BrokerError("invalid gh api raw field")
         raw_fields[name] = value
-    if raw_fields and not method_explicit:
-        method = "POST"
     allowed_methods = {"GET", "POST", "PATCH", "PUT"}
     if method not in allowed_methods:
         raise BrokerError("GitHub API method is not allowed")
@@ -417,6 +446,7 @@ def validate_command(command: Sequence[str]) -> list[str]:
     if method == "GET":
         if raw_fields:
             raise BrokerError("GET routes cannot carry request fields")
+        _get_route_permission(endpoint, repo_root)
         return args
     relative = endpoint.removeprefix(f"{repo_root}/")
     allowed_fields: set[str]
