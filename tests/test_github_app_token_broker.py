@@ -107,7 +107,7 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(signature, "c2lnbmF0dXJl")
         self.assertEqual(captured["private_key"], "private")
 
-    def test_mint_installation_token_uses_all_installed_repositories_and_pinned_permissions(self):
+    def test_mint_installation_token_requests_only_selected_permissions(self):
         captured = {}
 
         def opener(request, timeout):
@@ -120,6 +120,7 @@ class BrokerTests(unittest.TestCase):
         result = BROKER.mint_installation_token(
             jwt="app-jwt",
             installation_id=160545271,
+            permissions={"contents": "write", "workflows": "write"},
             opener=opener,
         )
         self.assertEqual(result, "installation-token")
@@ -132,17 +133,14 @@ class BrokerTests(unittest.TestCase):
             captured["body"],
             {
                 "permissions": {
-                    "actions": "read",
-                    "administration": "write",
                     "contents": "write",
-                    "pull_requests": "write",
                     "workflows": "write",
                 }
             },
         )
         self.assertEqual(captured["timeout"], 30)
 
-    def test_verify_installation_pins_owner_selection_and_permissions(self):
+    def test_verify_installation_pins_identity_not_owner_granted_permissions(self):
         def valid_opener(_request, timeout):
             self.assertEqual(timeout, 30)
             return FakeResponse(
@@ -157,15 +155,19 @@ class BrokerTests(unittest.TestCase):
                         "metadata": "read",
                         "pull_requests": "write",
                         "workflows": "write",
+                        "variables": "read",
+                        "webhooks": "write",
                     },
                 }
             )
 
-        BROKER.verify_installation(
+        granted = BROKER.verify_installation(
             jwt="app-jwt",
             installation_id=160545271,
             opener=valid_opener,
         )
+        self.assertEqual(granted["variables"], "read")
+        self.assertEqual(granted["webhooks"], "write")
 
         def wrong_owner(_request, _timeout):
             return FakeResponse(
@@ -191,13 +193,17 @@ class BrokerTests(unittest.TestCase):
                 opener=wrong_owner,
             )
 
-        for scope in (None, "read", "write-extra"):
-            def wrong_permissions(_request, _timeout):
-                permissions = dict(BROKER.EXPECTED_PERMISSIONS)
-                if scope is None:
-                    del permissions["workflows"]
-                else:
-                    permissions["workflows"] = scope
+        def wrong_selection(_request, _timeout):
+            return FakeResponse({"account": {"login": "grinninggiant"},
+                                 "target_type": "Organization", "repository_selection": "selected",
+                                 "permissions": {"contents": "write"}})
+
+        with self.assertRaises(BROKER.BrokerError):
+            BROKER.verify_installation(jwt="app-jwt", installation_id=160545271,
+                                       opener=wrong_selection)
+
+        for permissions in (None, {}, {"contents": "admin"}, {"contents": 1}, {"contents": []}):
+            def bad_permissions(_request, _timeout):
                 return FakeResponse({
                     "account": {"login": "grinninggiant"},
                     "target_type": "Organization",
@@ -205,12 +211,40 @@ class BrokerTests(unittest.TestCase):
                     "permissions": permissions,
                 })
 
-            with self.subTest(workflows=scope), self.assertRaises(BROKER.BrokerError):
-                BROKER.verify_installation(
-                    jwt="app-jwt",
-                    installation_id=160545271,
-                    opener=wrong_permissions,
-                )
+            with self.subTest(permissions=permissions), self.assertRaises(BROKER.BrokerError):
+                BROKER.verify_installation(jwt="app-jwt", installation_id=160545271,
+                                           opener=bad_permissions)
+
+    def test_token_permissions_follow_validated_command_not_extra_grants(self):
+        granted = {
+            "metadata": "read", "contents": "write", "pull_requests": "write",
+            "administration": "write", "actions": "read", "workflows": "write",
+            "variables": "read", "webhooks": "write",
+        }
+        get = BROKER.validate_command([BROKER.GH_BINARY, "api", "repos/grinninggiant/hermes-agent"])
+        create = BROKER.validate_command([BROKER.GH_BINARY, "api", "repos/grinninggiant/hermes-agent/pulls",
+                                          "-X", "POST", "-f", "base=main", "-f", "head=review", "-f", "title=Review"])
+        self.assertEqual(BROKER.token_permissions_for_command(get, granted), {
+            "actions": "read", "administration": "read", "contents": "read",
+            "pull_requests": "read", "workflows": "read", "variables": "read", "webhooks": "read",
+        })
+        self.assertEqual(BROKER.token_permissions_for_command(create, granted), {"pull_requests": "write"})
+        self.assertEqual(BROKER.token_permissions_for_command(
+            [BROKER.GH_BINARY, "auth", "status"], granted), {})
+        self.assertEqual(BROKER.token_permissions_for_git(granted), {
+            "contents": "write", "workflows": "write"})
+        self.assertEqual(BROKER.token_permissions_for_git({"contents": "write", "workflows": "read"}),
+                         {"contents": "write"})
+        with self.assertRaises(BROKER.BrokerError):
+            BROKER.token_permissions_for_git({"contents": "read", "workflows": "write"})
+        with self.assertRaises(BROKER.BrokerError):
+            BROKER.token_permissions_for_command(create, {"pull_requests": "read"})
+        merge = BROKER.validate_command([BROKER.GH_BINARY, "api", "repos/grinninggiant/hermes-agent/pulls/17/merge",
+                                         "-X", "PUT", "-f", "merge_method=merge"])
+        self.assertEqual(BROKER.token_permissions_for_command(merge, granted),
+                         {"contents": "write", "pull_requests": "write"})
+        with self.assertRaises(BROKER.BrokerError):
+            BROKER.token_permissions_for_command(merge, {"contents": "write", "pull_requests": "read"})
 
     def test_build_child_environment_strips_credentials_and_sets_only_gh_token(self):
         child = BROKER.build_child_environment(
@@ -424,7 +458,7 @@ class BrokerTests(unittest.TestCase):
             BROKER.emit_credential_response("", "grinninggiant/hermes-agent")
 
     @mock.patch.object(BROKER, "mint_installation_token", return_value="credential-token")
-    @mock.patch.object(BROKER, "verify_installation")
+    @mock.patch.object(BROKER, "verify_installation", return_value={"contents": "write", "workflows": "write", "webhooks": "write"})
     @mock.patch.object(BROKER, "build_app_jwt", return_value="app-jwt")
     @mock.patch.object(BROKER, "resolve_references", new_callable=mock.AsyncMock)
     def test_credential_get_prints_scoped_response_and_never_leaks_token_to_args(

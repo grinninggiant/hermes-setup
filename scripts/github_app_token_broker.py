@@ -30,14 +30,6 @@ EXPECTED_REPOSITORY_SCOPE = f"{ALLOWED_OWNER}/*"
 EXPECTED_APP_ID = 4550664
 EXPECTED_INSTALLATION_ID = 160545271
 EXPECTED_OWNER = "grinninggiant"
-EXPECTED_PERMISSIONS = {
-    "actions": "read",
-    "administration": "write",
-    "contents": "write",
-    "metadata": "read",
-    "pull_requests": "write",
-    "workflows": "write",
-}
 REQUEST_TIMEOUT_SECONDS = 30
 VAULT_ID = "7ubnofdpw4kdjj43vjvyknjuva"
 ITEM_ID = "utureginrsgfwswikgqseyqcve"
@@ -209,18 +201,11 @@ def mint_installation_token(
     *,
     jwt: str,
     installation_id: int,
+    permissions: Mapping[str, str],
     opener: Callable[..., Any] = urllib.request.urlopen,
 ) -> str:
     payload = json.dumps(
-        {
-            "permissions": {
-                "actions": "read",
-                "administration": "write",
-                "contents": "write",
-                "pull_requests": "write",
-                "workflows": "write",
-            }
-        },
+        {"permissions": dict(permissions)},
         separators=(",", ":"),
         sort_keys=True,
     ).encode()
@@ -253,7 +238,7 @@ def verify_installation(
     jwt: str,
     installation_id: int,
     opener: Callable[..., Any] = urllib.request.urlopen,
-) -> None:
+) -> dict[str, str]:
     if installation_id != EXPECTED_INSTALLATION_ID:
         raise BrokerError("GitHub App identity mismatch")
     request = urllib.request.Request(
@@ -279,9 +264,52 @@ def verify_installation(
         or account.get("login") != EXPECTED_OWNER
         or data.get("target_type") != "Organization"
         or data.get("repository_selection") != "all"
-        or data.get("permissions") != EXPECTED_PERMISSIONS
     ):
         raise BrokerError("GitHub installation scope mismatch")
+    granted = data.get("permissions")
+    if (
+        not isinstance(granted, dict) or not granted
+        or any(not isinstance(key, str) or not re.fullmatch(r"[a-z_]+", key)
+               or not isinstance(level, str) or level not in {"read", "write"}
+               for key, level in granted.items())
+    ):
+        raise BrokerError("GitHub installation permissions invalid")
+    return dict(granted)
+
+
+def _require_permissions(granted: Mapping[str, str], required: Mapping[str, str]) -> dict[str, str]:
+    for name, level in required.items():
+        if granted.get(name) != "write" and not (level == "read" and granted.get(name) == "read"):
+            raise BrokerError("GitHub installation lacks required permission")
+    return dict(required)
+
+
+def token_permissions_for_git(granted: Mapping[str, str]) -> dict[str, str]:
+    # ponytail: Git's credential request has no fetch/push bit; this token covers Git writes.
+    required = {"contents": "write"}
+    if granted.get("workflows") == "write":
+        required["workflows"] = "write"
+    return _require_permissions(granted, required)
+
+
+def token_permissions_for_command(command: Sequence[str], granted: Mapping[str, str]) -> dict[str, str]:
+    """Only call after validate_command; GitHub is authoritative for the available grants."""
+    if command[1:] == ["auth", "status"]:
+        return {}
+    if command[1:3] == ["pr", "ready"]:
+        return _require_permissions(granted, {"pull_requests": "write"})
+    endpoint = command[2]
+    if endpoint == "installation/repositories":
+        return {}
+    tail = command[3:]
+    mutating = any(arg in {"-f", "--raw-field", "-F", "POST", "PUT"}
+                   or arg.startswith(("--raw-field=", "--method=POST", "--method=PUT"))
+                   for arg in tail)
+    if not mutating:
+        return {name: "read" for name in granted if name != "metadata"}
+    if endpoint.endswith("/pulls") or re.fullmatch(rf"repos/{ALLOWED_OWNER}/[^/]+/issues/[1-9][0-9]*/comments", endpoint):
+        return _require_permissions(granted, {"pull_requests": "write"})
+    return _require_permissions(granted, {"contents": "write", "pull_requests": "write"})
 
 
 def build_child_environment(
@@ -490,10 +518,11 @@ def credential_get(*, opener: Callable[..., Any] = urllib.request.urlopen) -> in
     resolved = asyncio.run(resolve_references(bootstrap_token))
     os.environ.pop(TOKEN_ENV, None)
     jwt = build_app_jwt(resolved["app_id"], resolved["private_key"])
-    verify_installation(jwt=jwt, installation_id=resolved["installation_id"])
+    granted = verify_installation(jwt=jwt, installation_id=resolved["installation_id"])
     installation_token = mint_installation_token(
         jwt=jwt,
         installation_id=resolved["installation_id"],
+        permissions=token_permissions_for_git(granted),
         opener=opener,
     )
     sys.stdout.write(emit_credential_response(installation_token, repository))
@@ -532,10 +561,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     resolved = asyncio.run(resolve_references(bootstrap_token))
     os.environ.pop(TOKEN_ENV, None)
     jwt = build_app_jwt(resolved["app_id"], resolved["private_key"])
-    verify_installation(jwt=jwt, installation_id=resolved["installation_id"])
+    granted = verify_installation(jwt=jwt, installation_id=resolved["installation_id"])
     installation_token = mint_installation_token(
         jwt=jwt,
         installation_id=resolved["installation_id"],
+        permissions=token_permissions_for_command(command, granted),
     )
     with tempfile.TemporaryDirectory(
         prefix="derya-gh-config-", dir="/private/tmp"
