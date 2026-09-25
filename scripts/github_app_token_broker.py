@@ -369,10 +369,12 @@ def validate_command(command: Sequence[str]) -> list[str]:
         raise BrokerError("only the pinned gh binary is allowed")
     if args[1:] == ["auth", "status"]:
         return args
-    if args[1:] == ["pr", "ready", "17", "-R", f"{ALLOWED_OWNER}/hermes-agent"]:
+    if (len(args) == 6 and args[1:3] == ["pr", "ready"]
+            and re.fullmatch(r"[1-9][0-9]{0,17}", args[3])
+            and args[4:] == ["-R", f"{ALLOWED_OWNER}/hermes-agent"]):
         return args
     if len(args) < 3 or args[1] != "api":
-        raise BrokerError("only gh auth status, exact PR 17 ready, and pinned gh api routes are allowed")
+        raise BrokerError("only gh auth status, scoped PR ready, and pinned gh api routes are allowed")
     endpoint = args[2]
     if (
         not re.fullmatch(r"[A-Za-z0-9._~!$&'()*+,;=:@/-]+", endpoint)
