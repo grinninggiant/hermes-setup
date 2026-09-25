@@ -30,13 +30,6 @@ EXPECTED_REPOSITORY_SCOPE = f"{ALLOWED_OWNER}/*"
 EXPECTED_APP_ID = 4550664
 EXPECTED_INSTALLATION_ID = 160545271
 EXPECTED_OWNER = "grinninggiant"
-EXPECTED_PERMISSIONS = {
-    "actions": "read",
-    "administration": "write",
-    "contents": "write",
-    "metadata": "read",
-    "pull_requests": "write",
-}
 REQUEST_TIMEOUT_SECONDS = 30
 VAULT_ID = "7ubnofdpw4kdjj43vjvyknjuva"
 ITEM_ID = "utureginrsgfwswikgqseyqcve"
@@ -208,17 +201,11 @@ def mint_installation_token(
     *,
     jwt: str,
     installation_id: int,
+    permissions: Mapping[str, str],
     opener: Callable[..., Any] = urllib.request.urlopen,
 ) -> str:
     payload = json.dumps(
-        {
-            "permissions": {
-                "actions": "read",
-                "administration": "write",
-                "contents": "write",
-                "pull_requests": "write",
-            }
-        },
+        {"permissions": dict(permissions)},
         separators=(",", ":"),
         sort_keys=True,
     ).encode()
@@ -251,7 +238,7 @@ def verify_installation(
     jwt: str,
     installation_id: int,
     opener: Callable[..., Any] = urllib.request.urlopen,
-) -> None:
+) -> dict[str, str]:
     if installation_id != EXPECTED_INSTALLATION_ID:
         raise BrokerError("GitHub App identity mismatch")
     request = urllib.request.Request(
@@ -277,9 +264,88 @@ def verify_installation(
         or account.get("login") != EXPECTED_OWNER
         or data.get("target_type") != "Organization"
         or data.get("repository_selection") != "all"
-        or data.get("permissions") != EXPECTED_PERMISSIONS
     ):
         raise BrokerError("GitHub installation scope mismatch")
+    granted = data.get("permissions")
+    if (
+        not isinstance(granted, dict) or not granted
+        or any(not isinstance(key, str) or not re.fullmatch(r"[a-z_]+", key)
+               or not isinstance(level, str) or level not in {"read", "write"}
+               for key, level in granted.items())
+    ):
+        raise BrokerError("GitHub installation permissions invalid")
+    return dict(granted)
+
+
+def _require_permissions(granted: Mapping[str, str], required: Mapping[str, str]) -> dict[str, str]:
+    for name, level in required.items():
+        if granted.get(name) != "write" and not (level == "read" and granted.get(name) == "read"):
+            raise BrokerError("GitHub installation lacks required permission")
+    return dict(required)
+
+
+def token_permissions_for_git(granted: Mapping[str, str]) -> dict[str, str]:
+    # ponytail: Git's credential request has no fetch/push bit; this token covers Git writes.
+    required = {"contents": "write"}
+    if granted.get("workflows") == "write":
+        required["workflows"] = "write"
+    return _require_permissions(granted, required)
+
+
+def _api_method(command: Sequence[str]) -> str:
+    tail = command[3:]
+    methods = []
+    for index, arg in enumerate(tail):
+        if arg in {"-X", "--method"}:
+            if index + 1 >= len(tail):
+                raise BrokerError("missing gh api method")
+            methods.append(tail[index + 1].upper())
+        elif arg.startswith("--method="):
+            methods.append(arg.split("=", 1)[1].upper())
+    if len(methods) > 1:
+        raise BrokerError("duplicate gh api method")
+    if methods:
+        return methods[0]
+    return "POST" if any(arg in {"-f", "--raw-field", "-F"} or arg.startswith("--raw-field=")
+                         for arg in tail) else "GET"
+
+
+_GET_ROUTE_PERMISSIONS = (
+    (r"", "metadata"),
+    (r"pulls(?:/[1-9][0-9]*(?:/(?:files|reviews|comments))?)?", "pull_requests"),
+    (r"issues/[1-9][0-9]*/comments", "pull_requests"),
+    (r"branches/[A-Za-z0-9._-]+", "contents"),
+    (r"commits/[A-Za-z0-9._-]+/check-runs", "checks"),
+    (r"commits/[A-Za-z0-9._-]+/status", "statuses"),
+    (r"actions/runs", "actions"),
+    (r"actions/permissions", "administration"),
+    (r"rulesets", "metadata"),
+)
+
+
+def _get_route_permission(endpoint: str, repo_root: str) -> str:
+    relative = "" if endpoint == repo_root else endpoint.removeprefix(f"{repo_root}/")
+    for pattern, permission in _GET_ROUTE_PERMISSIONS:
+        if re.fullmatch(pattern, relative):
+            return permission
+    raise BrokerError("GitHub API read route is not allowed")
+
+
+def token_permissions_for_command(command: Sequence[str], granted: Mapping[str, str]) -> dict[str, str]:
+    """Only call after validate_command; GitHub is authoritative for the available grants."""
+    if command[1:] == ["auth", "status"]:
+        return _require_permissions(granted, {"metadata": "read"})
+    if command[1:3] == ["pr", "ready"]:
+        return _require_permissions(granted, {"pull_requests": "write"})
+    endpoint = command[2]
+    if endpoint == "installation/repositories":
+        return _require_permissions(granted, {"metadata": "read"})
+    if _api_method(command) == "GET":
+        repo_root = "/".join(endpoint.split("/")[:3])
+        return _require_permissions(granted, {_get_route_permission(endpoint, repo_root): "read"})
+    if endpoint.endswith("/pulls") or re.fullmatch(rf"repos/{ALLOWED_OWNER}/[^/]+/issues/[1-9][0-9]*/comments", endpoint):
+        return _require_permissions(granted, {"pull_requests": "write"})
+    return _require_permissions(granted, {"contents": "write", "pull_requests": "write"})
 
 
 def build_child_environment(
@@ -303,10 +369,13 @@ def validate_command(command: Sequence[str]) -> list[str]:
         raise BrokerError("only the pinned gh binary is allowed")
     if args[1:] == ["auth", "status"]:
         return args
-    if args[1:] == ["pr", "ready", "17", "-R", f"{ALLOWED_OWNER}/hermes-agent"]:
+    if (len(args) == 6 and args[1:3] == ["pr", "ready"]
+            and re.fullmatch(r"[1-9][0-9]{0,17}", args[3])
+            and args[4] == "-R"
+            and args[5] in {f"{ALLOWED_OWNER}/hermes-agent", f"{ALLOWED_OWNER}/hermes-setup"}):
         return args
     if len(args) < 3 or args[1] != "api":
-        raise BrokerError("only gh auth status, exact PR 17 ready, and pinned gh api routes are allowed")
+        raise BrokerError("only gh auth status, scoped PR ready, and pinned gh api routes are allowed")
     endpoint = args[2]
     if (
         not re.fullmatch(r"[A-Za-z0-9._~!$&'()*+,;=:@/-]+", endpoint)
@@ -327,8 +396,7 @@ def validate_command(command: Sequence[str]) -> list[str]:
         ):
             raise BrokerError("GitHub API route is outside the approved organization")
         repo_root = "/".join(parts[:3])
-    method = "GET"
-    method_explicit = False
+    method = _api_method(args)
     raw_fields: dict[str, str] = {}
     tail = args[3:]
     index = 0
@@ -340,13 +408,9 @@ def validate_command(command: Sequence[str]) -> list[str]:
         if argument in {"-X", "--method"}:
             if index + 1 >= len(tail):
                 raise BrokerError("missing gh api method")
-            method = tail[index + 1].upper()
-            method_explicit = True
             index += 2
             continue
         if argument.startswith("--method="):
-            method = argument.split("=", 1)[1].upper()
-            method_explicit = True
             index += 1
             continue
         if argument == "-F":
@@ -375,8 +439,6 @@ def validate_command(command: Sequence[str]) -> list[str]:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name) or name in raw_fields:
             raise BrokerError("invalid gh api raw field")
         raw_fields[name] = value
-    if raw_fields and not method_explicit:
-        method = "POST"
     allowed_methods = {"GET", "POST", "PATCH", "PUT"}
     if method not in allowed_methods:
         raise BrokerError("GitHub API method is not allowed")
@@ -387,6 +449,7 @@ def validate_command(command: Sequence[str]) -> list[str]:
     if method == "GET":
         if raw_fields:
             raise BrokerError("GET routes cannot carry request fields")
+        _get_route_permission(endpoint, repo_root)
         return args
     relative = endpoint.removeprefix(f"{repo_root}/")
     allowed_fields: set[str]
@@ -488,10 +551,11 @@ def credential_get(*, opener: Callable[..., Any] = urllib.request.urlopen) -> in
     resolved = asyncio.run(resolve_references(bootstrap_token))
     os.environ.pop(TOKEN_ENV, None)
     jwt = build_app_jwt(resolved["app_id"], resolved["private_key"])
-    verify_installation(jwt=jwt, installation_id=resolved["installation_id"])
+    granted = verify_installation(jwt=jwt, installation_id=resolved["installation_id"])
     installation_token = mint_installation_token(
         jwt=jwt,
         installation_id=resolved["installation_id"],
+        permissions=token_permissions_for_git(granted),
         opener=opener,
     )
     sys.stdout.write(emit_credential_response(installation_token, repository))
@@ -530,10 +594,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     resolved = asyncio.run(resolve_references(bootstrap_token))
     os.environ.pop(TOKEN_ENV, None)
     jwt = build_app_jwt(resolved["app_id"], resolved["private_key"])
-    verify_installation(jwt=jwt, installation_id=resolved["installation_id"])
+    granted = verify_installation(jwt=jwt, installation_id=resolved["installation_id"])
     installation_token = mint_installation_token(
         jwt=jwt,
         installation_id=resolved["installation_id"],
+        permissions=token_permissions_for_command(command, granted),
     )
     with tempfile.TemporaryDirectory(
         prefix="derya-gh-config-", dir="/private/tmp"
