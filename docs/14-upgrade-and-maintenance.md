@@ -88,6 +88,21 @@ curl -fsS http://127.0.0.1:9119/ >/dev/null
 
 The current accepted core is official Hermes Agent `v0.21.5` (`2026.9.24`, `f97608f178d1`) on Python `3.13.15`, installed from `NousResearch/hermes-agent` with zero local commits and zero behavioral source diff. It replaced the `grinninggiant/hermes-agent` fork on 2026-09-26 with explicit owner approval, accepting two security regressions the fork had closed: with `approvals.mode: off` (all nine profiles) plugin-escalated approval gates are bypassed, and child/helper-thread tool boundaries follow upstream. Local capabilities belong in profile plugins/config, not in the core checkout.
 
+### Keep plugin slash commands in the Telegram menu
+
+Upstream fills Telegram's 60-command menu with core commands before plugin commands, so plugin commands such as `/codex_usage` silently fall into the hidden overflow. Every profile therefore pins them first at the top level of `config.yaml` (merged into the Telegram platform extra):
+
+```yaml
+platforms:
+  telegram:
+    extra:
+      command_menu:
+        priority:
+          - codex_usage
+```
+
+Add any new plugin command that must stay visible to this list. The menu is registered at gateway connect, so restart the gateway after editing it.
+
 ### Preserve the 07:00 Telegram session boundary
 
 Hermes changed `SessionResetPolicy.mode` from `both` to `none` in July 2026 so conversations persist by default. An omitted reset policy therefore no longer preserves this fleet's historical daily rollover. Keep the intent explicit in every profile config:
