@@ -28,12 +28,16 @@ from markdown_it import MarkdownIt
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
-    GoalStatusNotice,
     MessageEvent,
     MessageType,
     ProcessingOutcome,
     SendResult,
 )
+
+try:
+    from gateway.platforms.base import GoalStatusNotice
+except ImportError:  # Upstream cores carry no platform goal-status seam.
+    GoalStatusNotice = Any
 from gateway.session import SessionSource, build_session_key  # type: ignore[import-not-found]
 from hermes_cli.goals import GoalContract
 
@@ -639,6 +643,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._signing_secrets = tuple(
                 secret for secret in (current_secret, previous_secret) if len(secret) >= 16
             )
+            self._disable_goal_features_without_core_goals()
             if not await self.connect_outbound_only(startup_recovery=True):
                 raise RuntimeError("Linear outbound dependencies failed to connect")
             assert self._linear is not None
@@ -4110,6 +4115,26 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             stop_when="Stop when blocked, awaiting human input, approval, cancellation, or issue closure.",
         )
 
+    def _core_goals_available(self) -> bool:
+        """Only the retired fork core exposed gateway goal operations.
+
+        Upstream Hermes runs one model turn per admitted Linear prompt: no
+        native goal is created, judged, resumed or continued.
+        """
+        runner = getattr(self, "gateway_runner", None)
+        return callable(getattr(runner, "goal_state_for_source", None))
+
+    def _disable_goal_features_without_core_goals(self) -> None:
+        if self._core_goals_available():
+            return
+        if self._native_goal_continuation_enabled or self._dependency_wait_enabled:
+            logger.warning(
+                "[linear] Hermes core has no gateway goal operations; "
+                "native goal continuation and dependency wait stay disabled"
+            )
+        self._native_goal_continuation_enabled = False
+        self._dependency_wait_enabled = False
+
     def _goal_operation(self, name: str) -> Callable[..., Any]:
         operation = getattr(getattr(self, "gateway_runner", None), name, None)
         if not callable(operation):
@@ -4119,6 +4144,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
     async def _goal_state_for_source(
         self, source: SessionSource, hermes_session_id: str
     ) -> Any:
+        if not self._core_goals_available():
+            return None
         return await self._goal_operation("goal_state_for_source")(
             source, session_id=hermes_session_id
         )
@@ -4130,6 +4157,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         goal: str,
         contract: GoalContract,
     ) -> Any:
+        if not self._core_goals_available():
+            return None
         return await self._goal_operation("ensure_goal_for_source")(
             source,
             goal,
@@ -4144,6 +4173,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         *,
         reset_budget: bool,
     ) -> tuple[Any, str | None]:
+        if not self._core_goals_available():
+            return None, None
         result = await self._goal_operation("resume_goal_for_source")(
             source,
             reset_budget=reset_budget,
@@ -4156,6 +4187,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
     async def _next_goal_prompt_for_source(
         self, source: SessionSource, hermes_session_id: str
     ) -> str | None:
+        if not self._core_goals_available():
+            return None
         return await self._goal_operation(
             "next_goal_continuation_prompt_for_source"
         )(source, session_id=hermes_session_id)
@@ -4443,9 +4476,23 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             and self._active_sessions.get(session_key) is None):
                         await self.cancel_session_processing(session_key)
                 else:
-                    await self.cancel_session_processing(
-                        session_key, expected_task=owner_task, expected_guard=owner_guard,
+                    await self._cancel_owned_session_processing(
+                        session_key, owner_task, owner_guard
                     )
+
+    async def _cancel_owned_session_processing(
+        self, session_key: str, owner_task: Any, owner_guard: Any
+    ) -> None:
+        if self._accepts_kwarg(
+            self.cancel_session_processing, "expected_task", var_kw=False, unknown=False
+        ):
+            await self.cancel_session_processing(
+                session_key, expected_task=owner_task, expected_guard=owner_guard,
+            )
+        elif (self._session_tasks.get(session_key) in (None, owner_task)
+                and self._active_sessions.get(session_key) in (None, owner_guard)):
+            # Upstream cancel has no owner fence; never cancel a newer turn.
+            await self.cancel_session_processing(session_key)
 
     async def _fence_turn_decisions_for_visibility(self, session_id: str, reason: str) -> int:
         # This is the sole lock shared with tagged activity dispatch; callers

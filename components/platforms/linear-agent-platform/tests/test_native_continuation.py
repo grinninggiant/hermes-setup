@@ -16,12 +16,15 @@ from unittest import mock
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
-    GoalStatusNotice,
-    GoalStatusNoticeKind,
     MessageEvent,
     MessageType,
     ProcessingOutcome,
 )
+
+try:
+    from gateway.platforms.base import GoalStatusNotice, GoalStatusNoticeKind
+except ImportError:  # Upstream cores carry no platform goal-status seam.
+    GoalStatusNotice = GoalStatusNoticeKind = None
 from gateway.run_agent_cache import GatewayAgentCacheMixin
 from gateway.session import SessionSource
 

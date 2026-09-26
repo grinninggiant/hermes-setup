@@ -546,10 +546,49 @@ def _on_interim_message(
     return None
 
 
+def _core_binds_clarify_owner() -> bool:
+    """Only the retired fork core bound clarify waiters to a Linear turn owner."""
+    try:
+        import inspect
+
+        from tools import clarify_gateway
+
+        return "turn_owner" in inspect.signature(clarify_gateway.register).parameters
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return False
+
+
+def _block_unbound_linear_clarify(**kwargs: Any) -> dict[str, str] | None:
+    """Keep Linear turns from waiting on a question no owner-bound reply can answer."""
+    if str(kwargs.get("tool_name") or "") != "clarify":
+        return None
+    try:
+        from gateway.session_context import get_session_env
+
+        platform = str(
+            kwargs.get("platform")
+            or get_session_env("HERMES_SESSION_PLATFORM", "")
+        ).strip().lower()
+    except (ImportError, RuntimeError):
+        return None
+    if platform != "linear" or _core_binds_clarify_owner():
+        return None
+    return {
+        "action": "block",
+        "message": (
+            "Linear sessions cannot pause for a mid-turn question. Ask it in your final "
+            "response; the user's reply in Linear starts the next turn."
+        ),
+    }
+
+
 def _pre_tool_progress(**kwargs: Any) -> None:
     """Publish one secret-safe ephemeral thought when a Linear tool starts."""
     # Cache-parity forks share session identity, not foreground progress ownership.
     if kwargs.get("execution_context", "foreground") != "foreground":
+        return None
+    # Upstream hooks carry no execution context; its reviews run on bg-review threads.
+    if threading.current_thread().name.startswith("bg-review"):
         return None
     try:
         from gateway.session_context import get_session_env
@@ -629,6 +668,7 @@ def register(ctx) -> None:
     register_hook = getattr(ctx, "register_hook", None)
     if callable(register_hook):
         register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)
+        register_hook("pre_tool_call", _block_unbound_linear_clarify)
         register_hook("pre_tool_call", _pre_tool_progress)
         register_hook("on_interim_message", _on_interim_message)
         register_hook("on_session_end", _on_session_end)

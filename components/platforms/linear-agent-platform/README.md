@@ -2,6 +2,18 @@
 
 A native Linear Agent Session platform plugin for Hermes Gateway. Linear is the human-facing task and discussion surface; Hermes remains the conversation and execution layer. The same tracked adapter code runs as nine isolated profile-local instances. No separate bridge daemon or Hermes built-in webhook route is used.
 
+## Upstream Hermes core (0.8.46)
+
+The fleet runs official `NousResearch/hermes-agent`. It has no gateway goal operations, no owner-bound clarify waiters and no owner-fenced session cancel; those seams existed only in the retired `grinninggiant/hermes-agent` fork. On such a core the adapter runs one model turn per admitted Linear prompt:
+
+- No native goal is created, judged, resumed or continued. `native_goal_continuation_enabled` and `dependency_wait_enabled` are forced off at `connect()` with a warning, whatever the profile config says.
+- Internal (continuation) events find no goal and are vetoed as `stopped`.
+- The `clarify` tool is blocked inside Linear sessions; the model asks in its final response and the user's Linear reply starts the next turn.
+- Stop cancels the owning turn only while it still owns the session, so a newer turn is never cancelled.
+- Tool progress from `bg-review` threads is never published to Linear.
+
+The sections below that describe native continuation, dependency resume and native clarify apply only to a core that still exposes those seams. `tests/test_upstream_core.py` covers the goal-free behaviour; most other suites exercise the fork seams and only run meaningfully against the fork core.
+
 ## Paused-goal diagnostic delivery (0.8.37)
 
 A structured iteration-budget exit followed by a fresh `blocked` goal judgment
