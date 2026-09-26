@@ -8,10 +8,7 @@ case "$profile" in
   *) print -u2 -- "Unsupported Hermes profile: $profile"; exit 64 ;;
 esac
 
-hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-d25b0bc3d9e884ddde6550c6d1fd250e98b97a09-baseline-deps/venv/bin/hermes"
-if [[ "$profile" == "general" ]]; then
-  hermes_executable="/Users/mutlupolatcan/.hermes/runtime/releases/hermes-agent-e71401b20dcb449e653e3a2c771d16bbcd95dbc7/venv/bin/hermes"
-fi
+hermes_executable="/Users/mutlupolatcan/.hermes/hermes-agent/venv/bin/hermes"
 
 service="com.polatcangames.hermes.op-service-account"
 token=$(/usr/bin/security find-generic-password -s "$service" -a "$profile" -w)

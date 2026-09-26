@@ -8,12 +8,17 @@ Live procedures for keeping the fleet healthy across hermes-agent upgrades, plus
 
 ## 20. The upgrade checklist
 
-The production fleet does not execute Homebrew Hermes. Gateways and the shell CLI resolve an updater-managed immutable release; discover the active release from the live process or `hermes --version`, never from a hard-coded hash:
+The production fleet does not execute Homebrew Hermes. Since 2026-09-26 it runs the official installer layout: one git checkout of `NousResearch/hermes-agent` at `~/.hermes/hermes-agent` (branch `main` tracking `origin/main`, partial clone) with its venv at `venv/`. Every surface resolves through it:
 
 ```text
-/Users/mutlupolatcan/.local/bin/hermes
-└── ~/.hermes/runtime/releases/hermes-agent-<managed-hash>/venv/bin/hermes
+/Users/mutlupolatcan/.local/bin/hermes            -> ~/.hermes/hermes-agent/venv/bin/hermes
+~/.hermes/runtime/hermes-agent                   -> ~/.hermes/hermes-agent
+~/.hermes/hermes-agent/.venv                     -> venv   (SDK bootstrap default path)
+~/.hermes/scripts/hermes-gateway-keychain.sh     hermes_executable = ~/.hermes/hermes-agent/venv/bin/hermes
+~/.hermes/scripts/hermes-send-keychain.sh        general send uses the same executable
 ```
+
+The immutable fork releases under `~/.hermes/runtime/releases/` are retired. The gateway SDK bootstrap venv was rebuilt on the uv-managed CPython 3.13.15 (pinned set in `runtime/hermes-gateway-sdk-bootstrap/requirements.lock.txt`) because its old interpreter lived inside a fork release. Discover the active core from the live process or `hermes --version`, never from a hard-coded hash. Never run `hermes gateway start`: the LaunchAgents are managed externally and it would overwrite them.
 
 Do not upgrade the live directory in place and do not make Python `3.14` the production runtime. Stage the official candidate side by side, preserve the stable path for rollback, and keep the candidate and Honcho adapter in the same supported Python `major.minor` family (`3.13`). The adapter compatibility gate is documented in [`components/memory/honcho-codex-bridge/docs/upgrade-lifecycle.md`](../components/memory/honcho-codex-bridge/docs/upgrade-lifecycle.md).
 
@@ -81,7 +86,7 @@ command -v hermes && hermes --version
 curl -fsS http://127.0.0.1:9119/ >/dev/null
 ```
 
-The current accepted core is official Hermes Agent `v0.20.3` (`2026.8.16.2`) on Python `3.13.15`. Its active managed release matches `NousResearch/hermes-agent` `origin/main` with zero local commits and zero behavioral source diff. Local capabilities belong in profile plugins/config, not updater-managed release directories.
+The current accepted core is official Hermes Agent `v0.21.5` (`2026.9.24`, `f97608f178d1`) on Python `3.13.15`, installed from `NousResearch/hermes-agent` with zero local commits and zero behavioral source diff. It replaced the `grinninggiant/hermes-agent` fork on 2026-09-26 with explicit owner approval, accepting two security regressions the fork had closed: with `approvals.mode: off` (all nine profiles) plugin-escalated approval gates are bypassed, and child/helper-thread tool boundaries follow upstream. Local capabilities belong in profile plugins/config, not in the core checkout.
 
 ### Preserve the 07:00 Telegram session boundary
 
@@ -161,8 +166,8 @@ All 23 affected job definitions repointed 2026-07-05. Also found and fixed a **d
 
 Production is intentionally split by responsibility:
 
-- `~/.hermes/runtime/releases/hermes-agent-<hash>` is updater-owned immutable Hermes core.
-- `~/.local/bin/hermes` selects the active managed release.
+- `~/.hermes/hermes-agent` is the official git install of Hermes core, updated only by `hermes update`.
+- `~/.local/bin/hermes` points at its venv.
 - `~/.hermes/profiles/<name>` owns profile state, configuration and installed plugins.
 - `~/Library/LaunchAgents` owns macOS service definitions.
 - `~/.hermes/scripts` owns machine-level deterministic wrappers and maintenance scripts.
@@ -172,7 +177,7 @@ The active Hermes checkout must match official `NousResearch/hermes-agent` `orig
 
 Current local behavior is extension-first:
 
-- **Linear:** the eleven-file profile-local plugin owns native AgentSession routing, durable channel-route reservation, lifecycle/closure policy, official-MCP outbound tools, retention classification, and secret-safe tool-driven ephemeral `thought` progress. Gateway heartbeats are not used as Linear execution progress. Fresh human mentions are scoped by the new AgentSession ID, so an earlier completed manager session cannot poison a distinct new session.
+- **Linear:** since 0.8.46 the plugin runs goal-free on the upstream core — one model turn per admitted prompt; native goal continuation and dependency wait are forced off and `clarify` is blocked inside Linear sessions (see the plugin README). The eleven-file profile-local plugin owns native AgentSession routing, durable channel-route reservation, lifecycle/closure policy, official-MCP outbound tools, retention classification, and secret-safe tool-driven ephemeral `thought` progress. Gateway heartbeats are not used as Linear execution progress. Fresh human mentions are scoped by the new AgentSession ID, so an earlier completed manager session cannot poison a distinct new session.
 - **Honcho:** profile-local `honcho.json` plus the loopback-only `honcho.localhost` alias preserves process-scoped JWT authentication. Auth is never disabled and JWTs are never written to config.
 - **Credential bootstrap:** the external Keychain → official 1Password SDK wrapper remains a separately owned launcher contract. Revalidate it after every core update; do not modify upstream core merely to recognize the wrapper.
 
