@@ -2867,8 +2867,6 @@ def register_outbound_tools(
             description=ADMIN_TRASH_SCHEMA["description"],
             emoji="◩",
         )
-        ctx.register_hook("pre_tool_call", _admin_trash_approval_hook)
-        ctx.register_hook("post_approval_response", _admin_trash_post_approval_hook)
 ADMIN_TRASH_PREVIEW_SCHEMA = {
     "name": "linear_admin_trash_preview",
     "description": "Read and summarize an exact Linear issue set before admin trash. Performs no writes.",
@@ -2884,7 +2882,7 @@ ADMIN_TRASH_PREVIEW_SCHEMA = {
 }
 ADMIN_TRASH_SCHEMA = {
     "name": "linear_admin_trash",
-    "description": "Trash only the exact previewed Linear issue set after native human approval. This is not permanent deletion.",
+    "description": "Trash only the exact previewed Linear issue set after per-call human consent via native elicitation. This is not permanent deletion.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -2915,20 +2913,17 @@ mutation LinearAdminTrash($id: String!) {
 }
 """
 _ADMIN_TRASH_PREVIEWS: dict[str, dict[str, Any]] = {}
-_ADMIN_TRASH_PENDING: dict[str, dict[str, Any]] = {}
-_ADMIN_TRASH_APPROVALS: dict[str, dict[str, Any]] = {}
 _ADMIN_TRASH_PREVIEW_LOCK = threading.RLock()
 _ADMIN_TRASH_TTL = 600
 
 
 def _trim_admin_trash_state_locked() -> None:
     now = time.monotonic()
-    for state in (_ADMIN_TRASH_PREVIEWS, _ADMIN_TRASH_PENDING, _ADMIN_TRASH_APPROVALS):
-        for key, value in list(state.items()):
-            if value.get("expires_at", 0) <= now:
-                state.pop(key, None)
-        while len(state) > 256:
-            state.pop(next(iter(state)))
+    for key, value in list(_ADMIN_TRASH_PREVIEWS.items()):
+        if value.get("expires_at", 0) <= now:
+            _ADMIN_TRASH_PREVIEWS.pop(key, None)
+    while len(_ADMIN_TRASH_PREVIEWS) > 256:
+        _ADMIN_TRASH_PREVIEWS.pop(next(iter(_ADMIN_TRASH_PREVIEWS)))
 
 
 def _admin_trash_issue_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
@@ -2983,95 +2978,27 @@ def _admin_trash_preview(args: Any, *, session_id: str | None = None) -> dict[st
         return dict(preview)
 
 
-def _admin_trash_rule_key(tool_call_id: str) -> str:
-    return f"linear_admin_trash:{tool_call_id}"
-
-
-def _admin_trash_approval_hook(
-    *, tool_name: str = "", args: Any = None, tool_call_id: str = "", session_id: str = "", **_: Any
-) -> dict[str, str] | None:
-    if tool_name != "linear_admin_trash":
+def _consume_admin_trash_consent(
+    args: Any, *, session_id: str, preview: dict[str, Any], consent: str
+) -> dict[str, Any] | None:
+    if consent != "accept":
         return None
-    blocked = {"action": "block", "message": "Linear admin trash requires a fresh preview and native human approval."}
-    call_id = str(tool_call_id or "")
-    if not call_id:
-        return blocked
-    try:
-        from tools import approval
-        from tools import approval_context
+    # The accepted tuple is a one-use grant bound to this preview and session.
+    grant = (preview["preview_id"], preview["digest"], session_id)
+    with _ADMIN_TRASH_PREVIEW_LOCK:
+        _trim_admin_trash_state_locked()
+        stored = _ADMIN_TRASH_PREVIEWS.get(grant[0])
         if (
-            approval._yolo_active()
-            or approval_context._get_approval_mode() == "off"
-            or approval_context._is_cron_approval_context()
-            or approval_context._is_single_query_approval_context()
-            or not any(approval._presence()[1:])
+            stored is None
+            or stored["digest"] != grant[1]
+            or stored["session_id"] != grant[2]
         ):
-            return blocked
-    except Exception:
-        return blocked
-    preview = _admin_trash_preview(args, session_id=str(session_id or ""))
-    if preview is None:
-        return blocked
-    with _ADMIN_TRASH_PREVIEW_LOCK:
-        _trim_admin_trash_state_locked()
-        if call_id in _ADMIN_TRASH_PENDING or call_id in _ADMIN_TRASH_APPROVALS:
-            return blocked
-        _ADMIN_TRASH_PENDING[call_id] = {
-            "rule_key": _admin_trash_rule_key(call_id),
-            "preview_id": preview["preview_id"],
-            "preview_digest": preview["digest"],
-            "session_id": str(session_id or ""),
-            "expires_at": time.monotonic() + _ADMIN_TRASH_TTL,
-        }
-    identifiers = ", ".join(issue["identifier"] for issue in preview["issues"])
-    return {
-        "action": "approve",
-        "rule_key": _admin_trash_rule_key(call_id),
-        "message": (
-            f"Trash the exact Linear issues {identifiers} in team {preview['target_team_id']}? "
-            f"Preview digest: {preview['digest']}. This uses issueArchive(trash: true), "
-            "is not permanent deletion, and will be read back after the operation."
-        ),
-    }
-
-
-def _admin_trash_post_approval_hook(
-    *, pattern_key: str = "", choice: str = "", tool_call_id: str = "", session_id: str = "", **_: Any
-) -> None:
-    call_id = str(tool_call_id or "")
-    if not call_id:
-        return
-    with _ADMIN_TRASH_PREVIEW_LOCK:
-        _trim_admin_trash_state_locked()
-        pending = _ADMIN_TRASH_PENDING.pop(call_id, None)
-        if (
-            pending is not None
-            and pattern_key == f"plugin_rule:{pending['rule_key']}"
-            and choice in {"once", "session", "always"}
-            and pending["session_id"] == str(session_id or "")
-        ):
-            _ADMIN_TRASH_APPROVALS[call_id] = {**pending, "expires_at": time.monotonic() + _ADMIN_TRASH_TTL}
-
-
-def _consume_admin_trash_approval(args: Any, *, session_id: str) -> dict[str, Any] | None:
-    try:
-        from tools.approval_context import _approval_tool_call_id
-        call_id = str(_approval_tool_call_id.get() or "")
-    except Exception:
-        return None
-    if not call_id:
-        return None
-    with _ADMIN_TRASH_PREVIEW_LOCK:
-        _trim_admin_trash_state_locked()
-        grant = _ADMIN_TRASH_APPROVALS.pop(call_id, None)
-        _ADMIN_TRASH_PENDING.pop(call_id, None)
-        if grant is None or grant["session_id"] != session_id:
             return None
-        preview = _admin_trash_preview(args, session_id=session_id)
-        if preview is None or preview["preview_id"] != grant["preview_id"] or preview["digest"] != grant["preview_digest"]:
+        current = _admin_trash_preview(args, session_id=session_id)
+        if current is None or current["preview_id"] != grant[0] or current["digest"] != grant[1]:
             return None
-        _ADMIN_TRASH_PREVIEWS.pop(preview["preview_id"], None)
-        return preview
+        _ADMIN_TRASH_PREVIEWS.pop(grant[0], None)
+        return current
 
 
 def _admin_trash_registry_handler(handler: Callable[..., Awaitable[dict[str, Any]]]) -> Callable[..., Awaitable[str]]:
@@ -3190,9 +3117,39 @@ def _make_admin_trash_handlers(
 
     async def trash_handler(args: dict[str, Any], **handler_kwargs) -> dict[str, Any]:
         session_id = str(handler_kwargs.get("session_id") or "")
-        preview = _consume_admin_trash_approval(args, session_id=session_id)
+        preview = _admin_trash_preview(args, session_id=session_id)
         if preview is None or profile_id != "general" or preview["target_team_id"] not in admin_team_ids:
             return {"error": "linear_admin_trash_denied"}
+        exact_issues = "\n".join(
+            f"- {json.dumps(issue['identifier'], ensure_ascii=False)} — "
+            f"{json.dumps(issue['title'], ensure_ascii=False)}"
+            for issue in preview["issues"]
+        )
+        message = (
+            "Linear trash (geri alınabilir), kalıcı silme değil\n"
+            f"Team: {preview['target_team_id']}\nCount: {len(preview['issues'])}\n"
+            f"Exact issues:\n{exact_issues}"
+        )
+        description = (
+            f"Confirm moving exactly these {len(preview['issues'])} issues to Linear trash. "
+            f"Preview digest: {preview['digest']}. This is reversible; it is not permanent deletion."
+        )
+        try:
+            from tools.approval_prompt import request_elicitation_consent
+
+            consent = request_elicitation_consent(
+                message,
+                description,
+                surface="linear-admin-trash",
+                title="Confirm Linear trash",
+            )
+        except Exception:
+            consent = "decline"
+        preview = _consume_admin_trash_consent(
+            args, session_id=session_id, preview=preview, consent=consent
+        )
+        if preview is None:
+            return {"error": "linear_admin_trash_denied", "reason": "consent_not_accepted"}
         client = None
         ledger = None
         operation_key = f"linear-admin-trash:{preview['preview_id']}"
