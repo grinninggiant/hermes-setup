@@ -3824,6 +3824,45 @@ payload
 
         self.assertEqual(result.get("status"), "success", result)
         self.assertEqual(len([call for call in mcp.calls if call[0] == "save_issue"]), 1)
+        # The Done's own revision bump must not orphan the proof for the final reply gate.
+        self.assertEqual(
+            self.acceptance_ledger.acceptance_evidence_hashes(
+                "child-1", "actor-1", accepted_revision="2026-08-30T20:02:00.000Z",
+            ),
+            {criterion.criterion_hash},
+        )
+
+    async def test_complete_child_does_not_rebind_proof_when_criteria_changed(self):
+        before = self.child_terminal_context()
+        before["description"] = "## Kabul kriterleri\n- [x] Live canary passes"
+        criterion = acceptance_criteria(before["description"])[0]
+        self.acceptance_ledger.record_acceptance_evidence(
+            issue_id="child-1",
+            criterion_hash=criterion.criterion_hash,
+            actor_id="actor-1",
+            test_class="live",
+            evidence_digest="b" * 64,
+            evidence_pointer="linear://activity/child-proof",
+            observed_revision="2026-08-30T20:00:00.000Z",
+            accepted_revision="2026-08-30T20:01:00.000Z",
+            result="PASS",
+            timestamp="2026-08-30T20:00:01.000Z",
+        )
+        after = {
+            **before,
+            "description": "## Kabul kriterleri\n- [x] Something else",
+            "updatedAt": "2026-08-30T20:02:00.000Z",
+            "state": {"id": "done-1", "type": "completed"},
+        }
+        await self.run_child_terminal_action(
+            context=before, after_context=after, operation_key="op-complete-criteria-drift",
+        )
+        self.assertEqual(
+            self.acceptance_ledger.acceptance_evidence_hashes(
+                "child-1", "actor-1", accepted_revision="2026-08-30T20:02:00.000Z",
+            ),
+            set(),
+        )
 
     async def test_complete_child_readback_rejects_non_advancing_updated_at(self):
         before = self.child_terminal_context()

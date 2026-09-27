@@ -840,6 +840,7 @@ async def _resolve_child_terminal_transition(
     )
     if transition is not None and action == "complete_child":
         transition["source_updated_at"] = str(context.get("updatedAt") or "")
+        transition["source_description"] = str(context.get("description") or "")
     return transition, result
 
 
@@ -2021,6 +2022,21 @@ async def execute_with_clients(
                         lifecycle_transition.get("source_updated_at", ""),
                         str(terminal_read_back.get("updatedAt") or ""),
                     )
+                    # Our own Done bumps updatedAt; carry the proof that authorized it to
+                    # the new revision, but only if the criteria text did not change.
+                    if (
+                        accepted
+                        and acceptance_ledger is not None
+                        and lifecycle_transition.get("source_description")
+                        == str(terminal_read_back.get("description") or "")
+                    ):
+                        await asyncio.to_thread(
+                            acceptance_ledger.rebind_acceptance_revision,
+                            str(terminal_read_back.get("id") or arguments.get("id") or ""),
+                            graph_actor,
+                            from_revision=lifecycle_transition["source_updated_at"],
+                            to_revision=str(terminal_read_back.get("updatedAt") or ""),
+                        )
         except Exception:
             accepted = False
         if not accepted:
