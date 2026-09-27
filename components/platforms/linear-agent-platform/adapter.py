@@ -921,7 +921,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.47",
+                "version": "0.8.48",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -1063,12 +1063,18 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                                 {"status": "direct_activation_duplicate"}, status=200
                             )
                         direct_grant = None
+                # Self-delegation (agentSessionCreateOnIssue/assignment by the app) arrives
+                # with no actor; the signed webhook plus creator/delegate checks carry identity.
+                self_or_unset_actor = bool(
+                    self._linear.actor_id
+                    and (
+                        not event_actor_id
+                        or hmac.compare_digest(event_actor_id, self._linear.actor_id)
+                    )
+                )
                 if direct_grant is not None:
-                    if not (
-                        event_actor_id
-                        and self._linear.actor_id
-                        and hmac.compare_digest(event_actor_id, self._linear.actor_id)
-                    ):
+                    if not self_or_unset_actor:
+                        logger.info("[linear] direct created denied: foreign actor issue=%s", issue_id)
                         # A foreign event must neither claim the Direct grant nor
                         # poison semantic dedup for the self-authored delivery of
                         # this same native session that may arrive afterward.
@@ -1083,9 +1089,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     team_id = str((context.get("team") or {}).get("id") or "")
                     direct_authoritative = bool(
                         self._direct_activation_policy_allows(context, direct_grant)
-                        and event_actor_id
-                        and self._linear.actor_id
-                        and hmac.compare_digest(event_actor_id, self._linear.actor_id)
+                        and self_or_unset_actor
                     )
                     if not direct_authoritative or not self._ledger.claim_direct_activation(
                         issue_id,
@@ -1093,6 +1097,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         actor_id=str(self._linear.actor_id or ""),
                         team_id=team_id,
                     ):
+                        logger.info(
+                            "[linear] direct created denied: policy_or_claim issue=%s state=%s",
+                            issue_id, direct_grant.get("state"),
+                        )
                         self._ledger.mark_done(delivery_key)
                         return web.json_response(
                             {"status": "direct_activation_policy_denied"}, status=200
@@ -1103,9 +1111,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 and issue_id
                 and not direct_activation_created
                 and manager_activation is None
-                and event_actor_id
-                and self._linear.actor_id
-                and hmac.compare_digest(event_actor_id, self._linear.actor_id)
+                and self_or_unset_actor
             ):
                 async with asyncio.timeout_at(read_deadline):
                     context = await self._linear.get_issue_closure_context(issue_id)
