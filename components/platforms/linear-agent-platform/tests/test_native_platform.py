@@ -3603,6 +3603,56 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.adapter._reconcile_direct_activation_event(issue_id))
         self.assertEqual(len(self.events), 1)
 
+    async def test_direct_grant_bound_during_webhook_context_read_still_activates(self):
+        self.adapter._planned_activation_enabled = True
+        self.adapter._activation_allowed_team_ids = {"team-ops"}
+        self.adapter._planned_owner_ids = {"user-1"}
+        issue_id = "issue-direct-bind-race"
+        self.adapter._linear.closure_contexts[issue_id] = {
+            "id": issue_id,
+            "title": "Bind race",
+            "state": {"id": "backlog-1", "name": "Backlog", "type": "backlog"},
+            "team": {"id": "team-ops"},
+            "creator": {"id": "agent-derya"},
+            "parent": {},
+            "assignee": {"id": "user-1", "name": "Mutlu"},
+            "delegate": {"id": "agent-derya", "name": "Derya"},
+        }
+        self.adapter._ledger.reserve_direct_activation_grant(
+            operation_key="direct-bind-race",
+            source_platform="telegram",
+            source_user_id="telegram-mutlu",
+            source_message_id="message-bind-race",
+            source_session_id="hermes-session-bind-race",
+            source_profile="general",
+            actor_id="agent-derya",
+            team_id="team-ops",
+            issue_fingerprint=DeliveryLedger.direct_issue_fingerprint("team-ops", "Bind race"),
+        )
+        original_read = self.adapter._linear.get_issue_closure_context
+
+        async def read_then_bind(requested_issue_id):
+            context = await original_read(requested_issue_id)
+            self.adapter._ledger.bind_direct_activation_grant("direct-bind-race", issue_id)
+            return context
+
+        self.adapter._linear.get_issue_closure_context = read_then_bind
+        created = self.make_payload(
+            webhookId="webhook-direct-bind-race",
+            actor={"id": "agent-derya", "name": "Derya"},
+            agentSession={
+                "id": "session-direct-bind-race",
+                "issue": {"id": issue_id, "identifier": "OPS-995", "title": "Bind race"},
+            },
+        )
+        response = await self.adapter._handle_webhook(self.request_for(created))
+        self.assertEqual(json.loads(response.text)["status"], "direct_activation_waiting_for_grant")
+        self.assertIsNone(self.adapter._ledger.get_activation_wait(issue_id))
+        self.assertTrue(await self.adapter._reconcile_direct_activation_event(issue_id))
+        self.assertEqual(
+            self.adapter._ledger.get_direct_activation_grant(issue_id)["state"], "dispatched"
+        )
+
     async def test_same_title_concurrent_direct_creates_recover_by_bound_issue_after_restart(self):
         self.adapter._activation_allowed_team_ids = {"team-ops"}
         self.adapter._planned_owner_ids = {"user-1"}
