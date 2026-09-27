@@ -163,7 +163,7 @@ ROLLBACK_TAG=$(git -C "$LIVE" describe --tags --exact-match HEAD)
 #    import/doctor + Honcho adapter gate (§19.8). Live pointers unchanged.
 CANDIDATE=/Users/mutlupolatcan/.hermes/runtime/hermes-agent-candidate-$TARGET_TAG
 git -C "$LIVE" worktree add --detach "$CANDIDATE" "$TARGET_SHA"
-(cd "$CANDIDATE" && uv venv venv --python 3.13 && VIRTUAL_ENV=venv uv pip install -e ".[all]")
+(cd "$CANDIDATE" && uv venv venv --python 3.13 && uv pip install --python venv/bin/python -e ".[all]")
 "$CANDIDATE/venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 13)'
 
 # 3. Backup: independent quick backup that passes unzip -t.
@@ -175,7 +175,7 @@ test -s "$BACKUP" && unzip -t "$BACKUP" >/dev/null
 # 4. Promote the tested tag (official tag procedure; never `hermes update`,
 #    which moves to the main tip). Fail closed before any restart.
 git -C "$LIVE" checkout --detach "$TARGET_SHA"
-(cd "$LIVE" && VIRTUAL_ENV=venv uv pip install -e ".[all]")
+(cd "$LIVE" && uv pip install --python venv/bin/python -e ".[all]")
 test "$(git -C "$LIVE" rev-parse HEAD)" = "$TARGET_SHA"
 hermes config check
 
