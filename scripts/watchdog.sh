@@ -74,15 +74,19 @@ latest=max(items,key=lambda p:p.stat().st_mtime)
 if time.time()-latest.stat().st_mtime > max_age: raise SystemExit(1)
 PY
 }
-fresh_backup "/Users/mutlupolatcan/.hermes/backups/honcho" "honcho-*.sql.gz" 57600 || {
-    ISSUES="$ISSUES\n  - Honcho backup missing or older than 16h"; ALL_OK=false; DOWN_COUNT=$((DOWN_COUNT+1));
-}
-python3 - <<'PY' || {
+# Seagate copy is the primary store; host copies are deleted once it succeeds.
+# Host-side marker because launchd /bin/bash has no Removable Volumes access.
+EXT_OK=true
+python3 - <<'PY' || EXT_OK=false
 import json, time
-d = json.load(open("/Volumes/Hermes Backup/last-success.json"))
+d = json.load(open("/Users/mutlupolatcan/.hermes/backups/hermes/external-last-success.json"))
 raise SystemExit(time.time() - d["completed_epoch"] > 129600)
 PY
+$EXT_OK || {
     ISSUES="$ISSUES\n  - Seagate harici disk yedeği yok veya 36 saatten eski"; ALL_OK=false; DOWN_COUNT=$((DOWN_COUNT+1));
+}
+fresh_backup "/Users/mutlupolatcan/.hermes/backups/honcho" "honcho-*.sql.gz" 57600 || $EXT_OK || {
+    ISSUES="$ISSUES\n  - Honcho backup missing or older than 16h"; ALL_OK=false; DOWN_COUNT=$((DOWN_COUNT+1));
 }
 fresh_profile_snapshots() {
     python3 - 93600 $PROFILES <<'PY'
@@ -105,7 +109,7 @@ for profile in sys.argv[2:]:
         raise SystemExit(1)
 PY
 }
-fresh_profile_snapshots || {
+fresh_profile_snapshots || $EXT_OK || {
     ISSUES="$ISSUES\n  - Hermes profile snapshots missing, invalid or older than 26h"; ALL_OK=false; DOWN_COUNT=$((DOWN_COUNT+1));
 }
 
