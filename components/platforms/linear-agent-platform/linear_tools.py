@@ -1867,7 +1867,16 @@ async def execute_with_clients(
                 and confirmed_count == _quota_create_context["observed_current_count"]
                 and confirmed_count + 1 < CAPACITY
             )
-        except Exception:
+            if not quota_unchanged:
+                logger.warning(
+                    "[linear] quota pre-dispatch mismatch: observed=%s confirmed=%s",
+                    (_quota_create_context or {}).get("observed_current_count"), confirmed_count,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[linear] quota pre-dispatch count failed: %s: %s",
+                type(exc).__name__, str(exc)[:200],
+            )
             quota_unchanged = False
         if not quota_unchanged:
             await asyncio.to_thread(
