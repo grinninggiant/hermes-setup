@@ -88,6 +88,10 @@ $EXT_OK || {
 fresh_backup "/Users/mutlupolatcan/.hermes/backups/honcho" "honcho-*.sql.gz" 57600 || $EXT_OK || {
     ISSUES="$ISSUES\n  - Honcho backup missing or older than 16h"; ALL_OK=false; DOWN_COUNT=$((DOWN_COUNT+1));
 }
+FREE_GIB=$(df -g / | awk 'NR==2{print $4}')
+[ "${FREE_GIB:-0}" -ge 25 ] || {
+    ISSUES="$ISSUES\n  - Host diskinde boş alan ${FREE_GIB} GiB (<25 GiB)"; ALL_OK=false; DOWN_COUNT=$((DOWN_COUNT+1));
+}
 fresh_profile_snapshots() {
     python3 - 93600 $PROFILES <<'PY'
 from pathlib import Path
