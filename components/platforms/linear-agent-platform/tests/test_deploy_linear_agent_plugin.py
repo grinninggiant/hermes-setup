@@ -424,6 +424,24 @@ class DeployPluginTests(unittest.TestCase):
         record = json.loads(Path(second["record_path"]).read_text())
         self.assertEqual(second["rollback_path"], record["rollback_path"])
         self.assertEqual(second["rollback_digest"], record["rollback_digest"])
+        self.assertEqual("verified", record["status"])
+        self.assertEqual(second["target_digest"], record["target_digest"])
+        self.assertEqual([], list((self.profiles / "general" / "state").glob(".*.tmp")))
+
+    def test_interrupted_deploy_record_is_not_left_prepared(self) -> None:
+        helper = load_helper()
+        helper.REVIEWED_MANIFESTS = {self.commit: self.manifest}
+
+        def interrupt() -> None:
+            raise RuntimeError("injected interruption")
+
+        with self.assertRaises(RuntimeError):
+            helper.deploy_reviewed(repo_root=self.repo, profiles_root=self.profiles, profile="general",
+                                   commit=self.commit, _after_backup_hook=interrupt)
+        records = list((self.profiles / "general" / "state").glob("linear-plugin-deploy-*.json"))
+        self.assertEqual(1, len(records))
+        self.assertEqual("recovered", json.loads(records[0].read_text())["status"])
+
     def test_interruption_after_backup_rename_restores_original_target(self) -> None:
         helper = load_helper()
         helper.REVIEWED_MANIFESTS = {self.commit: self.manifest}
