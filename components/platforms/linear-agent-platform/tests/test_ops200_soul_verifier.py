@@ -281,6 +281,13 @@ class Ops200SoulVerifierTests(unittest.TestCase):
             self.assertEqual(self.check(args, kwargs={"session_id": "hermes-native"})["result"], "PASS")
         finally:
             reset_current_observability_context(tokens)
+        # Single-profile gateway: session profile unset, active profile supplies it.
+        self.env["HERMES_SESSION_PROFILE"] = ""
+        with mock.patch("hermes_cli.profiles.get_active_profile_name", return_value="general"):
+            self.assertEqual(self.check(args)["result"], "PASS")
+        with mock.patch("hermes_cli.profiles.get_active_profile_name", return_value="finance"):
+            self.assertEqual(self.check(args)["reason"], "acceptance_provenance_unavailable")
+        self.env["HERMES_SESSION_PROFILE"] = "general"
         self.graphql.get_agent_turn_context.return_value["status"] = "complete"
         self.assertEqual(self.check(args)["reason"], "criterion_verification_failed")
 

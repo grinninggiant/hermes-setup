@@ -2225,16 +2225,34 @@ def _acceptance_invocation_context(
     session_id = handler_kwargs.get("session_id")
     turn_id = handler_kwargs.get("turn_id") or _core_turn_id()
     if not (isinstance(session_id, str) and session_id and isinstance(turn_id, str) and turn_id):
+        logger.warning(
+            "[linear] acceptance provenance denied failed=%s",
+            ",".join(n for n, v in (("session_id", session_id), ("turn_id", turn_id)) if not v),
+        )
         return None
     chat_id = str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")
     bound_session_id = str(get_session_env("HERMES_SESSION_ID", "") or "")
-    if not (
-        get_session_env("HERMES_SESSION_PLATFORM", "") == "linear"
-        and get_session_env("HERMES_SESSION_PROFILE", "") == profile_id
-        and chat_id
-        and bound_session_id
-        and hmac.compare_digest(bound_session_id, session_id)
-    ):
+    session_profile = str(get_session_env("HERMES_SESSION_PROFILE", "") or "")
+    if not session_profile:
+        # Single-profile gateways leave the session profile unset (same as Direct provenance).
+        try:
+            from hermes_cli.profiles import get_active_profile_name  # type: ignore[import-not-found]
+
+            session_profile = str(get_active_profile_name() or "")
+        except (ImportError, RuntimeError, OSError):
+            session_profile = ""
+    checks = {
+        "platform": get_session_env("HERMES_SESSION_PLATFORM", "") == "linear",
+        "profile": session_profile == profile_id,
+        "chat_id": bool(chat_id),
+        "bound_session": bool(bound_session_id),
+        "session_match": bool(bound_session_id) and hmac.compare_digest(bound_session_id, session_id),
+    }
+    if not all(checks.values()):
+        logger.warning(
+            "[linear] acceptance provenance denied failed=%s",
+            ",".join(name for name, ok in checks.items() if not ok),
+        )
         return None
     return chat_id, turn_id
 
