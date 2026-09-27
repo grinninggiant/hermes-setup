@@ -1329,7 +1329,8 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         counter = mock.AsyncMock(return_value=239)
         retention = mock.AsyncMock(side_effect=LinearAPIError("retention inventory unavailable"))
         mcp = FakeMCP()
-        with mock.patch("linear_tools.count_workspace_issues", new=counter):
+        with mock.patch("linear_tools.count_workspace_issues", new=counter), \
+                self.assertLogs("linear_tools", level="WARNING") as logs:
             result = await execute_with_clients(
                 profile_id="general",
                 vendor_tool="save_issue",
@@ -1358,6 +1359,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 "buffer_after": 10,
             },
         })
+        self.assertIn("LinearAPIError: retention inventory unavailable", logs.output[0])
         retention.assert_awaited_once()
         self.assertEqual([call[0] for call in mcp.calls], ["get_user"])
 
