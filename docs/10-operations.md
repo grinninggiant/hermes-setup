@@ -49,45 +49,9 @@ The learning loop is the long-tail value. A one-shot benchmark misses the entire
 
 ## 14. Upgrade and maintenance
 
-Native install = **one `hermes` binary** for all profiles. Upgrade via the same channel you installed from (Homebrew formula or the official installer), then restart the gateways.
+Native install = **one `hermes` checkout** for all profiles. The canonical upgrade, rollback and acceptance procedure for core, Desktop, dashboard, plugins, Honcho and wrappers is [docs/14 §19–§20](14-upgrade-and-maintenance.md#19-upgrade-lifecycle-program-ops-215). This section keeps only the design trade-off.
 
-**The single-install trade-off — name it:** one binary means **you cannot stage per-agent upgrades.** Upgrading bumps *every* profile at once (the container-per-agent draft could roll one agent and soak it; native can't). So upgrade **deliberately**, on a quiet day, and be ready to roll back the whole install if a release misbehaves.
-
-**Routine upgrade (monthly, or when a release you want ships):**
-
-```bash
-# 1. note the current version in case you roll back
-hermes --version
-
-# 2. upgrade the binary
-brew upgrade hermes-agent          # or rerun the official installer
-
-# 2b. re-add the pip extras — brew upgrade replaces the formula's venv, which
-#     drops them. Without python-telegram-bot the bots go silent; without ddgs
-#     the built-in web_search has no backend (agents report "no web tools");
-#     websockets silences a browser_dialog import warning.
-#     Then verify with `hermes doctor`.
-$(brew --prefix hermes-agent)/libexec/bin/python -m pip install python-telegram-bot ddgs websockets
-
-# 3. restart every gateway so they pick up the new binary
-launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-researcher
-launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-general
-# ...repeat per loaded profile (or `launchctl list | grep ai.hermes` to enumerate)
-
-# 4. smoke-test: message 2–3 agents, tail their logs
-tail -n 50 ~/.hermes/profiles/researcher/logs/gateway.log
-```
-
-The state under `~/.hermes/profiles/<profile>/` is untouched — skills, memories, sessions, config all survive; only the binary changes. **Honcho + SearXNG** upgrade separately, via Docker (`docker compose pull && docker compose up -d` — Section 7); keep their image tags pinned, not floating on `latest`.
-
-**Rollback:**
-
-If an upgrade breaks the fleet, reinstall the previous version and restart:
-
-```bash
-brew install hermes-agent@<previous-version>   # or reinstall the prior installer build
-# then kickstart the profiles as above
-```
+**The single-install trade-off — name it:** one checkout means **you cannot stage per-agent upgrades.** Upgrading bumps *every* profile at once, so upgrade deliberately and keep the previous release tag as the rollback coordinate. **Honcho + SearXNG** upgrade separately via Docker with pinned image tags.
 
 Because it's one binary, rollback is **all-or-nothing** — there is no per-agent revert. This is the cost of the single-install simplicity; the upside is there is only ever one version to reason about.
 
