@@ -390,7 +390,7 @@ class CliTests(unittest.TestCase):
         client.connect = mock.AsyncMock()
         client.close = mock.AsyncMock()
         client.graphql = mock.AsyncMock(
-            side_effect=[
+            side_effect=[{"organization": {"subscription": {"type": "free"}}}] + [
                 page(
                     [{"id": str(index)} for index in range(start, start + 50)],
                     more=start < 150,

@@ -64,5 +64,25 @@ class LifecycleReviewFixes(unittest.TestCase):
         self.assertIn("lifecycle_action=start", build_agent_prompt(payload))
 
 
+class PlanLimitTests(unittest.TestCase):
+    def _applies(self, response):
+        import asyncio
+        from linear_client import workspace_issue_limit_applies
+
+        class Client:
+            async def graphql(self, _query, _variables=None):
+                if isinstance(response, Exception):
+                    raise response
+                return response
+
+        return asyncio.run(workspace_issue_limit_applies(Client()))
+
+    def test_paid_plan_lifts_cap_unknown_keeps_it(self):
+        self.assertFalse(self._applies({"organization": {"subscription": {"type": "basic_monthly_12"}}}))
+        self.assertTrue(self._applies({"organization": {"subscription": {"type": "free"}}}))
+        self.assertTrue(self._applies({"organization": {"subscription": None}}))
+        self.assertTrue(self._applies(RuntimeError("down")))
+
+
 if __name__ == "__main__":
     unittest.main()
