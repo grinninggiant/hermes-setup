@@ -1013,7 +1013,8 @@ query LinearNativeIssueClosure($id: String!) {
 """
         data = await self.graphql(query, {"id": issue_id})
         issue = data.get("issue") or {}
-        if str(issue.get("id") or "") != issue_id:
+        # Linear MCP create returns the identifier (OPS-230), webhooks the UUID; accept either.
+        if not issue_id or issue_id not in (str(issue.get("id") or ""), str(issue.get("identifier") or "")):
             raise LinearAPIError("Issue closure read-back did not resolve the requested issue")
         team = issue.get("team") or {}
         return {

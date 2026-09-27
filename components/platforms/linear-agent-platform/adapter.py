@@ -1568,12 +1568,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         delegate_id = str((context.get("delegate") or {}).get("id") or "")
         parent_id = str((context.get("parent") or {}).get("id") or "")
         return bool(
-            grant.get("source_platform") == "telegram"
+            grant.get("source_platform") in DeliveryLedger.DIRECT_POLICY_RESULTS
             and grant.get("source_user_id")
             and grant.get("source_message_id")
             and grant.get("source_session_id")
             and grant.get("source_profile")
-            and grant.get("policy_result") == "gateway_authorized_direct_dm"
+            and grant.get("policy_result")
+            == DeliveryLedger.DIRECT_POLICY_RESULTS[grant["source_platform"]]
             and not parent_id
             and team_id in self._activation_allowed_team_ids
             and owner_id in self._planned_owner_ids

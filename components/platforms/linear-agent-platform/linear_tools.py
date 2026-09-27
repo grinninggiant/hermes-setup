@@ -2153,27 +2153,61 @@ def _direct_instruction_context(
             source_profile = str(get_active_profile_name() or "")
         except (ImportError, RuntimeError, OSError):
             return None
-    values = {
-        "source_platform": str(get_session_env("HERMES_SESSION_PLATFORM", "")).casefold(),
-        "source_user_id": str(get_session_env("HERMES_SESSION_USER_ID", "")),
-        "source_message_id": str(get_session_env("HERMES_SESSION_MESSAGE_ID", "")),
-        "source_session_id": str(get_session_env("HERMES_SESSION_ID", "")),
-        "source_profile": source_profile,
-    }
-    chat_type = str(get_session_env("HERMES_SESSION_CHAT_TYPE", "")).casefold()
-    cron_session = str(get_session_env("HERMES_CRON_SESSION", ""))
+    platform = str(get_session_env("HERMES_SESSION_PLATFORM", "")).casefold()
+    source = str(get_session_env("HERMES_SESSION_SOURCE", "")).casefold()
+    session_id = str(get_session_env("HERMES_SESSION_ID", ""))
     hook_session_id = str(handler_kwargs.get("session_id") or "")
+    if (
+        get_session_env("HERMES_CRON_SESSION", "")
+        or os.environ.get("HERMES_KANBAN_TASK")
+        or _delegated_child_context()
+    ):
+        return None
+    if platform == "telegram":
+        # Outside Linear, remote: the gateway-verified Telegram DM.
+        if str(get_session_env("HERMES_SESSION_CHAT_TYPE", "")).casefold() != "dm":
+            return None
+        values = {
+            "source_platform": "telegram",
+            "source_user_id": str(get_session_env("HERMES_SESSION_USER_ID", "")),
+            "source_message_id": str(get_session_env("HERMES_SESSION_MESSAGE_ID", "")),
+        }
+    elif not platform and source in LOCAL_DIRECT_SOURCES:
+        # Outside Linear, local: only the profile owner can open a loopback Desktop/TUI
+        # session. An authenticated cloud transport means a remote client; refuse it.
+        if get_session_env("HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY", ""):
+            return None
+        values = {
+            "source_platform": source,
+            "source_user_id": "local-profile-owner",
+            "source_message_id": str(handler_kwargs.get("task_id") or session_id),
+        }
+    else:
+        # Linear AgentSessions, webhooks, api_server, other chats: never Direct.
+        return None
+    values.update(source_session_id=session_id, source_profile=source_profile)
     if not (
-        values["source_platform"] == "telegram"
-        and chat_type == "dm"
-        and not cron_session
-        and all(values.values())
+        all(values.values())
         and hmac.compare_digest(values["source_profile"], profile_id)
         and hook_session_id
-        and hmac.compare_digest(values["source_session_id"], hook_session_id)
+        and hmac.compare_digest(session_id, hook_session_id)
     ):
         return None
     return values
+
+
+DIRECT_POLICY_RESULTS = DeliveryLedger.DIRECT_POLICY_RESULTS
+LOCAL_DIRECT_SOURCES = frozenset(
+    source for source, result in DIRECT_POLICY_RESULTS.items() if result == "local_owner_session"
+)
+
+
+def _delegated_child_context() -> bool:
+    try:
+        from agent.delegation_context import is_delegated_child_context  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    return bool(is_delegated_child_context())
 
 
 def _acceptance_invocation_context(
@@ -2554,6 +2588,7 @@ def register_outbound_tools(
                         source_message_id=direct_context["source_message_id"],
                         source_session_id=direct_context["source_session_id"],
                         source_profile=direct_context["source_profile"],
+                        policy_result=DIRECT_POLICY_RESULTS[direct_context["source_platform"]],
                     )
                 retention_runner: Callable[[], Awaitable[dict[str, Any]]] | None = None
                 if retention_team_id and retention_team_key and retention_minimum_age_days:
@@ -2588,6 +2623,7 @@ def register_outbound_tools(
                     result_id = str(result.get("result_id") or "")
                     if result.get("status") == "success" and result_id:
                         bound = False
+                        issue_uuid = ""
                         try:
                             context = await graphql.get_issue_closure_context(result_id)
                             creator_id = str((context.get("creator") or {}).get("id") or "")
@@ -2595,8 +2631,10 @@ def register_outbound_tools(
                             team_id = str((context.get("team") or {}).get("id") or "")
                             parent_id = str((context.get("parent") or {}).get("id") or "")
                             actor_id = str(graphql.actor_id or "")
+                            issue_uuid = str(context.get("id") or "")
                             authoritative = bool(
-                                not parent_id
+                                issue_uuid
+                                and not parent_id
                                 and hmac.compare_digest(creator_id, actor_id)
                                 and hmac.compare_digest(delegate_id, actor_id)
                                 and hmac.compare_digest(
@@ -2611,7 +2649,7 @@ def register_outbound_tools(
                                 bound = await asyncio.to_thread(
                                     direct_ledger.bind_direct_activation_grant,
                                     operation_key,
-                                    result_id,
+                                    issue_uuid,  # adapter looks grants up by webhook UUID
                                 )
                             else:
                                 await asyncio.to_thread(
@@ -2626,7 +2664,7 @@ def register_outbound_tools(
                             bound = False
                         if bound and direct_grant_bound_callback is not None:
                             try:
-                                direct_grant_bound_callback(profile_id, result_id)
+                                direct_grant_bound_callback(profile_id, issue_uuid)
                             except Exception:
                                 pass
                     else:
