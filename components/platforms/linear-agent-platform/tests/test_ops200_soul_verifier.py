@@ -237,6 +237,44 @@ class Ops200SoulVerifierTests(unittest.TestCase):
             acceptance_ledger.close()
             ledger.close()
 
+    def check(self, args, *, kwargs=None, health=None):
+        with (mock.patch("linear_tools.LinearOAuthStore"),
+              mock.patch("linear_tools.LinearClient", return_value=self.graphql),
+              mock.patch("linear_tools._read_local_health", return_value=health or {"version": "0.8.58"}),
+              mock.patch("gateway.session_context.get_session_env", side_effect=lambda k, d="": self.env.get(k, d))):
+            return json.loads(asyncio.run(self.ctx.tools["linear_verify_criterion"]["handler"](
+                args, **(self.kwargs if kwargs is None else kwargs))))
+
+    def test_generic_criterion_check_is_system_observed_single_use_and_bound(self):
+        crit = acceptance_criteria(DESCRIPTION)[0].criterion_hash
+        args = {"criterion_hash": crit, "check": "health_field", "field": "version", "equals": "0.8.58"}
+        envelope = self.check(args)
+        self.assertEqual(envelope["result"], "PASS", envelope)
+        self.assertEqual(envelope["observed"], "0.8.58")
+        evidence = {key: envelope[key] for key in (
+            "criterion_hash", "test_class", "evidence_digest", "evidence_pointer",
+            "observed_revision", "result", "timestamp")}
+        resolver = self.get_resolver(evidence)
+
+        def authenticate(turn="turn-native", issue_id="issue-200"):
+            return authenticate_evidence_envelope(
+                evidence, issue_id=issue_id, delegate_id="actor-1", resolver=resolver,
+                expected_agent_session_id="agent-native", expected_hermes_turn_id=turn)
+
+        self.assertIsNone(authenticate(turn="turn-other"))  # wrong turn consumes, fails closed
+        evidence = {k: v for k, v in self.check(args).items() if k in evidence}
+        self.assertIsNone(authenticate(issue_id="issue-other"))
+        evidence = {k: v for k, v in self.check(args).items() if k in evidence}
+        self.assertIsNotNone(authenticate())
+        self.assertIsNone(authenticate())  # single-use
+        # Model cannot claim a value the system did not observe.
+        self.assertEqual(self.check(args | {"equals": "9.9.9"})["result"], "FAIL")
+        self.assertEqual(self.check(args | {"criterion_hash": "0" * 64})["reason"], "criterion_verification_failed")
+        self.assertEqual(self.check(args | {"field": "../x"})["reason"], "criterion_verification_failed")
+        self.assertEqual(self.check(args, kwargs={})["reason"], "acceptance_provenance_unavailable")
+        self.graphql.get_agent_turn_context.return_value["status"] = "complete"
+        self.assertEqual(self.check(args)["reason"], "criterion_verification_failed")
+
     def get_resolver(self, envelope):
         mcp = mock.MagicMock()
         mcp.connect = mock.AsyncMock()

@@ -124,6 +124,7 @@ class AdminTrashRegistrationTests(unittest.TestCase):
                 "linear_save_comment",
                 "linear_verify_ops200_soul",
                 "linear_verify_ops200_human_state",
+                "linear_verify_criterion",
                 "linear_admin_trash_preview",
                 "linear_admin_trash",
             },

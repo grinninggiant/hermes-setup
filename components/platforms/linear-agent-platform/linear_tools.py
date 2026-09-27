@@ -2240,6 +2240,13 @@ def _policy_from_outbound(outbound: dict[str, Any]) -> OutboundPolicy:
     )
 
 
+def _read_local_health(port: int) -> Any:
+    import urllib.request
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as response:
+        return json.loads(response.read(1_000_000))
+
+
 def _tool_names_available(names: list[str]) -> bool:
     try:
         from tools.registry import registry
@@ -2428,7 +2435,11 @@ def register_outbound_tools(
             metadata = issued.pop(pointer, None)  # single-use even on failed read-back
         if metadata is None or metadata.pop("home", None) != os.environ.get("HERMES_HOME"):
             return None
-        if metadata.pop("kind", None) == "human_state":
+        kind = metadata.pop("kind", None)
+        if kind == "check":
+            # System-observed at issue time; single-use pointer + revision binding keep it fresh.
+            return metadata
+        if kind == "human_state":
             return metadata if metadata.pop("validated", None) == "1" else None
         return metadata if _ops200_soul_readback() == metadata["evidence_digest"] else None
 
@@ -2715,7 +2726,7 @@ def register_outbound_tools(
     base_names = names.copy()
     verifier_enabled = profile_id == "general" and mutations_enabled and "linear_save_issue" in allowed_mutation_tools
     if verifier_enabled:
-        names.extend(("linear_verify_ops200_soul", "linear_verify_ops200_human_state"))
+        names.extend(("linear_verify_ops200_soul", "linear_verify_ops200_human_state", "linear_verify_criterion"))
     if admin_trash_enabled:
         names.extend(("linear_admin_trash_preview", "linear_admin_trash"))
     if not _tool_names_available(names):
@@ -2856,6 +2867,97 @@ def register_outbound_tools(
                     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
             handler=verify_ops200_human_state, check_fn=check_fn, is_async=True,
             description="Verify human-owned OPS-200 state without dispatching a state mutation.", emoji="◩",
+        )
+
+        health_port = int(extra.get("port") or 8787)
+
+        async def verify_criterion(args: dict[str, Any], **kwargs) -> str:
+            """Run one system-owned read-only check; PASS yields one-use evidence for one criterion."""
+            denied = {"error": "linear_policy_denied", "reason": "criterion_verification_failed"}
+            invocation = _acceptance_invocation_context(profile_id, kwargs)
+            if invocation is None:
+                return json.dumps({"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"})
+            chat_id, turn_id = invocation
+            check, field, equals = args.get("check"), str(args.get("field") or ""), args.get("equals")
+            criterion_hash = args.get("criterion_hash")
+            if (
+                set(args) - {"criterion_hash", "check", "field", "equals"}
+                or check not in {"health_field", "issue_state"}
+                or not isinstance(equals, str) or not equals or len(equals) > 200
+                or not isinstance(criterion_hash, str)
+                or (check == "health_field" and not re.fullmatch(r"[a-z_]+(\.[a-z_]+){0,3}", field))
+            ):
+                return json.dumps(denied | {"detail": "invalid_arguments"})
+            graphql = LinearClient(oauth_store=LinearOAuthStore(oauth_file))
+            try:
+                await graphql.connect()
+                context = await graphql.get_agent_turn_context(chat_id)
+                issue = context.get("issue") if isinstance(context, dict) else None
+                criteria = acceptance_criteria(str(issue.get("description") or "")) if isinstance(issue, dict) else ()
+                revision = str(issue.get("updatedAt") or "") if isinstance(issue, dict) else ""
+                if not (
+                    isinstance(issue, dict) and context.get("id") == chat_id
+                    and context.get("status") == "active"
+                    and context.get("app_user_id") == graphql.actor_id
+                    and (issue.get("delegate") or {}).get("id") == graphql.actor_id
+                    and isinstance(issue.get("id"), str) and issue["id"] and revision
+                    and any(c.criterion_hash == criterion_hash for c in criteria)
+                ):
+                    return json.dumps(denied)
+                if check == "health_field":
+                    observed: Any = await asyncio.to_thread(_read_local_health, health_port)
+                    for part in field.split("."):
+                        observed = observed.get(part) if isinstance(observed, dict) else None
+                else:
+                    field = "state.name"
+                    observed = (issue.get("state") or {}).get("name")
+                observed_text = json.dumps(observed, ensure_ascii=False, sort_keys=True) if not isinstance(observed, str) else observed
+                if observed_text != equals:
+                    return json.dumps({"result": "FAIL", "check": check, "field": field, "observed": observed_text[:200]})
+                digest = hashlib.sha256(json.dumps([check, field, observed_text, issue["id"]]).encode("utf-8")).hexdigest()
+                pointer = "artifact://criterion-check/" + secrets.token_urlsafe(32)
+                metadata = {
+                    "evidence_pointer": pointer, "issue_id": issue["id"],
+                    "delegate_id": graphql.actor_id, "agent_session_id": chat_id,
+                    "hermes_turn_id": turn_id, "criterion_hash": criterion_hash,
+                    "evidence_digest": digest, "observed_revision": revision,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "home": os.environ["HERMES_HOME"], "kind": "check",
+                }
+                with issued_lock:
+                    issued[pointer] = metadata
+                    if len(issued) > 32:
+                        issued.pop(next(iter(issued)))
+                logger.info(
+                    "[linear] criterion check PASS issue=%s check=%s field=%s observed=%s",
+                    issue.get("identifier"), check, field, observed_text[:200],
+                )
+                return json.dumps({key: metadata[key] for key in (
+                    "criterion_hash", "evidence_digest", "evidence_pointer", "observed_revision", "timestamp",
+                )} | {"test_class": "runtime" if check == "health_field" else "vendor", "result": "PASS",
+                      "check": check, "field": field, "observed": observed_text[:200]})
+            except Exception:
+                return json.dumps(denied)
+            finally:
+                await graphql.close()
+
+        ctx.register_tool(
+            name="linear_verify_criterion", toolset="linear",
+            schema={"name": "linear_verify_criterion",
+                    "description": (
+                        "Run a system-owned read-only check for one acceptance criterion of the current "
+                        "Linear AgentSession issue. health_field reads the local gateway /health JSON field; "
+                        "issue_state reads the issue's live state name. On PASS returns one-use evidence: pass "
+                        "criterion_hash, test_class, evidence_digest, evidence_pointer, observed_revision, "
+                        "result, timestamp as acceptance_evidence to mark_acceptance in the same turn."),
+                    "parameters": {"type": "object", "properties": {
+                        "criterion_hash": {"type": "string"},
+                        "check": {"type": "string", "enum": ["health_field", "issue_state"]},
+                        "field": {"type": "string", "description": "Dotted /health path, e.g. version (health_field only)"},
+                        "equals": {"type": "string", "description": "Exact expected value"},
+                    }, "required": ["criterion_hash", "check", "equals"], "additionalProperties": False}},
+            handler=verify_criterion, check_fn=check_fn, is_async=True,
+            description="Verify one acceptance criterion with a system-run read-only check.", emoji="◩",
         )
     if admin_trash_enabled:
         preview, trash = _make_admin_trash_handlers(
