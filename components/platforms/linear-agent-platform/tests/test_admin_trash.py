@@ -429,6 +429,20 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(replay["action"], "block")
 
+    async def test_preview_nullable_vendor_trash_state_and_missing_field(self):
+        for value in (None, False, True, "false", "missing"):
+            issue = {**ISSUE, "trashed": value}
+            if value == "missing":
+                del issue["trashed"]
+            preview, _ = self.handlers([client_with({"issue": issue})])
+            result = await preview(
+                {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID}, session_id="session-1"
+            )
+            if value is None or value is False:
+                self.assertEqual(result["mode"], "preview-only")
+            else:
+                self.assertEqual(result["error"], "linear_admin_trash_denied")
+
     async def test_trash_uses_only_issue_archive_trash_true_and_reads_back(self):
         preview_client = client_with({"issue": ISSUE})
         trashed_issue = {**ISSUE, "trashed": True}

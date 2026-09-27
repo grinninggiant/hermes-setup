@@ -3161,7 +3161,9 @@ def _make_admin_trash_handlers(
                 snapshot = _admin_trash_issue_snapshot(issue)
                 if (
                     not snapshot["id"] or not snapshot["identifier"] or not snapshot["updatedAt"]
-                    or snapshot["trashed"] is not False or snapshot["team"]["id"] != team_id
+                    or "trashed" not in issue
+                    or (snapshot["trashed"] is not False and snapshot["trashed"] is not None)
+                    or snapshot["team"]["id"] != team_id
                     or ref not in {snapshot["id"], snapshot["identifier"]}
                 ):
                     return {"error": "linear_admin_trash_denied"}
