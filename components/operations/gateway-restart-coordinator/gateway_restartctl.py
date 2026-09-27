@@ -36,6 +36,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("run", help="run the external coordinator loop").add_argument("--once", action="store_true")
     status = commands.add_parser("status", help="show queue or exact task evidence")
     status.add_argument("--task-id", help="Read one durable request without restarting anything")
+    status.add_argument("--recent", type=int, default=0, metavar="N", help="List the N most recent requests (metadata only)")
     return root
 
 
@@ -91,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
                 "id", "task_id", "target_profile", "status", "old_pid", "new_pid",
                 "reason", "readiness_attempts", "updated_at",
             ) if key in request}
+        if args.recent > 0:
+            result["recent"] = store.recent(args.recent)
         print(json.dumps(result, sort_keys=True))
         return 0
 

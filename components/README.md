@@ -31,3 +31,23 @@ A component name must reveal both what product/vendor it belongs to and what cap
 6. Update source, tests, installers, deploy helpers, documentation, commands, and relative links in one change. Historical snapshots may retain old paths only when clearly labeled as non-current evidence.
 
 `tests/test_component_taxonomy.py` enforces the canonical set and rejects catch-all or known opaque source names deterministically.
+
+## CLI capability registry (OPS-216)
+
+Ad hoc read-only discovery may be temporary once. A capability needed twice gets a row here; mutations never use ad hoc scripts. Every row: explicit profile/home, fail-closed config, metadata-only output, deterministic exit codes.
+
+| Command | Owner | R/W | Scope | Output | Guard / approval |
+|---|---|---|---|---|---|
+| `linear_diagnostics.py --profile P ledger` | `platforms/linear-agent-platform` | R (SQLite `mode=ro`) | one profile | JSON, keys truncated | exit 2 on missing config/ledger |
+| `linear_diagnostics.py --profile P issue OPS-N` | same | R (vendor) | profile OAuth identity | state, delegate, sessions, local binding | exit 3 on vendor error |
+| `linear_diagnostics.py --profile P session ID` | same | R (vendor) | profile OAuth identity | owner/state/terminal count; no body | exit 3 on vendor error |
+| `linear_save_issue` / `linear_save_comment` / `mark_acceptance` tools | same (plugin) | W | profile app user, allowlisted team | read-back | operation key, outbound policy, ledger `outcome_unknown` |
+| `retention.py`, `quota_watchdog.py`, `direct_reconciliation.py` | same | R, W only with `--apply` + dry-run hash | explicit team UUID | JSON manifest | dry-run hash, explicit approval for trash |
+| `restartctl.py status [--task-id T] [--recent N]` | `operations/gateway-restart-coordinator` | R | fleet queue | JSON, no payload/evidence body | exit 2 on missing task |
+| `request_gateway_restart` tool / `restartctl.py request` | `operations/gateway-restart-request` | W | general, coder | queue row + ledger | requester identity, artifact hash, one restart |
+| `backup_ops.py` | `scripts/` (OPS-204) | R/W per subcommand | fleet | JSON | retention policy guards (OPS-220) |
+| `derya-gh` | `security/github-app-token-broker` | per `gh` command | org App installation | `gh` | short-lived token, no personal SSH |
+| `ntn` + `notion_ops.py` | vendor CLI + `notion-cli` skill | R/W | profile Notion token | JSON | `notion-knowledge-ops` dedup/read-back |
+| `hermes sessions …`, `hermes config get/set` | upstream core | R/W | profile | text/JSON | native; no direct `state.db` / `config.yaml` edits |
+
+Deprecated (enforced by `tests/test_cli_capability_registry.py` over docs and skills): `sqlite3 …linear-bridge.sqlite3`, `sqlite3 …linear-outbound-mcp.sqlite3`, `sqlite3 …restart-coordinator/queue.sqlite3`, raw `api.linear.app/graphql` snippets. Remaining audited gaps are tracked as follow-up issues, not here.
