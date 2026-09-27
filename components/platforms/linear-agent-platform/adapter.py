@@ -334,6 +334,7 @@ def build_agent_prompt(
     *,
     dependency_resume: bool = False,
     activation_resume: bool = False,
+    direct_activation: bool = False,
 ) -> str:
     """Build a minimal, source-labelled prompt from Linear's documented fields."""
     action = str(payload.get("action") or "")
@@ -356,7 +357,18 @@ def build_agent_prompt(
                 "Linear promptContext is a frozen creation snapshot and may still show stale blocked-by state; do not use that stale state to wait again.",
             ]
         )
-    if activation_resume:
+    if activation_resume and direct_activation:
+        lines.extend(
+            [
+                "",
+                "Adapter-verified Direct activation:",
+                "You created this issue from an authorized owner channel and it is delegated to you. Begin execution now; do not wait for a human Todo move.",
+                "Read the live issue, then move it to a started state with linear_save_issue lifecycle_action=start before substantive work.",
+                "Create child issues under it when the goal needs them, execute them, and keep going until the acceptance criteria are proven.",
+                "This activation was durably claimed for one-shot dispatch; do not ask for a second approval.",
+            ]
+        )
+    elif activation_resume:
         lines.extend(
             [
                 "",
@@ -386,6 +398,13 @@ def build_agent_prompt(
             [
                 "",
                 "No directive text was included with this delegation. Acknowledge receipt and ask for a concrete task; do not invent work.",
+            ]
+        )
+    if action == "created" and not activation_resume:
+        lines.extend(
+            [
+                "",
+                "Lifecycle: if you created this issue, move it to a started state with linear_save_issue lifecycle_action=start before substantive work. A human-created issue starts only from Todo, and only its human owner moves it to Done.",
             ]
         )
     return "\n".join(lines)
@@ -921,7 +940,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.54",
+                "version": "0.8.55",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -1849,6 +1868,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     payload,
                     dependency_resume=dependency_resume,
                     activation_resume=activation_resume,
+                    direct_activation=direct_activation,
                 )
             ),
             message_type=MessageType.COMMAND if (is_stop or is_command) else MessageType.TEXT,
@@ -1957,7 +1977,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and assignee_id in self._planned_owner_ids
             and hmac.compare_digest(actor_id, assignee_id)
             and self._linear.actor_id
-            and str(state.get("type") or "").casefold() in {"unstarted", "started"}
+            and str(state.get("type") or "").casefold() == "unstarted"
+            and event_state_type == "unstarted"
             and hmac.compare_digest(str(state.get("id") or ""), event_state_id)
             and live_updated_at
             and hmac.compare_digest(live_updated_at, event_updated_at)
@@ -2984,6 +3005,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         data.get("delegate") or data.get("delegateId")
                     ):
                         self._ledger.cancel_waits_for_issue(entity_id)
+                        self._ledger.cancel_activation_for_issue(entity_id)
                         await self._stop_bound_turns(
                             entity_id, "linear_delegate_removed"
                         )
@@ -2994,6 +3016,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 notified_issue_id = str(notification.get("issueId") or notification_issue.get("id") or "")
                 if notified_issue_id:
                     self._ledger.cancel_waits_for_issue(notified_issue_id)
+                    self._ledger.cancel_activation_for_issue(notified_issue_id)
                     await self._stop_bound_turns(
                         notified_issue_id, "linear_delegate_removed"
                     )
@@ -3193,6 +3216,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         str(pending["delivery_key"]),
                         "direct-activation-recovery",
                         activation_resume=True,
+                        direct_activation=True,
                     )
                     self._schedule_thought(
                         session_id,
@@ -3229,6 +3253,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         while self._running:
             try:
                 if self._ledger is not None:
+                    self._ledger.expire_orphan_direct_grants()
                     for pending in self._ledger.list_direct_activation_events():
                         try:
                             await self._reconcile_direct_activation_event(pending["issue_id"])
@@ -4518,15 +4543,18 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return ledger.fence_turn_decisions(session_id, reason)
 
     async def _stop_bound_turns(self, issue_id: str, reason: str) -> bool:
-        if not self._native_goal_continuation_enabled or self._ledger is None:
+        if self._ledger is None:
             return False
         session_id = self._ledger.get_issue_session(issue_id)
         if not session_id:
             return False
+        changed = 0
         try:
-            async with self._session_lock(session_id):
-                changed = await self._fence_turn_decisions_for_visibility(session_id, reason)
+            if self._native_goal_continuation_enabled:
+                async with self._session_lock(session_id):
+                    changed = await self._fence_turn_decisions_for_visibility(session_id, reason)
         finally:
+            # Removing the delegate must stop running work even without continuation.
             await self._cancel_linear_session_processing(session_id)
         return bool(changed or session_id)
 

@@ -947,41 +947,41 @@ def _section_substantive(heading: str, content: str) -> bool:
     return True
 
 
-def _parse_plan_sections(description: str) -> dict[str, str] | None:
+def _plan_sections_detail(description: str) -> tuple[dict[str, str] | None, str]:
     if len(description.strip()) < 500:
-        return None
+        return None, "plan_too_short"
     document_tokens = _COMMONMARK.parse(description)
     if any(
         token.type == "html_block"
         or any(child.type == "html_inline" for child in (token.children or []))
         for token in document_tokens
     ):
-        return None
+        return None, "plan_html_not_allowed"
     lines = description.splitlines()
     if not lines or lines[0] != PLAN_REQUIRED_HEADINGS[0]:
-        return None
+        return None, "plan_first_line_not_heading"
     h2_lines = _commonmark_h2_lines(description)
     if h2_lines != list(PLAN_REQUIRED_HEADINGS):
-        return None
+        return None, "plan_headings_mismatch"
     positions = [
         int(token.map[0])
         for token in document_tokens
         if token.type == "heading_open" and token.tag == "h2" and token.map
     ]
     if len(positions) != len(PLAN_REQUIRED_HEADINGS):
-        return None
+        return None, "plan_headings_mismatch"
     if any(
         lines[position] != heading
         for position, heading in zip(positions, PLAN_REQUIRED_HEADINGS, strict=True)
     ):
-        return None
+        return None, "plan_heading_whitespace"
     sections: dict[str, str] = {}
     for index, position in enumerate(positions):
         end = positions[index + 1] if index + 1 < len(positions) else len(lines)
         section = "\n".join(lines[position + 1:end]).strip()
         heading = PLAN_REQUIRED_HEADINGS[index]
         if not _section_substantive(heading, section):
-            return None
+            return None, "plan_section_not_substantive"
         sections[heading] = section
     word_counts: list[Counter[str]] = []
     for section in sections.values():
@@ -996,8 +996,13 @@ def _parse_plan_sections(description: str) -> dict[str, str] | None:
             shared_count = sum((left & right).values())
             smaller = min(sum(left.values()), sum(right.values()))
             if smaller and shared_count / smaller >= 0.70:
-                return None
-    return sections
+                return None, "plan_sections_duplicate"
+    return sections, ""
+
+
+
+def _parse_plan_sections(description: str) -> dict[str, str] | None:
+    return _plan_sections_detail(description)[0]
 
 
 def _source_is_exact_fenced_block(section: str, source: str) -> bool:
@@ -1017,9 +1022,9 @@ def _evaluate_plan_context(
     expected_updated_at: str,
     description: str,
 ) -> tuple[dict[str, str] | None, dict[str, Any] | None]:
-    sections = _parse_plan_sections(description)
+    sections, detail = _plan_sections_detail(description)
     if sections is None:
-        return None, {"error": "linear_policy_denied", "reason": "plan_template_invalid"}
+        return None, {"error": "linear_policy_denied", "reason": "plan_template_invalid", "detail": detail}
     if str((context.get("team") or {}).get("id") or "") != target_team_id:
         return None, {"error": "linear_policy_denied", "reason": "authoritative_team_mismatch"}
     if str((context.get("delegate") or {}).get("id") or "") != actor_id:
@@ -2631,6 +2636,9 @@ def register_outbound_tools(
                             direct_ledger.fail_direct_activation_grant,
                             operation_key,
                             str(result.get("reason") or result.get("error") or "create_failed"),
+                            state=(
+                                "canceled" if result.get("error") == "linear_policy_denied" else "failed"
+                            ),
                         )
                 return result
             except Exception as exc:

@@ -690,7 +690,8 @@ class RegistrationTests(unittest.TestCase):
             ).fetchone()[0]
         finally:
             inbound.close()
-        self.assertEqual(state, "failed")
+        # A policy denial created nothing: cancel, don't degrade health.
+        self.assertEqual(state, "canceled")
 
     def test_direct_grant_readback_failure_preserves_committed_create_result(self):
         extra = self.extra(mutations=True)
@@ -2520,7 +2521,7 @@ payload
         )
         self.assertEqual(
             result,
-            {"error": "linear_policy_denied", "reason": "plan_template_invalid"},
+            {"error": "linear_policy_denied", "reason": "plan_template_invalid", "detail": mock.ANY},
         )
 
         extra_heading = self.plan_description() + (
@@ -2533,7 +2534,7 @@ payload
         )
         self.assertEqual(
             result,
-            {"error": "linear_policy_denied", "reason": "plan_template_invalid"},
+            {"error": "linear_policy_denied", "reason": "plan_template_invalid", "detail": mock.ANY},
         )
 
         for suffix, operation_key in (
@@ -2556,7 +2557,7 @@ payload
             )
             self.assertEqual(
                 result,
-                {"error": "linear_policy_denied", "reason": "plan_template_invalid"},
+                {"error": "linear_policy_denied", "reason": "plan_template_invalid", "detail": mock.ANY},
             )
 
         punctuation_section = self.plan_description().replace(
@@ -2570,7 +2571,7 @@ payload
         )
         self.assertEqual(
             result,
-            {"error": "linear_policy_denied", "reason": "plan_template_invalid"},
+            {"error": "linear_policy_denied", "reason": "plan_template_invalid", "detail": mock.ANY},
         )
 
         fenced_example = self.plan_description().replace(
@@ -2745,7 +2746,7 @@ payload
         )
         self.assertEqual(
             result,
-            {"error": "linear_policy_denied", "reason": "plan_template_invalid"},
+            {"error": "linear_policy_denied", "reason": "plan_template_invalid", "detail": mock.ANY},
         )
         self.assertEqual([call[0] for call in mcp.calls], ["get_user"])
 

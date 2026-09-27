@@ -801,14 +801,15 @@ class DeliveryLedger:
         return cursor.rowcount == 1
 
     def fail_direct_activation_grant(
-        self, operation_key: str, error: str, *, now: int | None = None,
+        self, operation_key: str, error: str, *, now: int | None = None, state: str = "failed",
     ) -> bool:
         now = int(time.time()) if now is None else int(now)
+        state = "canceled" if state == "canceled" else "failed"
         with self._locked():
             cursor = self._db.execute(
-                "UPDATE direct_activation_grants SET state='failed', last_error=?, updated_at=? "
+                "UPDATE direct_activation_grants SET state=?, last_error=?, updated_at=? "
                 "WHERE operation_key=? AND state IN ('reserved', 'granted')",
-                (str(error)[:1000], now, operation_key),
+                (state, str(error)[:1000], now, operation_key),
             )
             self._db.commit()
         return cursor.rowcount == 1
@@ -888,6 +889,21 @@ class DeliveryLedger:
             "created_at": int(row[6]),
             "updated_at": int(row[7]),
         }
+
+    def expire_orphan_direct_grants(self, *, max_age: int = 3600, now: int | None = None) -> int:
+        """Cancel bound grants whose Direct event never arrived (webhook lost or superseded)."""
+        now = int(time.time()) if now is None else int(now)
+        with self._locked():
+            count = self._db.execute(
+                "UPDATE direct_activation_grants SET state='canceled', "
+                "last_error='granted_without_event_expired', updated_at=? "
+                "WHERE state='granted' AND updated_at <= ? AND NOT EXISTS ("
+                "SELECT 1 FROM direct_activation_events e "
+                "WHERE e.issue_id = direct_activation_grants.issue_id)",
+                (now, now - max_age),
+            ).rowcount
+            self._db.commit()
+        return int(count)
 
     def list_direct_activation_events(self) -> list[dict[str, Any]]:
         now = int(time.time())
