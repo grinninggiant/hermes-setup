@@ -280,6 +280,7 @@ query LinearCreatorChildTerminal($id: String!, $after: String, $stateAfter: Stri
       assignee { id app }
       project { id }
     }
+    children(first: 100) { nodes { id identifier state { type } } }
     team {
       id
       states(first: 50, after: $stateAfter, filter: { type: { in: ["completed", "canceled"] } }) {
@@ -497,6 +498,13 @@ query LinearCreatorChildTerminalStates($id: String!, $after: String) {
             "team": {"id": str(team.get("id") or "")},
             "terminal_states": list(states),
             "open_blockers": blockers,
+            # ponytail: first 100 children only; paginate if a root ever exceeds that.
+            "open_children": [
+                str(child.get("identifier") or child.get("id") or "")
+                for child in ((issue.get("children") or {}).get("nodes") or [])
+                if str((child.get("state") or {}).get("type") or "").casefold()
+                not in {"completed", "canceled"}
+            ],
         }
 
     async def get_comment_team_id(self, comment_id: str) -> str:

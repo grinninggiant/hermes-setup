@@ -558,7 +558,11 @@ def _evaluate_child_terminal_context(
                 "reason": delegated_completion_error,
             }
     parent = context.get("parent") or {}
-    own_top_level = not str(parent.get("id") or "") and not delegated_completion
+    own_top_level = (
+        not str(parent.get("id") or "")
+        and not delegated_completion
+        and action == "complete_child"
+    )
     if not str(parent.get("id") or "") and not own_top_level:
         return None, {"error": "linear_policy_denied", "reason": "child_parent_required"}
     if delegated_completion:
@@ -595,6 +599,8 @@ def _evaluate_child_terminal_context(
         return None, {"error": "linear_policy_denied", "reason": "child_session_still_open"}
     if action == "complete_child" and context.get("open_blockers"):
         return None, {"error": "linear_policy_denied", "reason": "child_has_open_blockers"}
+    if own_top_level and context.get("open_children"):
+        return None, {"error": "linear_policy_denied", "reason": "root_has_open_children"}
 
     state = context.get("state") or {}
     state_id = str(state.get("id") or "")
