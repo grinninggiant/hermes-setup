@@ -3198,6 +3198,21 @@ class DeliveryLedger:
             ).fetchall()
         return revision, {str(row[0]) for row in rows}
 
+    def rebind_acceptance_revision(
+        self, issue_id: str, actor_id: str, *, from_revision: str, to_revision: str,
+    ) -> None:
+        """Move PASS proof to the revision produced by the Done it authorized."""
+        if not (issue_id and actor_id and from_revision and to_revision):
+            return
+        with self._locked():
+            self._db.execute(
+                "UPDATE acceptance_evidence SET accepted_revision=? "
+                "WHERE issue_id=? AND actor_id=? AND accepted_revision=? AND result='PASS'",
+                (to_revision, issue_id, actor_id, from_revision),
+            )
+            self._db.commit()
+        self._secure_state_files()
+
     def persist_acceptance_batch(
         self,
         issue_id: str,
