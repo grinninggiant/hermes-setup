@@ -150,6 +150,8 @@ class AdapterTests(unittest.TestCase):
         })
         kwargs = build_upstream_kwargs(request, "test-session")
         self.assertNotIn("max_output_tokens", kwargs)
+        # Per-request timeout would override the configured client timeout.
+        self.assertNotIn("timeout", kwargs)
 
     def test_plain_text_output_is_truncated_at_requested_token_cap(self):
         request = ChatCompletionRequest.model_validate({

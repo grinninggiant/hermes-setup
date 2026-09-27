@@ -35,7 +35,7 @@ if [[ -d "$RUNTIME_ROOT/source" ]]; then
   mv "$RUNTIME_ROOT/source" "$previous"
 fi
 mv "$stage" "$RUNTIME_ROOT/source"
-rm -rf "$previous"
+# Keep .source-previous until the next deploy so the prior tree can be inspected or restored.
 
 unset PYTHONPATH
 "$HERMES_PYTHON" -m venv --clear "$RUNTIME_ROOT/adapter-venv"

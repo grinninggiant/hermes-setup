@@ -16,10 +16,6 @@ from .compat import HermesContract, load_hermes_contract
 from .config import AdapterConfig, DEFAULT_CONFIG, load_config
 from .models import ChatCompletionRequest
 
-UPSTREAM_MODEL = DEFAULT_CONFIG.upstream.model
-WORKLOAD_ROUTES = {
-    route_id: route.upstream_model for route_id, route in DEFAULT_CONFIG.models.items()
-}
 OUTPUT_ENCODING = tiktoken.get_encoding(DEFAULT_CONFIG.output.encoding)
 
 
@@ -219,7 +215,7 @@ def build_upstream_kwargs(
         "store": False,
         "reasoning": {"effort": effort, "summary": "auto"},
         "include": ["reasoning.encrypted_content"],
-        "timeout": 120.0,
+        # No per-request timeout: the client-level upstream.timeout_seconds governs.
         "extra_headers": {"session_id": request_id, "x-client-request-id": request_id},
     }
     if converted_tools:
