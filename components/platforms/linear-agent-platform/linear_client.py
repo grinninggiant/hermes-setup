@@ -1477,6 +1477,17 @@ query LinearWorkspaceQuota($after: String) {
     raise LinearAPIError("Workspace issue pagination exceeded the page limit")
 
 
+async def workspace_issue_limit_applies(client: LinearClient) -> bool:
+    """False only when Linear authoritatively reports a paid (unlimited-issue) plan."""
+    try:
+        data = await client.graphql("query LinearNativePlan { organization { subscription { type } } }")
+        subscription = (data.get("organization") or {}).get("subscription")
+        plan = subscription.get("type") if isinstance(subscription, dict) else None
+    except Exception:
+        return True  # unknown plan: keep the free-plan gate (fail closed)
+    return not (isinstance(plan, str) and plan and not plan.startswith("free"))
+
+
 async def count_workspace_issues(
     client: LinearClient, expected_team_ids: frozenset[str]
 ) -> int:

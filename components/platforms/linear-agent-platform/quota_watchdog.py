@@ -23,6 +23,7 @@ try:
         LINEAR_ISSUE_CRITICAL_THRESHOLD,
         LinearClient,
         count_workspace_issues,
+        workspace_issue_limit_applies,
     )
     from .retention import RetentionInventoryReader, classify_inventory
 except ImportError:  # Direct module loading in tests and profile-local scripts.
@@ -31,6 +32,7 @@ except ImportError:  # Direct module loading in tests and profile-local scripts.
         LINEAR_ISSUE_CRITICAL_THRESHOLD,
         LinearClient,
         count_workspace_issues,
+        workspace_issue_limit_applies,
     )
     from retention import RetentionInventoryReader, classify_inventory
 
@@ -352,8 +354,10 @@ async def _run(
     with watchdog.locked():
         try:
             await client.connect()
-            total = await count_workspace_issues(
-                client, frozenset(args.expected_team_id)
+            total = (
+                await count_workspace_issues(client, frozenset(args.expected_team_id))
+                if await workspace_issue_limit_applies(client)
+                else 0  # paid plan: no issue cap to watch
             )
             candidates = None
             if args.retention_team_id and total >= WARNING_THRESHOLD:

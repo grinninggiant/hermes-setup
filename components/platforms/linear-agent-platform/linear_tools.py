@@ -41,6 +41,7 @@ try:
         LINEAR_ISSUE_CRITICAL_THRESHOLD,
         LinearClient,
         count_workspace_issues,
+        workspace_issue_limit_applies,
     )
     from .mcp_client import (
         OFFICIAL_LINEAR_MCP_ENDPOINT,
@@ -72,6 +73,7 @@ except ImportError:  # Direct module loading in standalone tests/scripts.
         LINEAR_ISSUE_CRITICAL_THRESHOLD,
         LinearClient,
         count_workspace_issues,
+        workspace_issue_limit_applies,
     )
     from mcp_client import (
         OFFICIAL_LINEAR_MCP_ENDPOINT,
@@ -172,6 +174,13 @@ def _decode_lifecycle_noop_result(value: str | None) -> tuple[str, str] | None:
     if not separator or status not in LIFECYCLE_NOOP_STATUSES or not result_id:
         return None
     return status, result_id
+
+
+async def _quota_count(client: LinearClient, team_ids: frozenset[str]) -> int:
+    # Paid Linear plans have no issue cap: report 0 so the Free-plan gate never trips.
+    if not await workspace_issue_limit_applies(client):
+        return 0
+    return await count_workspace_issues(client, team_ids)
 
 
 def _quota_admission(current_count: int) -> dict[str, Any]:
@@ -1680,7 +1689,7 @@ async def execute_with_clients(
             }
 
         try:
-            current_count = await count_workspace_issues(graphql_client, quota_team_ids or frozenset())
+            current_count = await _quota_count(graphql_client, quota_team_ids or frozenset())
         except Exception:
             return {
                 "error": "linear_policy_denied",
@@ -1885,7 +1894,7 @@ async def execute_with_clients(
 
     if is_issue_create:
         try:
-            confirmed_count = await count_workspace_issues(graphql_client, quota_team_ids or frozenset())
+            confirmed_count = await _quota_count(graphql_client, quota_team_ids or frozenset())
             quota_unchanged = bool(
                 _quota_create_context is not None
                 and confirmed_count == _quota_create_context["observed_current_count"]
