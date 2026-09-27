@@ -962,7 +962,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.62",
+                "version": "0.8.63",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -2968,7 +2968,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         if self._ledger.get_manager_activation(entity_id):
                             self._ledger.mark_manager_activation(entity_id, "canceled")
                         bound_session = self._ledger.get_issue_session(entity_id)
-                        if bound_session:
+                        # Our own close during a live turn came from that turn's tool call;
+                        # cancelling it here drops the final reply and strands the session.
+                        if bound_session and str(bound_session) in self._active_turn_events:
+                            logger.info(
+                                "[linear] self %s during live turn; keeping session=%s",
+                                event_state_type, bound_session,
+                            )
+                        elif bound_session:
                             try:
                                 async with self._session_lock(bound_session):
                                     if self._native_goal_continuation_enabled:
