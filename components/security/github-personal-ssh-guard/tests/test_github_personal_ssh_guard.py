@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[4]
 PLUGIN_DIR = ROOT / "components" / "security" / "github-personal-ssh-guard"
 PLUGIN_PATH = PLUGIN_DIR / "__init__.py"
 INSTALLER_PATH = PLUGIN_DIR / "install_github_personal_ssh_guard.py"
-GUARD_PATH = ROOT / "scripts" / "hermes-agent-ssh-guard.sh"
+GUARD_PATH = PLUGIN_DIR / "scripts" / "hermes-agent-ssh-guard.sh"
 
 
 class FakeContext:

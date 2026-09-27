@@ -232,8 +232,7 @@ def main() -> int:
     args = parser.parse_args()
 
     source = Path(__file__).resolve().parent
-    repo_root = source.parents[2]
-    guard_source = repo_root / "scripts" / "hermes-agent-ssh-guard.sh"
+    guard_source = source / "scripts" / "hermes-agent-ssh-guard.sh"
     required = (source / "plugin.yaml", source / "__init__.py", guard_source)
     missing = [str(path) for path in required if not path.exists()]
     if missing:
