@@ -16,6 +16,7 @@ import re
 import secrets
 import stat
 import threading
+import time
 import unicodedata
 import uuid
 from pathlib import Path
@@ -2674,6 +2675,21 @@ def register_outbound_tools(
         and ledger_path_safe
         and bool(allowed_mutation_tools)
     )
+    admin_team_ids = outbound.get("admin_trash_team_ids")
+    admin_team_ids = (
+        frozenset(admin_team_ids)
+        if profile_id == "general"
+        and outbound.get("admin_trash_enabled") is True
+        and mutations_enabled
+        and callable(getattr(ctx, "register_hook", None))
+        and isinstance(admin_team_ids, list)
+        and admin_team_ids
+        and all(isinstance(value, str) and value for value in admin_team_ids)
+        and len(set(admin_team_ids)) == len(admin_team_ids)
+        and set(admin_team_ids) <= policy.allowed_team_ids
+        else frozenset()
+    )
+    admin_trash_enabled = bool(admin_team_ids)
     names = ["linear_get_issue", "linear_list_issues"]
     if mutations_enabled:
         names.extend(allowed_mutation_tools)
@@ -2681,6 +2697,8 @@ def register_outbound_tools(
     verifier_enabled = profile_id == "general" and mutations_enabled and "linear_save_issue" in allowed_mutation_tools
     if verifier_enabled:
         names.extend(("linear_verify_ops200_soul", "linear_verify_ops200_human_state"))
+    if admin_trash_enabled:
+        names.extend(("linear_admin_trash_preview", "linear_admin_trash"))
     if not _tool_names_available(names):
         return
     for name in base_names:
@@ -2820,3 +2838,470 @@ def register_outbound_tools(
             handler=verify_ops200_human_state, check_fn=check_fn, is_async=True,
             description="Verify human-owned OPS-200 state without dispatching a state mutation.", emoji="◩",
         )
+    if admin_trash_enabled:
+        preview, trash = _make_admin_trash_handlers(
+            profile_id=profile_id,
+            oauth_file=oauth_file,
+            expected_actor_id=policy.expected_actor_id,
+            expected_organization_id=policy.expected_organization_id,
+            admin_team_ids=admin_team_ids,
+            ledger_path=outbound_ledger_path,
+        )
+        ctx.register_tool(
+            name="linear_admin_trash_preview",
+            toolset="linear",
+            schema=ADMIN_TRASH_PREVIEW_SCHEMA,
+            handler=_admin_trash_registry_handler(preview),
+            check_fn=check_fn,
+            is_async=True,
+            description=ADMIN_TRASH_PREVIEW_SCHEMA["description"],
+            emoji="◩",
+        )
+        ctx.register_tool(
+            name="linear_admin_trash",
+            toolset="linear",
+            schema=ADMIN_TRASH_SCHEMA,
+            handler=_admin_trash_registry_handler(trash),
+            check_fn=check_fn,
+            is_async=True,
+            description=ADMIN_TRASH_SCHEMA["description"],
+            emoji="◩",
+        )
+        ctx.register_hook("pre_tool_call", _admin_trash_approval_hook)
+        ctx.register_hook("post_approval_response", _admin_trash_post_approval_hook)
+ADMIN_TRASH_PREVIEW_SCHEMA = {
+    "name": "linear_admin_trash_preview",
+    "description": "Read and summarize an exact Linear issue set before admin trash. Performs no writes.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "issue_refs": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50},
+            "target_team_id": {"type": "string"},
+        },
+        "required": ["issue_refs", "target_team_id"],
+        "additionalProperties": False,
+    },
+}
+ADMIN_TRASH_SCHEMA = {
+    "name": "linear_admin_trash",
+    "description": "Trash only the exact previewed Linear issue set after native human approval. This is not permanent deletion.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "issue_refs": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50},
+            "target_team_id": {"type": "string"},
+            "preview_id": {"type": "string"},
+            "preview_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        },
+        "required": ["issue_refs", "target_team_id", "preview_id", "preview_digest"],
+        "additionalProperties": False,
+    },
+}
+_ADMIN_TRASH_PREVIEW_QUERY = """
+query LinearAdminTrashPreview($id: String!) {
+  issue(id: $id) {
+    id identifier title updatedAt archivedAt trashed
+    team { id key }
+    state { type name }
+  }
+}
+"""
+_ADMIN_TRASH_MUTATION = """
+mutation LinearAdminTrash($id: String!) {
+  issueArchive(id: $id, trash: true) {
+    success
+    entity { id }
+  }
+}
+"""
+_ADMIN_TRASH_PREVIEWS: dict[str, dict[str, Any]] = {}
+_ADMIN_TRASH_PENDING: dict[str, dict[str, Any]] = {}
+_ADMIN_TRASH_APPROVALS: dict[str, dict[str, Any]] = {}
+_ADMIN_TRASH_PREVIEW_LOCK = threading.RLock()
+_ADMIN_TRASH_TTL = 600
+
+
+def _trim_admin_trash_state_locked() -> None:
+    now = time.monotonic()
+    for state in (_ADMIN_TRASH_PREVIEWS, _ADMIN_TRASH_PENDING, _ADMIN_TRASH_APPROVALS):
+        for key, value in list(state.items()):
+            if value.get("expires_at", 0) <= now:
+                state.pop(key, None)
+        while len(state) > 256:
+            state.pop(next(iter(state)))
+
+
+def _admin_trash_issue_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
+    team, state = issue.get("team") or {}, issue.get("state") or {}
+    return {
+        "id": str(issue.get("id") or ""),
+        "identifier": str(issue.get("identifier") or ""),
+        "title": str(issue.get("title") or ""),
+        "updatedAt": str(issue.get("updatedAt") or ""),
+        "archivedAt": issue.get("archivedAt"),
+        "trashed": issue.get("trashed"),
+        "team": {"id": str(team.get("id") or ""), "key": str(team.get("key") or "")},
+        "state": {"type": str(state.get("type") or ""), "name": str(state.get("name") or "")},
+    }
+
+
+def _admin_trash_digest(target_team_id: str, issues: list[dict[str, Any]]) -> str:
+    payload = json.dumps(
+        {"target_team_id": target_team_id, "issues": issues},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _admin_trash_preview(args: Any, *, session_id: str | None = None) -> dict[str, Any] | None:
+    if not isinstance(args, dict) or set(args) != {"issue_refs", "target_team_id", "preview_id", "preview_digest"}:
+        return None
+    refs = args.get("issue_refs")
+    preview_id, digest = args.get("preview_id"), args.get("preview_digest")
+    if (
+        not isinstance(refs, list) or not 1 <= len(refs) <= 50
+        or any(not isinstance(ref, str) or not ref.strip() for ref in refs)
+        or len(set(refs)) != len(refs)
+        or not isinstance(preview_id, str) or not isinstance(digest, str)
+        or len(digest) != 64
+    ):
+        return None
+    with _ADMIN_TRASH_PREVIEW_LOCK:
+        _trim_admin_trash_state_locked()
+        preview = _ADMIN_TRASH_PREVIEWS.get(preview_id)
+        if preview is None:
+            return None
+        if (
+            preview["refs"] != refs
+            or preview["target_team_id"] != args.get("target_team_id")
+            or (session_id is not None and preview["session_id"] != session_id)
+            or not hmac.compare_digest(preview["digest"], digest)
+        ):
+            return None
+        return dict(preview)
+
+
+def _admin_trash_rule_key(tool_call_id: str) -> str:
+    return f"linear_admin_trash:{tool_call_id}"
+
+
+def _admin_trash_approval_hook(
+    *, tool_name: str = "", args: Any = None, tool_call_id: str = "", session_id: str = "", **_: Any
+) -> dict[str, str] | None:
+    if tool_name != "linear_admin_trash":
+        return None
+    blocked = {"action": "block", "message": "Linear admin trash requires a fresh preview and native human approval."}
+    call_id = str(tool_call_id or "")
+    if not call_id:
+        return blocked
+    try:
+        from tools import approval
+        from tools import approval_context
+        if (
+            approval._yolo_active()
+            or approval_context._get_approval_mode() == "off"
+            or approval_context._is_cron_approval_context()
+            or approval_context._is_single_query_approval_context()
+            or not any(approval._presence()[1:])
+        ):
+            return blocked
+    except Exception:
+        return blocked
+    preview = _admin_trash_preview(args, session_id=str(session_id or ""))
+    if preview is None:
+        return blocked
+    with _ADMIN_TRASH_PREVIEW_LOCK:
+        _trim_admin_trash_state_locked()
+        if call_id in _ADMIN_TRASH_PENDING or call_id in _ADMIN_TRASH_APPROVALS:
+            return blocked
+        _ADMIN_TRASH_PENDING[call_id] = {
+            "rule_key": _admin_trash_rule_key(call_id),
+            "preview_id": preview["preview_id"],
+            "preview_digest": preview["digest"],
+            "session_id": str(session_id or ""),
+            "expires_at": time.monotonic() + _ADMIN_TRASH_TTL,
+        }
+    identifiers = ", ".join(issue["identifier"] for issue in preview["issues"])
+    return {
+        "action": "approve",
+        "rule_key": _admin_trash_rule_key(call_id),
+        "message": (
+            f"Trash the exact Linear issues {identifiers} in team {preview['target_team_id']}? "
+            f"Preview digest: {preview['digest']}. This uses issueArchive(trash: true), "
+            "is not permanent deletion, and will be read back after the operation."
+        ),
+    }
+
+
+def _admin_trash_post_approval_hook(
+    *, pattern_key: str = "", choice: str = "", tool_call_id: str = "", session_id: str = "", **_: Any
+) -> None:
+    call_id = str(tool_call_id or "")
+    if not call_id:
+        return
+    with _ADMIN_TRASH_PREVIEW_LOCK:
+        _trim_admin_trash_state_locked()
+        pending = _ADMIN_TRASH_PENDING.pop(call_id, None)
+        if (
+            pending is not None
+            and pattern_key == f"plugin_rule:{pending['rule_key']}"
+            and choice in {"once", "session", "always"}
+            and pending["session_id"] == str(session_id or "")
+        ):
+            _ADMIN_TRASH_APPROVALS[call_id] = {**pending, "expires_at": time.monotonic() + _ADMIN_TRASH_TTL}
+
+
+def _consume_admin_trash_approval(args: Any, *, session_id: str) -> dict[str, Any] | None:
+    try:
+        from tools.approval_context import _approval_tool_call_id
+        call_id = str(_approval_tool_call_id.get() or "")
+    except Exception:
+        return None
+    if not call_id:
+        return None
+    with _ADMIN_TRASH_PREVIEW_LOCK:
+        _trim_admin_trash_state_locked()
+        grant = _ADMIN_TRASH_APPROVALS.pop(call_id, None)
+        _ADMIN_TRASH_PENDING.pop(call_id, None)
+        if grant is None or grant["session_id"] != session_id:
+            return None
+        preview = _admin_trash_preview(args, session_id=session_id)
+        if preview is None or preview["preview_id"] != grant["preview_id"] or preview["digest"] != grant["preview_digest"]:
+            return None
+        _ADMIN_TRASH_PREVIEWS.pop(preview["preview_id"], None)
+        return preview
+
+
+def _admin_trash_registry_handler(handler: Callable[..., Awaitable[dict[str, Any]]]) -> Callable[..., Awaitable[str]]:
+    async def registry_handler(args: dict[str, Any], **handler_kwargs) -> str:
+        return json.dumps(await handler(args, **handler_kwargs), ensure_ascii=False, sort_keys=True)
+
+    return registry_handler
+
+
+def _admin_trash_failure_report(
+    reason: str,
+    trashed_issues: list[dict[str, Any]],
+    *,
+    default_error: str,
+    failed_issue_id: str | None = None,
+    changed_issue_id: str | None = None,
+    uncertain_issue_id: str | None = None,
+    not_attempted_issue_ids: list[str],
+) -> tuple[dict[str, Any], str]:
+    details = {
+        "reason": reason,
+        "trashed_issue_ids": [issue["id"] for issue in trashed_issues],
+        "failed_issue_id": failed_issue_id,
+        "changed_issue_id": changed_issue_id,
+        "uncertain_issue_id": uncertain_issue_id,
+        "not_attempted_issue_ids": not_attempted_issue_ids,
+    }
+    if trashed_issues:
+        error, status = "linear_admin_trash_partial", "partial"
+    elif uncertain_issue_id:
+        error, status = "linear_admin_trash_outcome_unknown", "outcome_unknown"
+    else:
+        error, status = default_error, "failed"
+    return (
+        {
+            "error": error,
+            "status": status,
+            **details,
+            "trashed_issues": trashed_issues,
+        },
+        json.dumps(details, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _make_admin_trash_handlers(
+    *, profile_id: str, oauth_file: str, expected_actor_id: str, expected_organization_id: str,
+    admin_team_ids: set[str] | frozenset[str], ledger_path: str,
+    client_factory: Callable[..., LinearClient] | None = None,
+) -> tuple[Callable[..., Awaitable[dict[str, Any]]], Callable[..., Awaitable[dict[str, Any]]]]:
+    make_client = client_factory or (lambda **_kwargs: LinearClient(oauth_file=oauth_file))
+
+    async def connected_client() -> LinearClient | None:
+        client = make_client(oauth_file=oauth_file)
+        try:
+            await client.connect()
+        except Exception:
+            await client.close()
+            raise
+        if (
+            not hmac.compare_digest(str(client.actor_id or ""), expected_actor_id)
+            or not hmac.compare_digest(str(client.organization_id or ""), expected_organization_id)
+        ):
+            await client.close()
+            return None
+        return client
+
+    async def preview_handler(args: dict[str, Any], **handler_kwargs) -> dict[str, Any]:
+        if not isinstance(args, dict):
+            return {"error": "linear_admin_trash_denied"}
+        refs, team_id = args.get("issue_refs"), str(args.get("target_team_id") or "")
+        if (
+            profile_id != "general"
+            or set(args) != {"issue_refs", "target_team_id"}
+            or not isinstance(refs, list) or not 1 <= len(refs) <= 50
+            or any(not isinstance(ref, str) or not ref.strip() for ref in refs)
+            or len(set(refs)) != len(refs) or team_id not in admin_team_ids
+        ):
+            return {"error": "linear_admin_trash_denied"}
+        client = None
+        try:
+            client = await connected_client()
+            if client is None:
+                return {"error": "linear_admin_trash_denied"}
+            issues = []
+            for ref in refs:
+                issue = (await client.graphql(_ADMIN_TRASH_PREVIEW_QUERY, {"id": ref})).get("issue") or {}
+                snapshot = _admin_trash_issue_snapshot(issue)
+                if (
+                    not snapshot["id"] or not snapshot["identifier"] or not snapshot["updatedAt"]
+                    or snapshot["trashed"] is not False or snapshot["team"]["id"] != team_id
+                    or ref not in {snapshot["id"], snapshot["identifier"]}
+                ):
+                    return {"error": "linear_admin_trash_denied"}
+                issues.append(snapshot)
+            digest = _admin_trash_digest(team_id, issues)
+            preview_id = uuid.uuid4().hex
+            session_id = str(handler_kwargs.get("session_id") or "")
+            with _ADMIN_TRASH_PREVIEW_LOCK:
+                _trim_admin_trash_state_locked()
+                _ADMIN_TRASH_PREVIEWS[preview_id] = {
+                    "preview_id": preview_id, "digest": digest, "refs": list(refs),
+                    "target_team_id": team_id, "session_id": session_id, "issues": issues,
+                    "expires_at": time.monotonic() + _ADMIN_TRASH_TTL,
+                }
+            return {
+                "mode": "preview-only", "target_team_id": team_id, "preview_id": preview_id,
+                "preview_digest": digest, "issues": issues,
+            }
+        except Exception as exc:
+            return {"error": "linear_admin_trash_failed", "reason": type(exc).__name__}
+        finally:
+            if client is not None:
+                await client.close()
+
+    async def trash_handler(args: dict[str, Any], **handler_kwargs) -> dict[str, Any]:
+        session_id = str(handler_kwargs.get("session_id") or "")
+        preview = _consume_admin_trash_approval(args, session_id=session_id)
+        if preview is None or profile_id != "general" or preview["target_team_id"] not in admin_team_ids:
+            return {"error": "linear_admin_trash_denied"}
+        client = None
+        ledger = None
+        operation_key = f"linear-admin-trash:{preview['preview_id']}"
+        reserved = False
+        mutation_dispatched = False
+        current_index: int | None = None
+        issue_ids = [issue["id"] for issue in preview["issues"]]
+        trashed_issues: list[dict[str, Any]] = []
+        try:
+            client = await connected_client()
+            if client is None:
+                return {"error": "linear_admin_trash_denied"}
+            ledger = await asyncio.to_thread(OutboundLedger, ledger_path)
+            payload = {
+                "target_team_id": preview["target_team_id"],
+                "preview_digest": preview["digest"],
+                "issue_ids": [issue["id"] for issue in preview["issues"]],
+            }
+            reservation = await asyncio.to_thread(
+                ledger.reserve,
+                operation_key=operation_key,
+                tool_name="linear_admin_trash",
+                payload=payload,
+                profile_id=profile_id,
+                actor_id=str(client.actor_id or ""),
+                team_id=preview["target_team_id"],
+            )
+            if not reservation.dispatch:
+                return {"error": "linear_admin_trash_denied", "reason": "operation_already_reserved"}
+            reserved = True
+
+            for current_index, snapshot in enumerate(preview["issues"]):
+                # ponytail: Linear has no compare-and-swap trash mutation; re-read each issue immediately before trashing it.
+                current = _admin_trash_issue_snapshot(
+                    (await client.graphql(_ADMIN_TRASH_PREVIEW_QUERY, {"id": snapshot["id"]})).get("issue") or {}
+                )
+                if current != snapshot:
+                    failure, error_code = _admin_trash_failure_report(
+                        "snapshot_changed",
+                        trashed_issues,
+                        default_error="linear_admin_trash_denied",
+                        changed_issue_id=snapshot["id"],
+                        not_attempted_issue_ids=issue_ids[current_index:],
+                    )
+                    await asyncio.to_thread(ledger.mark_failed, operation_key, error_code=error_code)
+                    reserved = False
+                    return failure
+                mutation_dispatched = True
+                response = await client.graphql(_ADMIN_TRASH_MUTATION, {"id": snapshot["id"]})
+                result = response.get("issueArchive") or {}
+                if result.get("success") is not True:
+                    mutation_dispatched = False
+                    failure, error_code = _admin_trash_failure_report(
+                        "trash_rejected",
+                        trashed_issues,
+                        default_error="linear_admin_trash_failed",
+                        failed_issue_id=snapshot["id"],
+                        not_attempted_issue_ids=issue_ids[current_index + 1:],
+                    )
+                    await asyncio.to_thread(ledger.mark_failed, operation_key, error_code=error_code)
+                    reserved = False
+                    return failure
+                actual = _admin_trash_issue_snapshot(
+                    (await client.graphql(_ADMIN_TRASH_PREVIEW_QUERY, {"id": snapshot["id"]})).get("issue") or {}
+                )
+                if actual["id"] != snapshot["id"] or actual["trashed"] is not True:
+                    failure, error_code = _admin_trash_failure_report(
+                        "trash_readback_unconfirmed",
+                        trashed_issues,
+                        default_error="linear_admin_trash_failed",
+                        uncertain_issue_id=snapshot["id"],
+                        not_attempted_issue_ids=issue_ids[current_index + 1:],
+                    )
+                    await asyncio.to_thread(ledger.mark_unknown, operation_key, error_code=error_code)
+                    reserved = False
+                    return failure
+                trashed_issues.append(actual)
+                mutation_dispatched = False
+            await asyncio.to_thread(ledger.mark_success, operation_key, result_id=preview["preview_id"])
+            reserved = False
+            return {"status": "success", "issues": trashed_issues, "preview_digest": preview["digest"]}
+        except Exception as exc:
+            if ledger is not None and reserved:
+                try:
+                    if mutation_dispatched and current_index is not None:
+                        failure, error_code = _admin_trash_failure_report(
+                            type(exc).__name__,
+                            trashed_issues,
+                            default_error="linear_admin_trash_failed",
+                            uncertain_issue_id=issue_ids[current_index],
+                            not_attempted_issue_ids=issue_ids[current_index + 1:],
+                        )
+                        await asyncio.to_thread(ledger.mark_unknown, operation_key, error_code=error_code)
+                    else:
+                        not_attempted = issue_ids[current_index:] if current_index is not None else []
+                        failure, error_code = _admin_trash_failure_report(
+                            type(exc).__name__,
+                            trashed_issues,
+                            default_error="linear_admin_trash_failed",
+                            not_attempted_issue_ids=not_attempted,
+                        )
+                        await asyncio.to_thread(ledger.mark_failed, operation_key, error_code=error_code)
+                    reserved = False
+                    return failure
+                except Exception:
+                    pass
+            return {"error": "linear_admin_trash_failed", "reason": type(exc).__name__}
+        finally:
+            if ledger is not None:
+                await asyncio.to_thread(ledger.close)
+            if client is not None:
+                await client.close()
+
+    return preview_handler, trash_handler
