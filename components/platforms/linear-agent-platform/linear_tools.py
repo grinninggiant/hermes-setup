@@ -2131,10 +2131,10 @@ def _load_linear_extra() -> dict[str, Any]:
         config = load_config() or {}
     except Exception:
         return {}
-    return (
-        (((config.get("gateway") or {}).get("platforms") or {}).get("linear") or {}).get("extra")
-        or {}
-    )
+    from gateway.config_loader import merge_platform_sections
+
+    platforms = merge_platform_sections(config, config.get("gateway"), {})
+    return (platforms.get("linear") or {}).get("extra") or {}
 
 
 def _direct_instruction_context(
