@@ -28,5 +28,7 @@ exec /usr/bin/env -i \
       exit 66
     }
 
-    exec "$bootstrap_python" "$bootstrap_script" "$profile" --command serve
+    exec "$bootstrap_python" "$bootstrap_script" "$profile" \
+      --hermes-executable "/Users/mutlupolatcan/.local/bin/hermes" \
+      --command serve
   ' hermes-serve-clean

@@ -8,6 +8,9 @@ from unittest import mock
 COMPONENT = Path(__file__).resolve().parents[1]
 SCRIPT = COMPONENT / "scripts" / "install_onepassword_hermes_candidate.sh"
 OFFICIAL_PYTHON = "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13"
+GATEWAY_LAUNCHER = COMPONENT / "scripts" / "onepassword_hermes_gateway_launcher.sh"
+OFFICIAL_HERMES = "/Users/mutlupolatcan/.hermes/hermes-agent/venv/bin/hermes"
+PROFILES = ("general", "assistant", "researcher", "coder", "writer", "producer", "marketing", "health", "finance")
 SECURITY_LOOKUP = (
     'token=$(/usr/bin/security find-generic-password -s "$service" -a "$profile" -w)'
 )
@@ -56,12 +59,9 @@ class CandidateInstallerContractTests(unittest.TestCase):
             (COMPONENT / "scripts" / "onepassword_hermes_gateway_sdk_bootstrap.py").is_file()
         )
 
-    def test_gateway_wrapper_selects_candidate_only_for_general(self) -> None:
-        source_path = COMPONENT.parents[2] / "scripts" / "hermes-gateway-keychain.sh"
-        source = source_path.read_text(encoding="utf-8")
-        self.assertIn('hermes_executable="/Users/mutlupolatcan/.local/bin/hermes"', source)
-        self.assertIn('if [[ "$profile" == "general" ]]; then', source)
-
+    def test_gateway_wrapper_uses_official_install_for_every_profile(self) -> None:
+        source = GATEWAY_LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn(f'hermes_executable="{OFFICIAL_HERMES}"', source)
         self.assertNotIn("$2", source)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,22 +84,7 @@ class CandidateInstallerContractTests(unittest.TestCase):
             harness.write_text(harness_source, encoding="utf-8")
             harness.chmod(0o700)
 
-            for profile, expected in (
-                [("general", None)]
-                + [
-                    (profile, "/Users/mutlupolatcan/.local/bin/hermes")
-                    for profile in (
-                        "assistant",
-                        "researcher",
-                        "coder",
-                        "writer",
-                        "producer",
-                        "marketing",
-                        "health",
-                        "finance",
-                    )
-                ]
-            ):
+            for profile in PROFILES:
                 result = subprocess.run(
                     ["/bin/zsh", str(harness), profile],
                     check=False,
@@ -108,23 +93,18 @@ class CandidateInstallerContractTests(unittest.TestCase):
                     env={"CAPTURE": str(capture)},
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                actual = capture.read_text(encoding="utf-8").splitlines()
-                self.assertEqual(len(actual), 4)
-                if profile == "general":
-                    self.assertRegex(actual[3], r"^/Users/mutlupolatcan/\.hermes/runtime/releases/hermes-agent-[0-9a-f]{40}/venv/bin/hermes$")
-                    expected = actual[3]
                 self.assertEqual(
-                    actual,
+                    capture.read_text(encoding="utf-8").splitlines(),
                     [
                         str(bootstrap_root / "hermes_gateway_sdk_bootstrap.py"),
                         profile,
                         "--hermes-executable",
-                        expected,
+                        OFFICIAL_HERMES,
                     ],
                 )
 
     def test_send_wrapper_matches_general_gateway_and_preserves_other_profiles(self) -> None:
-        gateway_source = (COMPONENT.parents[2] / "scripts" / "hermes-gateway-keychain.sh").read_text()
+        gateway_source = GATEWAY_LAUNCHER.read_text()
         send_source = (COMPONENT / "scripts" / "onepassword_hermes_send_launcher.sh").read_text()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -153,8 +133,7 @@ class CandidateInstallerContractTests(unittest.TestCase):
                     self.assertEqual(capture.read_text().splitlines(), [str(bootstrap), profile, *(runtime_args if profile == "general" else []), "--command", "send", "--", *args])
 
     def test_harness_source_drift_fails_before_subprocess(self) -> None:
-        source_path = COMPONENT.parents[2] / "scripts" / "hermes-gateway-keychain.sh"
-        source = source_path.read_text(encoding="utf-8")
+        source = GATEWAY_LAUNCHER.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as tmp:
             bootstrap_root = Path(tmp) / "bootstrap"
             drifted_sources = (

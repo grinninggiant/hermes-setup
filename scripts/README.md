@@ -25,8 +25,6 @@ Deployed column: `=` byte-identical to source, `-` not deployed.
 | `config-snapshot.sh` | fleet utility | `ai.hermes.config-snapshot` | `=` | keep |
 | `notify-online.sh` | fleet utility | `ai.hermes.fleet-online` | `=` | keep |
 | `watchdog.sh` | fleet utility | `ai.hermes.watchdog` | `=` | keep |
-| `hermes-gateway-keychain.sh` | runtime-compat launcher | all nine `ai.hermes.gateway-*`, `gateway_restartctl.py` | `=` | keep here until the open restart-continuation branch lands; then fold into `secrets/1password-hermes-bootstrap` |
-| `hermes-send-keychain.sh` | runtime-compat launcher | watchdog, notify-online, backup scripts | `=` | same as above; the component's `onepassword_hermes_send_launcher.sh` is its pinned candidate twin |
 | `manage_hermes_agent_patches.py` | upgrade tool (manual) | `patches/hermes-agent/*.patch` lifecycle, own test | - | candidate: manual-only, keep while core patches exist |
 | `wire-tinyfish.sh` | installer (manual) | docs/08, docs/10 | - | candidate: manual-only |
 | `cleanup_honcho_workspaces.py` | recovery-only, destructive | own test only | - | recovery-only; never scheduled |
@@ -43,6 +41,10 @@ Deployed column: `=` byte-identical to source, `-` not deployed.
 | `scripts/derya-gh-keychain.sh` | same component | `~/.hermes/scripts/derya-gh` |
 | `scripts/derya-gh-credential.sh` | same component | `~/.hermes/scripts/derya-gh-credential` |
 | `tests/test_github_app_token_broker.py` | same component `tests/` | - |
+| `scripts/hermes-gateway-keychain.sh` | `components/secrets/1password-hermes-bootstrap/scripts/onepassword_hermes_gateway_launcher.sh` | `~/.hermes/scripts/hermes-gateway-keychain.sh` |
+| `scripts/hermes-send-keychain.sh` | merged into the component's existing `onepassword_hermes_send_launcher.sh` (stale pin replaced by the deployed copy) | `~/.hermes/scripts/hermes-send-keychain.sh` |
+
+The component's four launchers (gateway, send, serve, desktop) are byte-identical to their deployed copies.
 
 ### Retired (OPS-204)
 

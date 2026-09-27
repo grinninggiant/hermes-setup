@@ -44,6 +44,8 @@ The production launcher is:
 ~/.hermes/scripts/hermes-gateway-keychain.sh
 ```
 
+Its canonical source is `scripts/onepassword_hermes_gateway_launcher.sh`; install it with `/usr/bin/install -m 555` and require a byte-for-byte `cmp` match.
+
 The canonical fleet restart helper is:
 
 ```text
