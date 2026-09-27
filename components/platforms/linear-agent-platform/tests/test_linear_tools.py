@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -586,7 +587,10 @@ class RegistrationTests(unittest.TestCase):
         graphql = mock.MagicMock(actor_id="actor-1", organization_id="org-1")
         graphql.connect = mock.AsyncMock()
         graphql.close = mock.AsyncMock()
+        # MCP create returns the identifier; webhooks carry the UUID (OPS-230 root cause).
         graphql.get_issue_closure_context = mock.AsyncMock(return_value={
+            "id": "uuid-300",
+            "identifier": "OPS-300",
             "title": "Direct task",
             "team": {"id": "ops-1"},
             "creator": {"id": "actor-1"},
@@ -625,7 +629,8 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(result["result_id"], "OPS-300")
         inbound = DeliveryLedger(extra["database_path"], startup_recovery=False)
         try:
-            grant = inbound.get_direct_activation_grant("OPS-300")
+            self.assertIsNone(inbound.get_direct_activation_grant("OPS-300"))
+            grant = inbound.get_direct_activation_grant("uuid-300")
         finally:
             inbound.close()
         self.assertIsNotNone(grant)
@@ -637,7 +642,7 @@ class RegistrationTests(unittest.TestCase):
             grant["issue_fingerprint"],
             DeliveryLedger.direct_issue_fingerprint("ops-1", "Direct task"),
         )
-        callback.assert_called_once_with("general", "OPS-300")
+        callback.assert_called_once_with("general", "uuid-300")
 
     def test_failed_direct_create_closes_reserved_provenance(self):
         extra = self.extra(mutations=True)
@@ -762,6 +767,17 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(context["source_message_id"], "message-1")
         self.assertIsNone(mismatch)
 
+    def test_closure_context_resolves_identifier_returned_by_mcp_create(self):
+        from linear_client import LinearClient
+
+        client = LinearClient.__new__(LinearClient)
+        issue = {"id": "uuid-230", "identifier": "OPS-230", "title": "t", "team": {}}
+        client.graphql = mock.AsyncMock(return_value={"issue": issue})
+        self.assertEqual(asyncio.run(client.get_issue_closure_context("OPS-230"))["id"], "uuid-230")
+        self.assertEqual(asyncio.run(client.get_issue_closure_context("uuid-230"))["id"], "uuid-230")
+        with self.assertRaises(Exception):
+            asyncio.run(client.get_issue_closure_context("OPS-999"))
+
     def test_direct_instruction_context_uses_active_profile_when_source_profile_is_unset(self):
         values = {
             "HERMES_SESSION_PLATFORM": "telegram",
@@ -847,6 +863,66 @@ class RegistrationTests(unittest.TestCase):
                 {"session_id": "session-1", "activation_mode": "direct"},
             )
         )
+
+    def test_direct_instruction_context_splits_outside_and_inside_linear(self):
+        local = {
+            "HERMES_SESSION_PLATFORM": "",
+            "HERMES_SESSION_SOURCE": "desktop",
+            "HERMES_SESSION_ID": "session-1",
+            "HERMES_SESSION_PROFILE": "general",
+        }
+        kwargs = {"session_id": "session-1", "task_id": "task-1"}
+        cases = {
+            "desktop": ({}, "desktop"),
+            "tui": ({"HERMES_SESSION_SOURCE": "tui"}, "tui"),
+            "linear_agent_session": ({"HERMES_SESSION_PLATFORM": "linear"}, None),
+            "webhook": ({"HERMES_SESSION_PLATFORM": "webhook"}, None),
+            "api_server": ({"HERMES_SESSION_SOURCE": "api_server"}, None),
+            "cron": ({"HERMES_CRON_SESSION": "cron-1"}, None),
+            "remote_cloud_desktop": (
+                {"HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY": "cloud-ticket-ws"}, None,
+            ),
+            "session_mismatch": ({"HERMES_SESSION_ID": "other"}, None),
+        }
+        for label, (overrides, expected) in cases.items():
+            with self.subTest(label=label):
+                values = {**local, **overrides}
+                with mock.patch(
+                    "gateway.session_context.get_session_env",
+                    side_effect=lambda name, default="": values.get(name, default),
+                ):
+                    context = _direct_instruction_context("general", kwargs)
+                self.assertEqual(context and context["source_platform"], expected)
+                if context:
+                    self.assertEqual(context["source_message_id"], "task-1")
+        for label, patcher in {
+            "kanban": mock.patch.dict(os.environ, {"HERMES_KANBAN_TASK": "t-1"}),
+            "subagent": mock.patch("linear_tools._delegated_child_context", return_value=True),
+        }.items():
+            with self.subTest(label=label), patcher, mock.patch(
+                "gateway.session_context.get_session_env",
+                side_effect=lambda name, default="": local.get(name, default),
+            ):
+                self.assertIsNone(_direct_instruction_context("general", kwargs))
+
+    def test_pre_dispatch_denial_does_not_poison_direct_retry(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger = DeliveryLedger(str(Path(td) / "retry.sqlite3"), startup_recovery=False)
+            try:
+                grant = dict(
+                    operation_key="op-1", source_platform="telegram", source_user_id="u",
+                    source_message_id="m1", source_session_id="s", source_profile="general",
+                    actor_id="actor-1", team_id="ops-1", issue_fingerprint="fp",
+                )
+                self.assertTrue(ledger.reserve_direct_activation_grant(**grant))
+                ledger.fail_direct_activation_grant("op-1", "immediate_retention_dry_run_unavailable")
+                self.assertTrue(ledger.reserve_direct_activation_grant(**{**grant, "source_message_id": "m2"}))
+                self.assertTrue(ledger.bind_direct_activation_grant("op-1", "uuid-1"))
+                # A bound grant is never re-armed by a replay.
+                self.assertFalse(ledger.reserve_direct_activation_grant(**grant))
+                self.assertEqual(ledger.get_direct_activation_grant("uuid-1")["state"], "granted")
+            finally:
+                ledger.close()
 
 
 class FakeGraphQL:

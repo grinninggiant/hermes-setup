@@ -704,6 +704,13 @@ class DeliveryLedger:
             )
             self._db.commit()
 
+    # Instructions from outside Linear that may grant Direct activation, keyed by source.
+    DIRECT_POLICY_RESULTS = {
+        "telegram": "gateway_authorized_direct_dm",
+        "desktop": "local_owner_session",
+        "tui": "local_owner_session",
+    }
+
     @staticmethod
     def direct_issue_fingerprint(team_id: str, title: str) -> str:
         if not team_id or not title:
@@ -735,12 +742,24 @@ class DeliveryLedger:
             return False
         now = int(time.time()) if now is None else int(now)
         with self._locked():
+            # A pre-dispatch denial (quota, retention) fails the grant without a vendor
+            # create; an eligible retry of the same operation key must re-arm it (OPS-239).
             cursor = self._db.execute(
-                "INSERT OR IGNORE INTO direct_activation_grants("
+                "INSERT INTO direct_activation_grants("
                 "operation_key, source_platform, source_user_id, source_message_id, "
                 "source_session_id, source_profile, policy_result, actor_id, team_id, "
                 "issue_fingerprint, state, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?) "
+                "ON CONFLICT(operation_key) DO UPDATE SET "
+                "source_platform=excluded.source_platform, source_user_id=excluded.source_user_id, "
+                "source_message_id=excluded.source_message_id, "
+                "source_session_id=excluded.source_session_id, "
+                "source_profile=excluded.source_profile, policy_result=excluded.policy_result, "
+                "actor_id=excluded.actor_id, team_id=excluded.team_id, "
+                "issue_fingerprint=excluded.issue_fingerprint, state='reserved', "
+                "last_error=NULL, updated_at=excluded.updated_at "
+                "WHERE direct_activation_grants.state='failed' "
+                "AND direct_activation_grants.issue_id IS NULL",
                 (*values, now, now),
             )
             self._db.commit()
