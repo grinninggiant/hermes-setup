@@ -1112,13 +1112,6 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(current_count, Exception)
             else current_count,
         )
-        retention = mock.AsyncMock(return_value={
-            "mode": "read-only-dry-run",
-            "inventory_count": current_count if isinstance(current_count, int) else 0,
-            "candidate_count": 0,
-            "protected_count": current_count if isinstance(current_count, int) else 0,
-            "manifest_sha256": "a" * 64,
-        })
         with mock.patch("linear_tools.count_workspace_issues", new=counter):
             result = await execute_with_clients(
                 profile_id=profile_id,
@@ -1133,7 +1126,6 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 policy=self.policy,
                 ledger=ledger or self.ledger,
                 quota_admission_lock=self.quota_admission_lock,
-                retention_dry_run=retention,
                 graphql_client=FakeGraphQL(),
                 mcp_client=mcp,
             )
@@ -1319,49 +1311,11 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                         },
                     )
                     self.assertIs(result["immediate_retention_required"], True)
-                    self.assertEqual(result["retention_dry_run"]["candidate_count"], 0)
+                    self.assertNotIn("retention_dry_run", result)
                 else:
                     self.assertNotIn("quota_admission", result)
                     self.assertNotIn("immediate_retention_required", result)
 
-
-    async def test_critical_create_fails_closed_when_immediate_retention_dry_run_fails(self):
-        counter = mock.AsyncMock(return_value=239)
-        retention = mock.AsyncMock(side_effect=LinearAPIError("retention inventory unavailable"))
-        mcp = FakeMCP()
-        with mock.patch("linear_tools.count_workspace_issues", new=counter), \
-                self.assertLogs("linear_tools", level="WARNING") as logs:
-            result = await execute_with_clients(
-                profile_id="general",
-                vendor_tool="save_issue",
-                arguments={
-                    "operation_key": "critical-retention-failed",
-                    "target_team_id": "ops-1",
-                    "team": "ops-1",
-                    "title": "Task",
-                },
-                mutation=True,
-                policy=self.policy,
-                ledger=self.ledger,
-                quota_admission_lock=self.quota_admission_lock,
-                retention_dry_run=retention,
-                graphql_client=FakeGraphQL(),
-                mcp_client=mcp,
-            )
-        self.assertEqual(result, {
-            "error": "linear_policy_denied",
-            "reason": "immediate_retention_dry_run_unavailable",
-            "quota_admission": {
-                "severity": "critical",
-                "current_count": 239,
-                "projected_count": 240,
-                "capacity": 250,
-                "buffer_after": 10,
-            },
-        })
-        self.assertIn("LinearAPIError: retention inventory unavailable", logs.output[0])
-        retention.assert_awaited_once()
-        self.assertEqual([call[0] for call in mcp.calls], ["get_user"])
 
     async def test_create_quota_capacity_denials_precede_reservation_and_dispatch(self):
         for current in (249, 250):
@@ -1382,13 +1336,6 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                             "projected_count": current + 1,
                             "capacity": 250,
                             "buffer_after": 250 - (current + 1),
-                        },
-                        "retention_dry_run": {
-                            "mode": "read-only-dry-run",
-                            "inventory_count": current,
-                            "candidate_count": 0,
-                            "protected_count": current,
-                            "manifest_sha256": "a" * 64,
                         },
                     },
                 )
@@ -1453,7 +1400,6 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 policy=self.policy,
                 ledger=self.ledger,
                 quota_admission_lock=self.quota_admission_lock,
-                retention_dry_run=mock.AsyncMock(return_value={"candidate_count": 0}),
                 graphql_client=FakeGraphQL(),
                 mcp_client=mcp,
             )
@@ -1480,7 +1426,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(replay["replayed"], True)
         self.assertEqual(replay["result_id"], first["result_id"])
         self.assertEqual(replay["quota_admission"], first["quota_admission"])
-        self.assertEqual(replay["retention_dry_run"], first["retention_dry_run"])
+        self.assertNotIn("retention_dry_run", replay)
         self.assertIs(replay["immediate_retention_required"], True)
         replay_counter.assert_not_awaited()
         self.assertEqual([call[0] for call in first_mcp.calls], ["get_user", "save_issue"])
@@ -1551,7 +1497,6 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 policy=self.policy,
                 ledger=ledger,
                 quota_admission_lock=self.quota_admission_lock,
-                retention_dry_run=mock.AsyncMock(return_value={"candidate_count": 0}),
                 graphql_client=FakeGraphQL(),
                 mcp_client=CountingMCP(),
             )

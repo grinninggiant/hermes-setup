@@ -456,6 +456,25 @@ class CliTests(unittest.TestCase):
         code, stdout, stderr = self.invoke()
         self.assertEqual((code, stdout, stderr), (0, "", ""))
 
+    def test_retention_candidates_are_reported_only_at_warning_or_above(self) -> None:
+        reader = mock.MagicMock()
+        reader.return_value.read_team = mock.AsyncMock(return_value=[])
+        found = mock.MagicMock(candidates=(mock.MagicMock(identifier="OPS-7"),))
+        with mock.patch("quota_watchdog.RetentionInventoryReader", reader), \
+                mock.patch("quota_watchdog.classify_inventory", return_value=found) as classify:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = main(
+                    self.args() + ["--retention-team-id", "team-ops"],
+                    client_factory=self.client_factory,
+                    clock=lambda: NOW,
+                )
+        self.assertEqual((code, stderr.getvalue()), (0, ""))
+        self.assertIn("1 temizlik adayı", stdout.getvalue())
+        self.assertIn("OPS-7", stdout.getvalue())
+        self.assertEqual(classify.call_args.kwargs["minimum_age_days"], 30)
+        self.assertEqual(classify.call_args.kwargs["successor_attestations"], {})
+
     def test_failed_alert_emission_does_not_acknowledge_or_write_state(self) -> None:
         class BrokenStdout(io.StringIO):
             def write(self, value: str) -> int:
