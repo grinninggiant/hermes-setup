@@ -69,6 +69,20 @@ done
 rm -rf "$DEST"
 mv "$PART" "$DEST"
 
+# Host keeps only the newest artifact of each kind; anything older is superseded by the
+# verified copy just committed above. Reached only after success, so a missing disk deletes nothing.
+for f in "$HERMES"/backups/honcho/honcho-*.sql.gz; do
+  if [ "$f" -ot "$DUMP" ]; then rm -f "$f" "$f.sha256" "$f.meta.json"; fi
+done
+for p in $PROFILES; do
+  SNAP="$HERMES/profiles/$p/state-snapshots/$(ls "$DEST/profiles/$p")"
+  [ -d "$SNAP" ] || continue
+  for d in "$HERMES/profiles/$p/state-snapshots"/*/; do
+    d="${d%/}"
+    if [ "$d" -ot "$SNAP" ]; then rm -rf "$d"; fi
+  done
+done
+
 # Retention: last 7 daily, last 4 Sundays, last 3 month-firsts.
 python3 - "$MNT/sets" <<'PY'
 from datetime import datetime
