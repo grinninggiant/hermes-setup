@@ -299,6 +299,34 @@ Prose example: - [ ] Not a task item
 
 
 class AcceptanceEvidenceLedgerTests(unittest.TestCase):
+    def test_vendor_clock_ahead_of_local_is_tolerated_but_far_future_is_not(self):
+        from datetime import timedelta
+
+        def iso(delta):
+            return (datetime.now(timezone.utc) + delta).isoformat().replace("+00:00", "Z")
+
+        source = iso(timedelta(seconds=-30))
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            root.chmod(0o700)
+            ledger = DeliveryLedger(str(root / "ledger.sqlite3"), startup_recovery=False)
+            try:
+                def persist(accepted, pointer):
+                    ledger.persist_acceptance_batch(
+                        "issue-1", "delegate-1", from_revision=source, accepted_revision=accepted,
+                        evidence=[{"criterion_hash": "b" * 64, "test_class": "runtime",
+                                   "evidence_digest": "b" * 64, "evidence_pointer": pointer,
+                                   "observed_revision": source, "result": "PASS",
+                                   "timestamp": iso(timedelta(seconds=-10))}],
+                    )
+                # Live OPS-251: Linear revision was 1 ms ahead of local clock.
+                persist(iso(timedelta(seconds=2)), "artifact://native/skew")
+                self.assertEqual(ledger.acceptance_evidence_hashes("issue-1", "delegate-1"), {"b" * 64})
+                with self.assertRaises(ValueError):
+                    persist(iso(timedelta(minutes=10)), "artifact://native/future")
+            finally:
+                ledger.close()
+
     def test_newly_verified_current_source_replaces_old_revision_but_carries_current_proof(self):
         old_revision = "2026-08-30T20:00:02.000Z"
         source_revision = "2026-08-30T20:00:04.000Z"  # Intervening issue edit.

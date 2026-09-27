@@ -12,7 +12,7 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -3102,7 +3102,8 @@ class DeliveryLedger:
             or evidence_timestamp.tzinfo is None
             or observed_timestamp > evidence_timestamp
             or observed_timestamp > accepted_timestamp
-            or accepted_timestamp > datetime.now(timezone.utc)
+            # ponytail: fixed 5 min skew window; Linear stamps revisions with its own clock.
+            or accepted_timestamp > datetime.now(timezone.utc) + timedelta(minutes=5)
         ):
             raise ValueError("Acceptance evidence envelope is invalid or non-qualifying")
         now = int(time.time())
