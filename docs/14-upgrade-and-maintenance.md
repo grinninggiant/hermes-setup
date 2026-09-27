@@ -225,6 +225,8 @@ The policy-driven path is deliberately report-only. **No policy-driven delete co
 - **launchd parity:** existing backup jobs keep their current schedules and entrypoints. Before any future policy-driven cleanup rollout, the plist arguments, canonical policy hash, deployed script hash, verifier result, and watchdog behavior must be read back together. This change installs no destructive launchd job.
 - **Rollback coordinate:** canonical source parent `627eac5`; restore `scripts/backup_ops.py` from that Git coordinate and restore deployed runtime from `~/.hermes/backups/ops-227/backup_ops.py.pre-7b42774` (SHA-256 `75120579c75643c202adeb290af7b57e2caf0ee1adcd8bf1c566b1e53ceb24c8`), then rerun canonical and deployed verifier suites. Existing producer entrypoints and schedules are not changed by this report-only rollout.
 
+**Live policy:** `scripts/backup-retention-policy.json` covers Honcho dumps (keep 14, ≥7 d) and the nine profiles' native snapshots (keep 7, ≥7 d). Producers write the `verified` sidecar via `backup_ops.py attest` (Honcho `.meta.json`; snapshot `retention-verified.json`), so only attested artifacts count toward `keep_count`. Pre-update ZIPs, recovery/forensic corpora, rollback and `runtime/releases` are deliberately outside the policy: they have no checksum sidecar or need incident/rollout context, so they are never report candidates and stay manual, approval-gated decisions. A report taken while a producer is writing returns `identity_changed` and exit `2`; rerun it, never treat that as a candidate list.
+
 Deterministic invocation requires an explicit observation time:
 
 ```bash

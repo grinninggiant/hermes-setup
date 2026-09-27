@@ -1,0 +1,217 @@
+{
+  "allowed_roots": [
+    "/Users/mutlupolatcan/.hermes/backups/honcho",
+    "/Users/mutlupolatcan/.hermes/profiles/general/state-snapshots",
+    "/Users/mutlupolatcan/.hermes/profiles/assistant/state-snapshots",
+    "/Users/mutlupolatcan/.hermes/profiles/coder/state-snapshots",
+    "/Users/mutlupolatcan/.hermes/profiles/finance/state-snapshots",
+    "/Users/mutlupolatcan/.hermes/profiles/health/state-snapshots",
+    "/Users/mutlupolatcan/.hermes/profiles/marketing/state-snapshots",
+    "/Users/mutlupolatcan/.hermes/profiles/producer/state-snapshots",
+    "/Users/mutlupolatcan/.hermes/profiles/researcher/state-snapshots",
+    "/Users/mutlupolatcan/.hermes/profiles/writer/state-snapshots"
+  ],
+  "classes": [
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 5368709120,
+        "high": 4294967296,
+        "warning": 3221225472
+      },
+      "keep_count": 14,
+      "kind": "file",
+      "min_age_days": 7,
+      "name": "honcho-pg",
+      "pattern": "honcho-*.sql.gz",
+      "protected_marker": ".protected",
+      "required_sidecars": [
+        ".sha256"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/backups/honcho",
+      "verification_sidecar": ".meta.json"
+    },
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 12884901888,
+        "high": 10737418240,
+        "warning": 8589934592
+      },
+      "keep_count": 7,
+      "kind": "directory",
+      "min_age_days": 7,
+      "name": "snapshots-general",
+      "pattern": "2*",
+      "protected_marker": "retention-protected",
+      "required_sidecars": [
+        "manifest.json"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/profiles/general/state-snapshots",
+      "verification_sidecar": "retention-verified.json"
+    },
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 3221225472,
+        "high": 2147483648,
+        "warning": 1073741824
+      },
+      "keep_count": 7,
+      "kind": "directory",
+      "min_age_days": 7,
+      "name": "snapshots-assistant",
+      "pattern": "2*",
+      "protected_marker": "retention-protected",
+      "required_sidecars": [
+        "manifest.json"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/profiles/assistant/state-snapshots",
+      "verification_sidecar": "retention-verified.json"
+    },
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 3221225472,
+        "high": 2147483648,
+        "warning": 1073741824
+      },
+      "keep_count": 7,
+      "kind": "directory",
+      "min_age_days": 7,
+      "name": "snapshots-coder",
+      "pattern": "2*",
+      "protected_marker": "retention-protected",
+      "required_sidecars": [
+        "manifest.json"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/profiles/coder/state-snapshots",
+      "verification_sidecar": "retention-verified.json"
+    },
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 3221225472,
+        "high": 2147483648,
+        "warning": 1073741824
+      },
+      "keep_count": 7,
+      "kind": "directory",
+      "min_age_days": 7,
+      "name": "snapshots-finance",
+      "pattern": "2*",
+      "protected_marker": "retention-protected",
+      "required_sidecars": [
+        "manifest.json"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/profiles/finance/state-snapshots",
+      "verification_sidecar": "retention-verified.json"
+    },
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 12884901888,
+        "high": 10737418240,
+        "warning": 8589934592
+      },
+      "keep_count": 7,
+      "kind": "directory",
+      "min_age_days": 7,
+      "name": "snapshots-health",
+      "pattern": "2*",
+      "protected_marker": "retention-protected",
+      "required_sidecars": [
+        "manifest.json"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/profiles/health/state-snapshots",
+      "verification_sidecar": "retention-verified.json"
+    },
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 3221225472,
+        "high": 2147483648,
+        "warning": 1073741824
+      },
+      "keep_count": 7,
+      "kind": "directory",
+      "min_age_days": 7,
+      "name": "snapshots-marketing",
+      "pattern": "2*",
+      "protected_marker": "retention-protected",
+      "required_sidecars": [
+        "manifest.json"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/profiles/marketing/state-snapshots",
+      "verification_sidecar": "retention-verified.json"
+    },
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 3221225472,
+        "high": 2147483648,
+        "warning": 1073741824
+      },
+      "keep_count": 7,
+      "kind": "directory",
+      "min_age_days": 7,
+      "name": "snapshots-producer",
+      "pattern": "2*",
+      "protected_marker": "retention-protected",
+      "required_sidecars": [
+        "manifest.json"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/profiles/producer/state-snapshots",
+      "verification_sidecar": "retention-verified.json"
+    },
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 3221225472,
+        "high": 2147483648,
+        "warning": 1073741824
+      },
+      "keep_count": 7,
+      "kind": "directory",
+      "min_age_days": 7,
+      "name": "snapshots-researcher",
+      "pattern": "2*",
+      "protected_marker": "retention-protected",
+      "required_sidecars": [
+        "manifest.json"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/profiles/researcher/state-snapshots",
+      "verification_sidecar": "retention-verified.json"
+    },
+    {
+      "active_references": [],
+      "candidate_budget_level": "warning",
+      "disk_budget_bytes": {
+        "critical": 3221225472,
+        "high": 2147483648,
+        "warning": 1073741824
+      },
+      "keep_count": 7,
+      "kind": "directory",
+      "min_age_days": 7,
+      "name": "snapshots-writer",
+      "pattern": "2*",
+      "protected_marker": "retention-protected",
+      "required_sidecars": [
+        "manifest.json"
+      ],
+      "root": "/Users/mutlupolatcan/.hermes/profiles/writer/state-snapshots",
+      "verification_sidecar": "retention-verified.json"
+    }
+  ],
+  "schema_version": 1
+}
