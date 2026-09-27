@@ -774,6 +774,22 @@ def _write_coordinate_record(state_fd: int, name: str, payload: dict[str, str]) 
     os.fsync(state_fd)
 
 
+def _finalize_coordinate_record(state_fd: int, name: str, payload: dict[str, str]) -> None:
+    """Atomically replace a prepared record with its outcome. Best effort: the plugin
+    tree, not this record, is the source of truth, so a write failure never flips a
+    verified deploy into a rollback; the record just stays `prepared`."""
+    tmp = f".{name}.{os.getpid()}.tmp"
+    try:
+        _write_coordinate_record(state_fd, tmp, payload)
+        os.rename(tmp, name, src_dir_fd=state_fd, dst_dir_fd=state_fd)
+        os.fsync(state_fd)
+    except (OSError, DeploymentError):
+        try:
+            os.unlink(tmp, dir_fd=state_fd)
+        except OSError:
+            pass
+
+
 def _install_signal_guards(callback: Callable[[int], bool]) -> dict[int, Any]:
     previous: dict[int, Any] = {}
 
@@ -876,6 +892,8 @@ def deploy_reviewed(
     stage_name: str | None = None
     rollback_name: str | None = None
     failed_name: str | None = None
+    record_name: str | None = None
+    coordinates: dict[str, Any] = {}
     previous_handlers: dict[int, Any] = {}
     state = "preparing"
     recovering = False
@@ -1014,6 +1032,9 @@ def deploy_reviewed(
         finally:
             os.close(promoted_fd)
         state = "verified"
+        _finalize_coordinate_record(
+            state_fd, record_name, {**coordinates, "status": "verified", "target_digest": target_digest}
+        )
         if _after_verified_hook is not None:
             _after_verified_hook()
         return {
@@ -1025,7 +1046,14 @@ def deploy_reviewed(
         }
     except BaseException:
         if "recover" in locals():
-            recover()
+            try:
+                recover()
+            finally:
+                if record_name is not None and state != "verified":
+                    _finalize_coordinate_record(
+                        state_fd, record_name,
+                        {**coordinates, "status": "recovered" if state == "recovered" else "failed"},
+                    )
         raise
     finally:
         if previous_handlers:
