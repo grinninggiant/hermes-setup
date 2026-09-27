@@ -16,12 +16,9 @@ if str(PLUGIN_ROOT) not in sys.path:
 from linear_tools import (  # noqa: E402
     ADMIN_TRASH_SCHEMA,
     ADMIN_TRASH_PREVIEW_SCHEMA,
-    _ADMIN_TRASH_APPROVALS,
-    _ADMIN_TRASH_PENDING,
     _ADMIN_TRASH_PREVIEW_LOCK,
     _ADMIN_TRASH_PREVIEWS,
     OutboundLedger,
-    _admin_trash_approval_hook,
     _make_admin_trash_handlers,
     register_outbound_tools,
 )
@@ -135,8 +132,7 @@ class AdminTrashRegistrationTests(unittest.TestCase):
             config["outbound_mcp"]["allowed_mutation_tools"],
             ["linear_save_issue", "linear_save_comment"],
         )
-        self.assertIn("pre_tool_call", ctx.hooks)
-        self.assertIn("post_approval_response", ctx.hooks)
+        self.assertEqual(ctx.hooks, {})
         self.assertNotIn("approved", ADMIN_TRASH_SCHEMA["parameters"]["properties"])
         self.assertNotIn("permanentlyDelete", str(ADMIN_TRASH_SCHEMA))
         self.assertEqual(
@@ -168,8 +164,6 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         with _ADMIN_TRASH_PREVIEW_LOCK:
             _ADMIN_TRASH_PREVIEWS.clear()
-            _ADMIN_TRASH_PENDING.clear()
-            _ADMIN_TRASH_APPROVALS.clear()
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.root.chmod(0o700)
@@ -177,8 +171,6 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         with _ADMIN_TRASH_PREVIEW_LOCK:
             _ADMIN_TRASH_PREVIEWS.clear()
-            _ADMIN_TRASH_PENDING.clear()
-            _ADMIN_TRASH_APPROVALS.clear()
         self.tempdir.cleanup()
 
     def handlers(self, clients):
@@ -191,12 +183,6 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
             ledger_path=str(self.root / "outbound.sqlite3"),
             client_factory=lambda **_kwargs: clients.pop(0),
         )
-
-    def approval_context(self):
-        ctx = FakeContext()
-        with mock.patch("linear_tools._tool_names_available", return_value=True):
-            register_outbound_tools(ctx, extra=extra(self.root, admin=True))
-        return ctx
 
     def native_context(self):
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
@@ -234,96 +220,9 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         return json.loads(result)
 
-    def native_approval(self, ctx, preview, *, tool_call_id, session_id):
-        from tools import approval_context
-
-        events = {"pre": [], "post": []}
-        ctx.register_hook("pre_tool_call", lambda **payload: events["pre"].append(dict(payload)))
-        ctx.register_hook("post_approval_response", lambda **payload: events["post"].append(dict(payload)))
-        args = {
-            "issue_refs": [issue["identifier"] for issue in preview["issues"]],
-            "target_team_id": TEAM_ID,
-            "preview_id": preview["preview_id"],
-            "preview_digest": preview["preview_digest"],
-        }
-        interactive = approval_context.set_hermes_interactive_context(True)
-        self.addCleanup(approval_context.reset_hermes_interactive_context, interactive)
-        with (
-            mock.patch("tools.approval._yolo_active", return_value=False),
-            mock.patch("tools.approval._presence", return_value=(None, True, False, False)),
-            mock.patch("tools.approval_context._get_approval_mode", return_value="manual"),
-            mock.patch("tools.approval.prompt_dangerous_approval", return_value="once") as prompt,
-        ):
-            result = self.native_tool_call(
-                "linear_admin_trash",
-                args,
-                tool_call_id=tool_call_id,
-                session_id=session_id,
-            )
-        prompt.assert_called_once()
-        pre = next(event for event in events["pre"] if event.get("tool_call_id") == tool_call_id)
-        post = next(event for event in events["post"] if event.get("tool_call_id") == tool_call_id)
-        self.assertEqual(pre["session_id"], session_id)
-        self.assertEqual(post["session_id"], session_id)
-        self.assertEqual(post["choice"], "once")
-        self.assertEqual(post["pattern_key"], f"plugin_rule:linear_admin_trash:{tool_call_id}")
-        return result
-
-    def approve_preview(self, result, *, tool_call_id="tool-call-1", session_id="session-1"):
-        args = {
-            "issue_refs": ["OPS-1"],
-            "target_team_id": TEAM_ID,
-            "preview_id": result["preview_id"],
-            "preview_digest": result["preview_digest"],
-        }
-        ctx = self.approval_context()
-        from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
-
-        def dispatch_hooks(hook_name, **kwargs):
-            return [callback(**kwargs) for callback in ctx.hooks.get(hook_name, [])]
-
-        with (
-            mock.patch("tools.approval._yolo_active", return_value=False),
-            mock.patch("tools.approval._presence", return_value=(None, True, False, False)),
-            mock.patch("tools.approval_context._get_approval_mode", return_value="manual"),
-            mock.patch("tools.approval_context._is_cron_approval_context", return_value=False),
-            mock.patch("tools.approval_context._is_single_query_approval_context", return_value=False),
-            mock.patch("tools.approval.prompt_dangerous_approval", return_value="once") as prompt,
-            mock.patch("hermes_cli.lifecycle.invoke_hook", side_effect=dispatch_hooks),
-        ):
-            blocked, modified = _dispatch_pre_tool_call_hooks(
-                "linear_admin_trash", args, tool_call_id=tool_call_id, session_id=session_id
-            )
-        self.assertIsNone(blocked)
-        self.assertIsNone(modified)
-        prompt.assert_called_once()
-        return args, {
-            "message": prompt.call_args.args[1],
-            "tool_call_id": tool_call_id,
-            "session_id": session_id,
-            "ctx": ctx,
-        }
-
-    async def run_native_trash(self, trash, args, *, tool_call_id, session_id="session-1"):
-        from model_tools import _CallIds, _execute_tool, _run_async, registry
-
-        def dispatch(_name, tool_args, **kwargs):
-            return _run_async(trash(tool_args, **kwargs))
-
-        with mock.patch.object(registry, "dispatch", side_effect=dispatch):
-            return _execute_tool(
-                "linear_admin_trash",
-                args,
-                args,
-                _CallIds(session_id=session_id, tool_call_id=tool_call_id),
-                user_task=None,
-                enabled_tools=None,
-                skip_tool_execution_middleware=True,
-            )
-
-    async def test_preview_is_exact_read_only_and_native_approval_binds_issue_set(self):
+    async def test_preview_is_exact_read_only(self):
         client = client_with({"issue": ISSUE})
-        preview, trash = self.handlers([client])
+        preview, _trash = self.handlers([client])
 
         result = await preview(
             {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID}, session_id="session-1"
@@ -334,21 +233,8 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["issues"][0]["trashed"])
         self.assertEqual(len(result["preview_digest"]), 64)
         self.assertTrue(all("mutation" not in call.args[0].casefold() for call in client.graphql.await_args_list))
-        args, approval = self.approve_preview(result)
-        self.assertIn("OPS-1", approval["message"])
-        self.assertIn(result["preview_digest"], approval["message"])
-        self.assertIn("trash", approval["message"].casefold())
-        self.assertIn("not permanent", approval["message"].casefold())
-        self.assertNotIn("approved", args)
 
-        tampered = {**args, "issue_refs": ["OPS-2"]}
-        rejected = await self.run_native_trash(
-            trash, tampered, tool_call_id=approval["tool_call_id"]
-        )
-        self.assertEqual(rejected["error"], "linear_admin_trash_denied")
-        self.assertEqual(client.graphql.await_count, 1)
-
-    async def test_unapproved_or_fabricated_approval_argument_never_reaches_graphql(self):
+    async def test_fabricated_approved_argument_is_ignored(self):
         client = client_with({"issue": ISSUE})
         preview, trash = self.handlers([client])
         result = await preview(
@@ -361,34 +247,16 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
             "preview_digest": result["preview_digest"],
         }
 
-        blocked = await trash({**args, "approved": True})
+        with mock.patch("tools.approval_prompt.request_elicitation_consent") as request_consent:
+            blocked = await trash({**args, "approved": True}, session_id="session-1")
+
         self.assertEqual(blocked["error"], "linear_admin_trash_denied")
-        self.assertEqual(client.graphql.await_count, 1)
-        direct = await trash(args)
-        self.assertEqual(direct["error"], "linear_admin_trash_denied")
+        request_consent.assert_not_called()
         self.assertEqual(client.graphql.await_count, 1)
 
-        with (
-            mock.patch("tools.approval._yolo_active", return_value=False),
-            mock.patch("tools.approval._presence", return_value=(None, True, False, False)),
-            mock.patch("tools.approval_context._get_approval_mode", return_value="manual"),
-            mock.patch("tools.approval_context._is_cron_approval_context", return_value=False),
-            mock.patch("tools.approval_context._is_single_query_approval_context", return_value=False),
-        ):
-            requested = _admin_trash_approval_hook(
-                tool_name="linear_admin_trash", args=args,
-                tool_call_id="request-only", session_id="session-1",
-            )
-        self.assertEqual(requested["action"], "approve")
-        still_blocked = await self.run_native_trash(
-            trash, args, tool_call_id="request-only"
-        )
-        self.assertEqual(still_blocked["error"], "linear_admin_trash_denied")
-        self.assertEqual(client.graphql.await_count, 1)
-
-    async def test_native_approval_cannot_be_bypassed_by_off_mode_or_replayed(self):
+    async def test_preview_digest_refs_team_and_session_are_bound_before_consent(self):
         client = client_with({"issue": ISSUE})
-        preview, _trash = self.handlers([client])
+        preview, trash = self.handlers([client])
         result = await preview(
             {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID}, session_id="session-1"
         )
@@ -398,36 +266,44 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
             "preview_id": result["preview_id"],
             "preview_digest": result["preview_digest"],
         }
-        ctx = self.approval_context()
-        from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
+        invalid_calls = (
+            ({**args, "issue_refs": ["OPS-2"]}, "session-1"),
+            ({**args, "target_team_id": "other-team"}, "session-1"),
+            ({**args, "preview_digest": "0" * 64}, "session-1"),
+            (args, "other-session"),
+        )
 
-        def dispatch_hooks(hook_name, **kwargs):
-            return [callback(**kwargs) for callback in ctx.hooks.get(hook_name, [])]
+        with mock.patch("tools.approval_prompt.request_elicitation_consent") as request_consent:
+            for invalid_args, session_id in invalid_calls:
+                denied = await trash(invalid_args, session_id=session_id)
+                self.assertEqual(denied["error"], "linear_admin_trash_denied")
 
-        with (
-            mock.patch("tools.approval._yolo_active", return_value=False),
-            mock.patch("tools.approval._presence", return_value=(None, True, False, False)),
-            mock.patch("tools.approval_context._get_approval_mode", return_value="off"),
-            mock.patch("hermes_cli.lifecycle.invoke_hook", side_effect=dispatch_hooks),
-        ):
-            blocked, _modified = _dispatch_pre_tool_call_hooks(
-                "linear_admin_trash", args, tool_call_id="off-call", session_id="session-1"
-            )
-        self.assertIsNotNone(blocked)
+        request_consent.assert_not_called()
+        self.assertEqual(client.graphql.await_count, 1)
 
-        args, decision = self.approve_preview(result)
-        with (
-            mock.patch("tools.approval._yolo_active", return_value=False),
-            mock.patch("tools.approval._presence", return_value=(None, True, False, False)),
-            mock.patch("tools.approval_context._get_approval_mode", return_value="manual"),
-            mock.patch("tools.approval_context._is_cron_approval_context", return_value=False),
-            mock.patch("tools.approval_context._is_single_query_approval_context", return_value=False),
-        ):
-            replay = _admin_trash_approval_hook(
-                tool_name="linear_admin_trash", args=args,
-                tool_call_id=decision["tool_call_id"], session_id="session-1",
-            )
-        self.assertEqual(replay["action"], "block")
+    async def test_deny_and_timeout_do_not_mutate(self):
+        for consent in ("decline", "cancel"):
+            with self.subTest(consent=consent):
+                preview_client = client_with({"issue": ISSUE})
+                trash_client = client_with({"issue": ISSUE})
+                preview, trash = self.handlers([preview_client, trash_client])
+                result = await preview(
+                    {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID}, session_id="session-1"
+                )
+                args = {
+                    "issue_refs": ["OPS-1"],
+                    "target_team_id": TEAM_ID,
+                    "preview_id": result["preview_id"],
+                    "preview_digest": result["preview_digest"],
+                }
+                with mock.patch(
+                    "tools.approval_prompt.request_elicitation_consent", return_value=consent
+                ) as request_consent:
+                    denied = await trash(args, session_id="session-1")
+
+                self.assertEqual(denied["error"], "linear_admin_trash_denied")
+                request_consent.assert_called_once()
+                self.assertEqual(trash_client.graphql.await_count, 0)
 
     async def test_preview_nullable_vendor_trash_state_and_missing_field(self):
         for value in (None, False, True, "false", "missing"):
@@ -455,11 +331,15 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
         preview_result = await preview(
             {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID}, session_id="session-1"
         )
-        args, decision = self.approve_preview(preview_result)
+        args = {
+            "issue_refs": ["OPS-1"],
+            "target_team_id": TEAM_ID,
+            "preview_id": preview_result["preview_id"],
+            "preview_digest": preview_result["preview_digest"],
+        }
 
-        result = await self.run_native_trash(
-            trash, args, tool_call_id=decision["tool_call_id"]
-        )
+        with mock.patch("tools.approval_prompt.request_elicitation_consent", return_value="accept"):
+            result = await trash(args, session_id="session-1")
 
         self.assertEqual(result["status"], "success")
         self.assertTrue(result["issues"][0]["trashed"])
@@ -476,7 +356,49 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(variables, {"id": ISSUE_ID})
         self.assertEqual(trash_client.graphql.await_args_list[-1].args[1], {"id": ISSUE_ID})
 
-    async def test_changed_snapshot_aborts_before_mutation(self):
+    async def test_elicitation_consent_accepts_exact_preview_and_mutates(self):
+        preview_client = client_with({"issue": ISSUE})
+        trashed_issue = {**ISSUE, "trashed": True}
+        trash_client = client_with(
+            {"issue": ISSUE},
+            {"issueArchive": {"success": True, "entity": trashed_issue}},
+            {"issue": trashed_issue},
+        )
+        preview, trash = self.handlers([preview_client, trash_client])
+        preview_result = await preview(
+            {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID}, session_id="session-1"
+        )
+        args = {
+            "issue_refs": ["OPS-1"],
+            "target_team_id": TEAM_ID,
+            "preview_id": preview_result["preview_id"],
+            "preview_digest": preview_result["preview_digest"],
+        }
+
+        with mock.patch(
+            "tools.approval_prompt.request_elicitation_consent", return_value="accept"
+        ) as request_consent:
+            result = await trash(args, session_id="session-1")
+
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["issues"][0]["trashed"])
+        request_consent.assert_called_once()
+        message, description = request_consent.call_args.args
+        self.assertIn('"OPS-1" — "Old housekeeping record"', message)
+        self.assertIn("Count: 1", message)
+        self.assertIn("Linear trash (geri alınabilir), kalıcı silme değil", message)
+        self.assertTrue(description)
+        self.assertEqual(request_consent.call_args.kwargs["surface"], "linear-admin-trash")
+        self.assertEqual(request_consent.call_args.kwargs["title"], "Confirm Linear trash")
+        self.assertEqual(
+            len([call for call in trash_client.graphql.await_args_list if "mutation" in call.args[0].casefold()]),
+            1,
+        )
+        replay = await trash(args, session_id="session-1")
+        self.assertEqual(replay["error"], "linear_admin_trash_denied")
+        request_consent.assert_called_once()
+
+    async def test_changed_snapshot_after_consent_aborts_before_mutation(self):
         preview_client = client_with({"issue": ISSUE})
         changed = {**ISSUE, "updatedAt": "2026-08-18T12:01:00Z"}
         trash_client = client_with({"issue": changed})
@@ -484,17 +406,24 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
         preview_result = await preview(
             {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID}, session_id="session-1"
         )
-        args, decision = self.approve_preview(preview_result)
+        args = {
+            "issue_refs": ["OPS-1"],
+            "target_team_id": TEAM_ID,
+            "preview_id": preview_result["preview_id"],
+            "preview_digest": preview_result["preview_digest"],
+        }
 
-        result = await self.run_native_trash(
-            trash, args, tool_call_id=decision["tool_call_id"]
-        )
+        with mock.patch(
+            "tools.approval_prompt.request_elicitation_consent", return_value="accept"
+        ) as request_consent:
+            result = await trash(args, session_id="session-1")
 
         self.assertEqual(result["error"], "linear_admin_trash_denied")
+        request_consent.assert_called_once()
         self.assertEqual(trash_client.graphql.await_count, 1)
         self.assertFalse(any("mutation" in call.args[0].casefold() for call in trash_client.graphql.await_args_list))
 
-    async def test_registered_tools_use_native_hooks_and_dispatch_context(self):
+    async def test_registered_tools_dispatch_exact_session_bound_consent(self):
         trashed_issue = {**ISSUE, "trashed": True}
         preview_client = client_with({"issue": ISSUE})
         trash_client = client_with(
@@ -502,8 +431,13 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
             {"issueArchive": {"success": True, "entity": {"id": ISSUE_ID}}},
             {"issue": trashed_issue},
         )
-        ctx = self.native_context()
-        with mock.patch("linear_tools.LinearClient", side_effect=[preview_client, trash_client]):
+        self.native_context()
+        with (
+            mock.patch("linear_tools.LinearClient", side_effect=[preview_client, trash_client]),
+            mock.patch(
+                "tools.approval_prompt.request_elicitation_consent", return_value="accept"
+            ) as request_consent,
+        ):
             preview = self.native_tool_call(
                 "linear_admin_trash_preview",
                 {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID},
@@ -511,26 +445,31 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
                 session_id="native-session",
             )
             self.assertEqual(preview["mode"], "preview-only")
-            result = self.native_approval(
-                ctx,
-                preview,
+            args = {
+                "issue_refs": ["OPS-1"],
+                "target_team_id": TEAM_ID,
+                "preview_id": preview["preview_id"],
+                "preview_digest": preview["preview_digest"],
+            }
+            result = self.native_tool_call(
+                "linear_admin_trash",
+                args,
                 tool_call_id="trash-native-call",
                 session_id="native-session",
             )
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["issues"][0]["id"], ISSUE_ID)
+        self.assertEqual(request_consent.call_count, 1)
         self.assertEqual(
             len([call for call in trash_client.graphql.await_args_list if "mutation" in call.args[0].casefold()]),
             1,
         )
 
-    async def test_native_telegram_gateway_approval_consumes_once_via_real_callback(self):
-        from gateway.config import PlatformConfig
-        from gateway.run_turn_runner import TurnRunner
+    async def test_real_elicitation_consent_gateway_works_with_approvals_off(self):
         from gateway.session_context import clear_session_vars, set_session_vars
-        from plugins.platforms.telegram.adapter import TelegramAdapter
         from tools import approval
+        from tools.approval_context import reset_current_session_key, set_current_session_key
 
         preview_client = client_with({"issue": ISSUE})
         trashed_issue = {**ISSUE, "trashed": True}
@@ -539,160 +478,92 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
             {"issueArchive": {"success": True, "entity": {"id": ISSUE_ID}}},
             {"issue": trashed_issue},
         )
-        ctx = self.native_context()
-        approval_events = []
-        ctx.register_hook("post_approval_response", lambda **payload: approval_events.append(dict(payload)))
-
-        adapter = TelegramAdapter(PlatformConfig(enabled=True, token="test-token", extra={}))
-        adapter._bot = mock.AsyncMock()
-        adapter._app = mock.MagicMock()
-        adapter.set_authorization_check(lambda user_id, *_args, **_kwargs: str(user_id) == "12345")
-        adapter._bot.send_message = mock.AsyncMock(return_value=SimpleNamespace(message_id=55))
-        session_key = "telegram-session-native-trash"
-        session_id = "telegram-native-session"
-        tool_call_id = "telegram-native-trash-call"
-        loop = asyncio.get_running_loop()
-        prompt_ready = asyncio.Event()
-        runner_ctx = SimpleNamespace(
-            session_key=session_key,
-            _status_adapter=adapter,
-            _status_chat_id="12345",
-            _status_thread_metadata={},
-            _loop_for_step=loop,
-            stream_consumer_holder=[None],
-            _run_still_current=lambda: True,
-        )
-        runner = TurnRunner(None, runner_ctx)
+        preview, trash = self.handlers([preview_client, trash_client])
+        session_key = "telegram-session-linear-trash-consent"
+        session_id = "telegram-linear-trash-session"
         requests = []
 
-        def notify_gateway(approval_data):
+        def notify(approval_data):
             requests.append(dict(approval_data))
-            runner._approval_notify_sync(approval_data)
-            loop.call_soon_threadsafe(prompt_ready.set)
+            self.assertEqual(
+                approval.resolve_gateway_approval(
+                    session_key, "once", request_id=approval_data["request_id"]
+                ),
+                1,
+            )
 
         approval.unregister_gateway_notify(session_key)
-        approval.register_gateway_notify(session_key, notify_gateway)
+        approval.register_gateway_notify(session_key, notify)
         session_tokens = set_session_vars(
             platform="telegram", session_key=session_key, session_id=session_id, cron_session=""
         )
-        worker = None
+        key_token = set_current_session_key(session_key)
         try:
             with (
-                mock.patch.dict(
-                    "os.environ",
-                    {
-                        "HERMES_GATEWAY_SESSION": "",
-                        "HERMES_EXEC_ASK": "",
-                        "HERMES_INTERACTIVE": "",
-                        "HERMES_SINGLE_QUERY_SESSION": "",
-                    },
-                ),
-                mock.patch("tools.approval._yolo_active", return_value=False),
-                mock.patch("tools.approval_context._get_approval_mode", return_value="manual"),
+                mock.patch("tools.approval_context._get_approval_mode", return_value="off"),
                 mock.patch("tools.approval_context._get_approval_timeout", return_value=2),
-                mock.patch("linear_tools.LinearClient", side_effect=[preview_client, trash_client]),
             ):
-                self.assertEqual(approval._presence()[1:], (False, True, False))
-                preview = self.native_tool_call(
-                    "linear_admin_trash_preview",
-                    {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID},
-                    tool_call_id="telegram-preview-call",
-                    session_id=session_id,
+                preview_result = await preview(
+                    {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID}, session_id=session_id
                 )
                 args = {
                     "issue_refs": ["OPS-1"],
                     "target_team_id": TEAM_ID,
-                    "preview_id": preview["preview_id"],
-                    "preview_digest": preview["preview_digest"],
+                    "preview_id": preview_result["preview_id"],
+                    "preview_digest": preview_result["preview_digest"],
                 }
-                def trash_call():
-                    try:
-                        return self.native_tool_call(
-                            "linear_admin_trash", args, tool_call_id=tool_call_id, session_id=session_id
-                        )
-                    finally:
-                        from model_tools import _worker_thread_local
-                        tool_loop = getattr(_worker_thread_local, "loop", None)
-                        if tool_loop is not None and not tool_loop.is_closed():
-                            tool_loop.close()
-
-                worker = asyncio.create_task(asyncio.to_thread(trash_call))
-                try:
-                    await asyncio.wait_for(prompt_ready.wait(), timeout=5)
-                    self.assertEqual(adapter._bot.send_message.await_count, 1)
-                    self.assertEqual(trash_client.graphql.await_count, 0)
-                    self.assertEqual(len(requests), 1)
-                    request = requests[0]
-                    self.assertTrue(request.get("request_id"))
-                    self.assertEqual(request["pattern_key"], f"plugin_rule:linear_admin_trash:{tool_call_id}")
-                    self.assertIn("OPS-1", request["description"])
-                    self.assertIn(preview["preview_digest"], request["description"])
-
-                    markup = adapter._bot.send_message.await_args.kwargs["reply_markup"]
-                    buttons = [button for row in markup.inline_keyboard for button in row]
-                    self.assertEqual(
-                        {button.callback_data.split(":")[1] for button in buttons},
-                        {"once", "session", "always", "deny"},
-                    )
-                    callback_data = next(
-                        button.callback_data for button in buttons
-                        if button.callback_data.startswith("ea:once:")
-                    )
-                    self.assertEqual(
-                        adapter._approval_state,
-                        {int(callback_data.rsplit(":", 1)[1]): session_key},
-                    )
-                    query = SimpleNamespace(
-                        data=callback_data,
-                        message=SimpleNamespace(
-                            chat_id=12345,
-                            chat=SimpleNamespace(type="private"),
-                            message_thread_id=None,
-                        ),
-                        from_user=SimpleNamespace(first_name="Operator", id=12345),
-                        answer=mock.AsyncMock(),
-                        edit_message_text=mock.AsyncMock(),
-                    )
-                    await adapter._handle_callback_query(
-                        SimpleNamespace(callback_query=query), SimpleNamespace()
-                    )
-                    result = await asyncio.wait_for(worker, timeout=5)
-                finally:
-                    if not worker.done():
-                        approval.resolve_gateway_approval(session_key, "deny")
-                        try:
-                            await asyncio.wait_for(worker, timeout=5)
-                        except Exception:
-                            pass
-
-                self.assertEqual(result.get("status"), "success", result)
-                self.assertTrue(result["issues"][0]["trashed"])
-                self.assertEqual(query.data, callback_data)
-                self.assertEqual(query.answer.await_args.kwargs["text"], "✅ Approved once")
-                approvals = [event for event in approval_events if event.get("tool_call_id") == tool_call_id]
-                self.assertEqual(len(approvals), 1)
-                self.assertEqual(approvals[0]["session_id"], session_id)
-                self.assertEqual(approvals[0]["session_key"], session_key)
-                self.assertEqual(approvals[0]["surface"], "gateway")
-                self.assertEqual(approvals[0]["choice"], "once")
-                mutation_calls = [
-                    call for call in trash_client.graphql.await_args_list
-                    if "mutation" in call.args[0].casefold()
-                ]
-                self.assertEqual(len(mutation_calls), 1)
-                self.assertIn("issueArchive", mutation_calls[0].args[0])
-                self.assertIn("trash: true", mutation_calls[0].args[0])
-
-                replay = self.native_tool_call(
-                    "linear_admin_trash", args, tool_call_id=tool_call_id, session_id=session_id
-                )
-                self.assertTrue(replay.get("error"))
-                self.assertEqual(len(requests), 1)
-                self.assertEqual(len(mutation_calls), 1)
+                result = await trash(args, session_id=session_id)
         finally:
-            approval.resolve_gateway_approval(session_key, "deny")
             approval.unregister_gateway_notify(session_key)
+            reset_current_session_key(key_token)
             clear_session_vars(session_tokens)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["pattern_key"], "mcp_elicitation")
+        self.assertTrue(requests[0]["request_id"])
+        self.assertIn("OPS-1", requests[0]["command"])
+        self.assertIn("Old housekeeping record", requests[0]["command"])
+        self.assertIn("Count: 1", requests[0]["command"])
+        self.assertIn("Linear trash (geri alınabilir), kalıcı silme değil", requests[0]["command"])
+        self.assertIn(preview_result["preview_digest"], requests[0]["description"])
+        self.assertEqual(
+            len([call for call in trash_client.graphql.await_args_list if "mutation" in call.args[0].casefold()]),
+            1,
+        )
+
+    async def test_missing_gateway_consent_surface_fails_closed(self):
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools import approval
+        from tools.approval_context import reset_current_session_key, set_current_session_key
+
+        preview_client = client_with({"issue": ISSUE})
+        trash_client = client_with({"issue": ISSUE})
+        preview, trash = self.handlers([preview_client, trash_client])
+        session_key = "telegram-session-linear-trash-no-notify"
+        session_id = "telegram-linear-trash-no-notify-session"
+        approval.unregister_gateway_notify(session_key)
+        session_tokens = set_session_vars(
+            platform="telegram", session_key=session_key, session_id=session_id, cron_session=""
+        )
+        key_token = set_current_session_key(session_key)
+        try:
+            preview_result = await preview(
+                {"issue_refs": ["OPS-1"], "target_team_id": TEAM_ID}, session_id=session_id
+            )
+            args = {
+                "issue_refs": ["OPS-1"],
+                "target_team_id": TEAM_ID,
+                "preview_id": preview_result["preview_id"],
+                "preview_digest": preview_result["preview_digest"],
+            }
+            result = await trash(args, session_id=session_id)
+        finally:
+            reset_current_session_key(key_token)
+            clear_session_vars(session_tokens)
+
+        self.assertEqual(result["error"], "linear_admin_trash_denied")
+        self.assertEqual(trash_client.graphql.await_count, 0)
 
     async def test_native_partial_batch_reports_confirmed_ids_in_result_and_ledger(self):
         issues = [
@@ -709,21 +580,20 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
             {"issue": issues[1]},
             {"issueArchive": {"success": False}},
         )
-        ctx = self.native_context()
+        preview_handler, trash_handler = self.handlers([preview_client, trash_client])
         ledger_path = str(self.root / "outbound.sqlite3")
-        with mock.patch("linear_tools.LinearClient", side_effect=[preview_client, trash_client]):
-            preview = self.native_tool_call(
-                "linear_admin_trash_preview",
-                {"issue_refs": [issue["identifier"] for issue in issues], "target_team_id": TEAM_ID},
-                tool_call_id="preview-partial-call",
-                session_id="partial-session",
-            )
-            result = self.native_approval(
-                ctx,
-                preview,
-                tool_call_id="trash-partial-call",
-                session_id="partial-session",
-            )
+        preview = await preview_handler(
+            {"issue_refs": [issue["identifier"] for issue in issues], "target_team_id": TEAM_ID},
+            session_id="partial-session",
+        )
+        args = {
+            "issue_refs": [issue["identifier"] for issue in issues],
+            "target_team_id": TEAM_ID,
+            "preview_id": preview["preview_id"],
+            "preview_digest": preview["preview_digest"],
+        }
+        with mock.patch("tools.approval_prompt.request_elicitation_consent", return_value="accept"):
+            result = await trash_handler(args, session_id="partial-session")
 
         self.assertEqual(result["error"], "linear_admin_trash_partial")
         self.assertEqual(result["status"], "partial")
