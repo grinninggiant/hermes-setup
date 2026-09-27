@@ -121,43 +121,28 @@ class RetentionClassifierTests(unittest.TestCase):
         self.assertEqual(result.candidates[0].canonical_successor, "OPS-999")
         self.assertEqual(result.candidates[0].age_days, 592)
 
-    def test_app_comment_with_protected_semantics_is_protected(self):
-        candidate = issue()
-        candidate["comments"] = [comment(
-            "comment-app-security", body="Incident security decision evidence"
-        )]
-
-        result = self.classify(candidate)
-
-        self.assertEqual(result.candidates, ())
-        reasons = result.reasons_by_identifier["OPS-100"]
-        self.assertIn("decision_security_or_incident_semantics", reasons)
-        self.assertNotIn("human_discussion", reasons)
-        self.assertNotIn("ambiguous_comment_authorship", reasons)
-
-    def test_plural_security_and_incident_terms_are_protected(self):
-        for text in ("credentials", "secrets", "vulnerabilities", "postmortems"):
-            with self.subTest(text=text):
+    def test_security_or_incident_labels_are_protected(self):
+        for label in ("Security", "incident", "postmortems", "Decision"):
+            with self.subTest(label=label):
                 candidate = issue()
-                candidate["description"] = f"Retains {text} evidence"
+                candidate["labels"] = [label]
                 result = self.classify(candidate)
                 self.assertEqual(result.candidates, ())
                 self.assertIn(
-                    "decision_security_or_incident_semantics",
+                    "decision_security_or_incident_label",
                     result.reasons_by_identifier["OPS-100"],
                 )
 
-    def test_workflow_state_name_participates_in_protected_semantics(self):
+    def test_security_words_in_prose_do_not_protect(self):
+        # Hermes ops issues mention credentials/secrets routinely; only labels protect.
         candidate = issue()
-        candidate["state_name"] = "Incident Closed"
+        candidate["title"] = "Rotate credential broker secret handling"
+        candidate["description"] = "Security review done. See OPS-999 and https://example.com/x"
+        candidate["comments"] = [comment("c-app", body="incident closed, canonical: OPS-1")]
 
         result = self.classify(candidate)
 
-        self.assertEqual(result.candidates, ())
-        self.assertIn(
-            "decision_security_or_incident_semantics",
-            result.reasons_by_identifier["OPS-100"],
-        )
+        self.assertEqual([entry.identifier for entry in result.candidates], ["OPS-100"])
 
     def test_protected_fixture_corpus_has_zero_false_positives(self):
         fixtures: list[tuple[str, dict]] = []
@@ -179,17 +164,14 @@ class RetentionClassifierTests(unittest.TestCase):
             "unknown_comment_author",
             comments=[comment("comment-2", body="?", author_is_app=None)],
         )
-        protected("decision", title="Decision: retain vendor A")
-        protected("security", description="Contains security access review evidence")
         protected("incident", labels=["postmortem"])
+        protected("security_label", labels=["Security"])
         protected("parent_dependency", parent_count=1)
         protected("child_dependency", child_count=1)
         protected("relation", relation_count=1)
         protected("inverse_relation", inverse_relation_count=1)
         protected("attachment", attachment_count=1)
         protected("document", document_count=1)
-        protected("canonical_pointer", description="Canonical: https://linear.app/acme/issue/OPS-999/current")
-        protected("bare_issue_pointer", description="Use OPS-999 as the retained record")
         protected("too_young", updated_at="2026-08-01T00:00:00Z")
         protected("ambiguous_state", state_type="custom")
         protected("ambiguous_terminal_timestamp", completed_at=None)
@@ -215,22 +197,11 @@ class RetentionClassifierTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(result.reasons_by_identifier[value["identifier"]])
 
-    def test_successor_must_be_explicit_verified_distinct_and_present(self):
-        invalid = [
-            {},
-            {"OPS-100": {"successor": "OPS-999", "verified": False}},
-            {"OPS-100": {"successor": "OPS-100", "verified": True}},
-            {"OPS-100": {"successor": "OPS-404", "verified": True}},
-        ]
+    def test_successor_attestation_is_not_required(self):
+        result = self.classify(issue(), {})
 
-        for mapping in invalid:
-            with self.subTest(mapping=mapping):
-                result = self.classify(issue(), mapping)
-                self.assertEqual(result.candidates, ())
-                self.assertIn(
-                    "no_verified_canonical_successor",
-                    result.reasons_by_identifier["OPS-100"],
-                )
+        self.assertEqual([entry.identifier for entry in result.candidates], ["OPS-100"])
+        self.assertEqual(result.candidates[0].canonical_successor, "")
 
     def test_verified_successors_are_never_candidates_in_chains_or_cycles(self):
         middle = issue("OPS-101")
@@ -389,52 +360,6 @@ class RetentionClassifierTests(unittest.TestCase):
                 candidate[contradictory_field] = "2025-01-02T00:00:00Z"
                 with self.assertRaisesRegex(ValueError, "ambiguous issue evidence"):
                     self.classify_inventory_direct([candidate, successor()])
-
-    def test_non_http_canonical_pointers_are_protected(self):
-        pointers = (
-            "See www.example.com/runbooks/current for the retained record",
-            "Contact mailto:operations@example.com",
-            "Use //example.com/runbooks/current as the source",
-            "See [the runbook](www.example.com/runbooks/current)",
-            "Contact [Operations](mailto:operations@example.com)",
-            "See [the source](//example.com/runbooks/current)",
-            "Open slack://channel/incident-room",
-            "Restore s3://evidence-bucket/manifest.json",
-            "Inspect file:///private/runbook.md",
-        )
-
-        for pointer in pointers:
-            with self.subTest(pointer=pointer):
-                candidate = issue()
-                candidate["description"] = pointer
-                result = self.classify(candidate)
-                self.assertEqual(result.candidates, ())
-                self.assertIn(
-                    "canonical_pointer",
-                    result.reasons_by_identifier["OPS-100"],
-                )
-
-    def test_dotted_prose_and_plain_email_are_not_canonical_pointers(self):
-        ordinary_text = (
-            "The service moved from version 1.2.3 to 1.2.4.",
-            "Ask operations@example.com whether this can be removed.",
-            "The example.com domain is mentioned without a path.",
-            "The www.example.com host is mentioned without a path.",
-        )
-
-        for text in ordinary_text:
-            with self.subTest(text=text):
-                candidate = issue()
-                candidate["description"] = text
-                result = self.classify(candidate)
-                self.assertEqual(
-                    [entry.identifier for entry in result.candidates],
-                    ["OPS-100"],
-                )
-                self.assertNotIn(
-                    "canonical_pointer",
-                    result.reasons_by_identifier["OPS-100"],
-                )
 
     def classify_inventory_direct(self, inventory: list[dict]):
         return classify_inventory(
@@ -805,6 +730,32 @@ class RetentionInventoryReaderTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(LinearAPIError, "pagination"):
             await RetentionInventoryReader(client).read_team("team-ops", "OPS")
+
+    async def test_reader_counts_only_open_links_and_linear_workflow_comments_as_app(self):
+        detail = self.detail_payload()
+        detail["parent"] = {"id": "p", "state": {"type": "completed"}}
+        detail["children"] = {"nodes": [{"id": "c", "state": {"type": "started"}}]}
+        detail["relations"] = {"nodes": [{"id": "r", "relatedIssue": {"state": {"type": "canceled"}}}]}
+        detail["inverseRelations"] = {"nodes": [{"id": "i", "issue": {"state": None}}]}
+        comments = {"issue": {"id": "id-OPS-100", "comments": {
+            "nodes": [
+                {"id": "w", "body": "x", "createdAt": "2025-01-04T00:00:00Z",
+                 "updatedAt": "2025-01-04T00:00:00Z", "user": None, "botActor": {"type": "workflow"}},
+                {"id": "o", "body": "x", "createdAt": "2025-01-04T00:00:00Z",
+                 "updatedAt": "2025-01-04T00:00:00Z", "user": None, "botActor": {"type": "integration"}},
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }}}
+        client = mock.MagicMock()
+        client.graphql = mock.AsyncMock(side_effect=[{"issue": detail}, comments])
+
+        raw = await RetentionInventoryReader(client)._read_issue("id-OPS-100", "OPS-100", "team-ops")
+
+        self.assertEqual(raw["parent_count"], 0)  # closed parent
+        self.assertEqual(raw["child_count"], 1)  # open child
+        self.assertEqual(raw["relation_count"], 0)  # canceled relation
+        self.assertEqual(raw["inverse_relation_count"], 1)  # unknown state protects
+        self.assertEqual([c["author_is_app"] for c in raw["comments"]], [True, None])
 
     @staticmethod
     def detail_payload() -> dict:

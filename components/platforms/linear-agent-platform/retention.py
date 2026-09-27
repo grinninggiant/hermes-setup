@@ -64,16 +64,6 @@ PROTECTED_SEMANTICS_RE = re.compile(
     re.IGNORECASE,
 )
 INBOX_RE = re.compile(r"\b(?:operational|operations|ops)[ _-]*inbox\b", re.IGNORECASE)
-POINTER_RE = re.compile(
-    r"\b[a-z][a-z0-9+.-]*:(?://|[^\s<>()]+)|"
-    r"(?<![\w@])www\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-    r"[a-z]{2,63}(?::\d+)?/[^\s<>()]+|"
-    r"(?<![:\w])//(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-    r"[a-z]{2,63}(?::\d+)?/[^\s<>()]+|"
-    r"\b[A-Z][A-Z0-9]*-\d+\b|"
-    r"\b(?:canonical|source[ _-]+of[ _-]+truth|system[ _-]+of[ _-]+record)\b",
-    re.IGNORECASE,
-)
 MAX_PAGES = 100
 
 
@@ -388,25 +378,21 @@ def classify_inventory(
             ]
             + list(current.labels)
         )
-        content_with_comments = searchable + "\n" + "\n".join(
-            comment.body for comment in current.comments
-        )
         if INBOX_RE.search(searchable):
             reasons.add("operational_inbox")
         if any(comment.author_is_app is False for comment in current.comments):
             reasons.add("human_discussion")
         if any(comment.author_is_app is None for comment in current.comments):
             reasons.add("ambiguous_comment_authorship")
-        if PROTECTED_SEMANTICS_RE.search(content_with_comments):
-            reasons.add("decision_security_or_incident_semantics")
+        # Labels, not prose: Hermes ops text mentions "credential"/"secret" routinely.
+        if any(PROTECTED_SEMANTICS_RE.search(label) for label in current.labels):
+            reasons.add("decision_security_or_incident_label")
         if any(getattr(current, field) for field in COUNT_FIELDS[:4]):
             reasons.add("dependency_or_relation")
         if current.attachment_count:
             reasons.add("attachment")
         if current.document_count:
             reasons.add("document")
-        if POINTER_RE.search(content_with_comments):
-            reasons.add("canonical_pointer")
 
         last_activity = _last_activity(current)
         age_seconds = (envelope.as_of - last_activity).total_seconds()
@@ -416,14 +402,6 @@ def classify_inventory(
 
         attestation = attestations_by_source[current.identifier]
         successor_identifier = attestation.successor_identifier if attestation.verified else ""
-        successor_issue = by_identifier.get(successor_identifier)
-        if (
-            not successor_identifier
-            or successor_identifier == current.identifier
-            or successor_issue is None
-            or successor_issue.team_id != current.team_id
-        ):
-            reasons.add("no_verified_canonical_successor")
 
         ordered_reasons = tuple(sorted(reasons))
         reasons_by_identifier[current.identifier] = ordered_reasons
@@ -603,10 +581,10 @@ query LinearRetentionIssueEvidence($id: String!) {
     team { id }
     project { name }
     labels(first: 250, includeArchived: true) { nodes { name } pageInfo { hasNextPage endCursor } }
-    parent { id }
-    children(first: 1, includeArchived: true) { nodes { id } }
-    relations(first: 1, includeArchived: true) { nodes { id } }
-    inverseRelations(first: 1, includeArchived: true) { nodes { id } }
+    parent { id state { type } }
+    children(first: 50, includeArchived: true) { nodes { id state { type } } }
+    relations(first: 50, includeArchived: true) { nodes { id relatedIssue { state { type } } } }
+    inverseRelations(first: 50, includeArchived: true) { nodes { id issue { state { type } } } }
     attachments(first: 1, includeArchived: true) { nodes { id } }
     documents(first: 1, includeArchived: true) { nodes { id } }
   }
@@ -633,6 +611,17 @@ query LinearRetentionIssueEvidence($id: String!) {
 
         def count(name: str) -> int:
             return len(_connection_nodes(current.get(name), name))
+
+        def is_open(issue: Any) -> bool:
+            # Unknown state protects; only closed links free an issue for retention.
+            state = issue.get("state") if isinstance(issue, dict) else None
+            return not (isinstance(state, dict) and state.get("type") in TERMINAL_STATE_TYPES)
+
+        def count_open(name: str, key: str | None) -> int:
+            nodes = _connection_nodes(current.get(name), name)
+            if len(nodes) >= 50:  # ponytail: page cap, a full page counts as open
+                return len(nodes)
+            return sum(is_open(node.get(key) if key else node) for node in nodes)
 
         parent = current.get("parent")
         if parent is not None and (
@@ -664,10 +653,10 @@ query LinearRetentionIssueEvidence($id: String!) {
             "team_id": current["team"].get("id"),
             "project_name": project.get("name") if project else None,
             "labels": label_names,
-            "parent_count": int(parent is not None),
-            "child_count": count("children"),
-            "relation_count": count("relations"),
-            "inverse_relation_count": count("inverseRelations"),
+            "parent_count": int(parent is not None and is_open(parent)),
+            "child_count": count_open("children", None),
+            "relation_count": count_open("relations", "relatedIssue"),
+            "inverse_relation_count": count_open("inverseRelations", "issue"),
             "attachment_count": count("attachments"),
             "document_count": count("documents"),
             "comments": comments,
@@ -679,7 +668,7 @@ query LinearRetentionComments($id: String!, $after: String) {
   issue(id: $id) {
     id
     comments(first: 50, after: $after, includeArchived: true) {
-      nodes { id body createdAt updatedAt user { app } }
+      nodes { id body createdAt updatedAt user { app } botActor { type } }
       pageInfo { hasNextPage endCursor }
     }
   }
@@ -698,7 +687,11 @@ query LinearRetentionComments($id: String!, $after: String) {
                 if not isinstance(node, dict):
                     raise LinearAPIError("Retention comment evidence was malformed")
                 user = node.get("user")
-                author_is_app = user.get("app") if isinstance(user, dict) else None
+                if isinstance(user, dict):
+                    author_is_app = user.get("app")
+                else:  # Linear's own workflow comments have no user; other bots stay ambiguous.
+                    bot = node.get("botActor")
+                    author_is_app = True if isinstance(bot, dict) and bot.get("type") == "workflow" else None
                 comments.append(
                     {
                         "id": node.get("id"),

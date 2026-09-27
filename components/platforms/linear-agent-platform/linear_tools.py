@@ -58,7 +58,6 @@ try:
         OutboundLedgerError,
     )
     from .outbound_policy import OutboundPolicy, extract_linear_profile_url
-    from .retention import RetentionInventoryReader, build_manifest, classify_inventory
 except ImportError:  # Direct module loading in standalone tests/scripts.
     from acceptance import (
         EvidenceResolver,
@@ -90,7 +89,6 @@ except ImportError:  # Direct module loading in standalone tests/scripts.
         OutboundLedgerError,
     )
     from outbound_policy import OutboundPolicy, extract_linear_profile_url
-    from retention import RetentionInventoryReader, build_manifest, classify_inventory
 
 CAPACITY = LINEAR_ISSUE_CAPACITY
 CRITICAL_THRESHOLD = LINEAR_ISSUE_CRITICAL_THRESHOLD
@@ -187,36 +185,6 @@ def _quota_admission(current_count: int) -> dict[str, Any]:
     }
 
 
-async def _immediate_retention_dry_run(
-    graphql_client: LinearClient,
-    *,
-    team_id: str,
-    team_key: str,
-    minimum_age_days: int,
-) -> dict[str, Any]:
-    """Run the canonical classifier in memory; this path has no mutation API."""
-    as_of = datetime.now(timezone.utc)
-    inventory = await RetentionInventoryReader(graphql_client).read_team(team_id, team_key)
-    result = classify_inventory(
-        inventory,
-        successor_attestations={},
-        minimum_age_days=minimum_age_days,
-        as_of=as_of,
-        team_id=team_id,
-        team_key=team_key,
-    )
-    manifest = build_manifest(result)
-    return {
-        "mode": "read-only-dry-run",
-        "inventory_count": result.summary["inventory_count"],
-        "candidate_count": result.summary["candidate_count"],
-        "protected_count": result.summary["protected_count"],
-        "protected_reason_counts": dict(result.summary["protected_reason_counts"]),
-        "manifest_sha256": manifest["sha256"],
-        "deletion_performed": False,
-    }
-
-
 def _encode_quota_admission_result(
     result_id: str,
     current_count: int,
@@ -308,7 +276,7 @@ def _replay_response(
             "quota_admission": admission,
             "immediate_retention_required": True,
         }
-        if retention_dry_run is not None:
+        if retention_dry_run:  # legacy ledger rows only
             response["retention_dry_run"] = retention_dry_run
         return response
     return {
@@ -1286,7 +1254,6 @@ async def execute_with_clients(
     expected_hermes_turn_id: str | None = None,
     quota_admission_lock: FleetGlobalLock | None = None,
     quota_team_ids: frozenset[str] | None = None,
-    retention_dry_run: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     _quota_admission_lock_held: bool = False,
     _quota_admission_fd: int | None = None,
     _quota_create_context: dict[str, Any] | None = None,
@@ -1358,7 +1325,6 @@ async def execute_with_clients(
                 expected_hermes_turn_id=expected_hermes_turn_id,
                 quota_admission_lock=quota_admission_lock,
                 quota_team_ids=quota_team_ids,
-                retention_dry_run=retention_dry_run,
                 graphql_client=graphql_client,
                 mcp_client=mcp_client,
                 _quota_admission_lock_held=True,
@@ -1632,7 +1598,6 @@ async def execute_with_clients(
     operation_key = str(arguments.get("operation_key") or "")
     team_id = str(arguments.get("target_team_id") or "")
     quota_admission: dict[str, Any] | None = None
-    retention_result: dict[str, Any] | None = None
     if is_issue_create:
         try:
             existing = await asyncio.to_thread(
@@ -1701,30 +1666,11 @@ async def execute_with_clients(
         projected_count = current_count + 1
         if projected_count >= CRITICAL_THRESHOLD:
             quota_admission = _quota_admission(current_count)
-            if retention_dry_run is None:
-                return {
-                    "error": "linear_policy_denied",
-                    "reason": "immediate_retention_dry_run_unavailable",
-                    "quota_admission": quota_admission,
-                }
-            try:
-                retention_result = await retention_dry_run()
-            except Exception as exc:
-                logger.warning(
-                    "[linear] immediate retention dry-run failed: %s: %s",
-                    type(exc).__name__, str(exc)[:200],
-                )
-                return {
-                    "error": "linear_policy_denied",
-                    "reason": "immediate_retention_dry_run_unavailable",
-                    "quota_admission": quota_admission,
-                }
         if projected_count >= CAPACITY:
             return {
                 "error": "linear_policy_denied",
                 "reason": "quota_capacity_reserved_or_exhausted",
                 "quota_admission": quota_admission,
-                "retention_dry_run": retention_result,
             }
 
     try:
@@ -2110,7 +2056,7 @@ async def execute_with_clients(
         ledger_result_id = _encode_quota_admission_result(
             result_id,
             quota_admission["current_count"],
-            retention_result or {},
+            {},
         )
     await asyncio.to_thread(ledger.mark_success, operation_key, result_id=ledger_result_id)
     if (
@@ -2127,7 +2073,6 @@ async def execute_with_clients(
     if quota_admission is not None:
         response["quota_admission"] = quota_admission
         response["immediate_retention_required"] = True
-        response["retention_dry_run"] = retention_result
     return response
 
 
@@ -2455,16 +2400,6 @@ def register_outbound_tools(
         and len(set(raw_quota_team_ids)) == len(raw_quota_team_ids)
         else frozenset()
     )
-    retention_team_id = str(outbound.get("quota_retention_team_id") or "")
-    retention_team_key = str(outbound.get("quota_retention_team_key") or "")
-    raw_retention_age = outbound.get("quota_retention_minimum_age_days")
-    retention_minimum_age_days = (
-        raw_retention_age
-        if isinstance(raw_retention_age, int)
-        and not isinstance(raw_retention_age, bool)
-        and raw_retention_age > 0
-        else 0
-    )
     ledger_path_safe = bool(
         inbound_database_path
         and Path(inbound_database_path).is_absolute()
@@ -2597,16 +2532,6 @@ def register_outbound_tools(
                         source_profile=direct_context["source_profile"],
                         policy_result=DIRECT_POLICY_RESULTS[direct_context["source_platform"]],
                     )
-                retention_runner: Callable[[], Awaitable[dict[str, Any]]] | None = None
-                if retention_team_id and retention_team_key and retention_minimum_age_days:
-                    async def configured_retention_runner() -> dict[str, Any]:
-                        return await _immediate_retention_dry_run(
-                            graphql,
-                            team_id=retention_team_id,
-                            team_key=retention_team_key,
-                            minimum_age_days=retention_minimum_age_days,
-                        )
-                    retention_runner = configured_retention_runner
                 result = await execute_with_clients(
                     profile_id=profile_id,
                     vendor_tool=vendor_tool,
@@ -2621,7 +2546,6 @@ def register_outbound_tools(
                     expected_hermes_turn_id=turn_id or None,
                     quota_admission_lock=quota_admission_lock,
                     quota_team_ids=quota_team_ids,
-                    retention_dry_run=retention_runner,
                     graphql_client=graphql,
                     mcp_client=mcp,
                 )

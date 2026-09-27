@@ -24,6 +24,7 @@ try:
         LinearClient,
         count_workspace_issues,
     )
+    from .retention import RetentionInventoryReader, classify_inventory
 except ImportError:  # Direct module loading in tests and profile-local scripts.
     from linear_client import (
         LINEAR_ISSUE_CAPACITY,
@@ -31,6 +32,7 @@ except ImportError:  # Direct module loading in tests and profile-local scripts.
         LinearClient,
         count_workspace_issues,
     )
+    from retention import RetentionInventoryReader, classify_inventory
 
 
 CAPACITY = LINEAR_ISSUE_CAPACITY
@@ -353,14 +355,40 @@ async def _run(
             total = await count_workspace_issues(
                 client, frozenset(args.expected_team_id)
             )
+            candidates = None
+            if args.retention_team_id and total >= WARNING_THRESHOLD:
+                inventory = await RetentionInventoryReader(client).read_team(
+                    args.retention_team_id, args.retention_team_key
+                )
+                candidates = classify_inventory(
+                    inventory,
+                    successor_attestations={},
+                    minimum_age_days=args.retention_minimum_age_days,
+                    as_of=clock(),
+                    team_id=args.retention_team_id,
+                    team_key=args.retention_team_key,
+                ).candidates
         finally:
             await client.close()
         result = watchdog.evaluate(total)
         if not args.dry_run:
             if result.alert:
                 emit_alert(result.alert)
+            # ponytail: repeats daily while candidates exist; dedupe by manifest if it gets noisy.
+            if candidates:
+                emit_alert(_candidate_report(total, candidates, args.retention_minimum_age_days))
             watchdog.save(result.next_state)
     return result
+
+
+def _candidate_report(total: int, candidates: Any, minimum_age_days: int) -> str:
+    ids = ", ".join(item.identifier for item in candidates)
+    return (
+        f"Linear kota {total}/{CAPACITY}. {len(candidates)} temizlik adayı "
+        f"(kapalı, {minimum_age_days}+ gün hareketsiz, korumasız): {ids}\n"
+        "Onay verirsen yalnız bu liste çöpe atılır; kota Linear'ın 30 günlük "
+        "kalıcı silmesinden sonra düşer."
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -373,6 +401,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--team-id", help=argparse.SUPPRESS)
     parser.add_argument("--expected-team-key", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--retention-team-id")
+    parser.add_argument("--retention-team-key", default="OPS")
+    parser.add_argument("--retention-minimum-age-days", type=int, default=30)
     return parser
 
 

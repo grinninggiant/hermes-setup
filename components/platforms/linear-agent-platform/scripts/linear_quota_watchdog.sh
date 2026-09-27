@@ -15,4 +15,5 @@ exec "$PYTHON_BIN" "$SCRIPT_DIR/linear_quota_watchdog.py" \
   --state-dir "$LINEAR_QUOTA_STATE_DIR" \
   --expected-team-id "$LINEAR_QUOTA_OPERATIONS_TEAM_ID" \
   --expected-team-id "$LINEAR_QUOTA_GAME_TEAM_ID" \
+  --retention-team-id "$LINEAR_QUOTA_OPERATIONS_TEAM_ID" \
   "$@"
