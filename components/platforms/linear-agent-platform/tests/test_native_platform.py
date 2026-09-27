@@ -3197,6 +3197,40 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(wait)
         self.assertEqual(wait["session_id"], "session-agent-created-top-level")
 
+    async def test_direct_grant_dispatches_self_delegation_without_webhook_actor(self):
+        # OPS-241: Linear's self-delegation created event carries no actor.
+        self.adapter._planned_activation_enabled = True
+        self.adapter._activation_allowed_team_ids = {"team-ops"}
+        self.adapter._planned_owner_ids = {"user-1"}
+        issue_id = "issue-actorless-direct"
+        title = "Actorless direct issue"
+        self.adapter._linear.closure_contexts[issue_id] = {
+            "id": issue_id, "title": title,
+            "state": {"id": "backlog-1", "name": "Backlog", "type": "backlog"},
+            "team": {"id": "team-ops"}, "team_states": [],
+            "creator": {"id": "agent-derya"}, "parent": {},
+            "assignee": {"id": "user-1"}, "delegate": {"id": "agent-derya"},
+        }
+        self.adapter._ledger.reserve_direct_activation_grant(
+            operation_key="direct-actorless", source_platform="telegram",
+            source_user_id="telegram-mutlu", source_message_id="message-1",
+            source_session_id="hermes-session-1", source_profile="general",
+            actor_id="agent-derya", team_id="team-ops",
+            issue_fingerprint=DeliveryLedger.direct_issue_fingerprint("team-ops", title),
+        )
+        self.adapter._ledger.bind_direct_activation_grant("direct-actorless", issue_id)
+        created = self.make_payload(
+            webhookId="webhook-actorless-direct", actor=None,
+            agentSession={"id": "session-actorless", "issue": {"id": issue_id, "title": title}},
+        )
+
+        response = await self.adapter._handle_webhook(self.request_for(created))
+
+        self.assertEqual(json.loads(response.text)["status"], "accepted")
+        self.assertEqual(len(self.events), 1)
+        grant = self.adapter._ledger.get_direct_activation_grant(issue_id)
+        self.assertEqual(grant["state"], "dispatched")
+
     async def test_verified_direct_grant_dispatches_agent_created_top_level_once(self):
         self.adapter._planned_activation_enabled = True
         self.adapter._activation_allowed_team_ids = {"team-ops"}
