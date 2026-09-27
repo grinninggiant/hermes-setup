@@ -2204,6 +2204,16 @@ def _delegated_child_context() -> bool:
     return bool(is_delegated_child_context())
 
 
+def _core_turn_id() -> str:
+    """Core binds the turn id in a contextvar around dispatch but does not pass it as a
+    handler kwarg (v0.21.5 registry passes only task_id/session_id). System-owned, not model input."""
+    try:
+        from tools.approval_context import _approval_turn_id  # type: ignore[import-not-found]
+    except ImportError:
+        return ""
+    return str(_approval_turn_id.get() or "")
+
+
 def _acceptance_invocation_context(
     profile_id: str, handler_kwargs: dict[str, Any]
 ) -> tuple[str, str] | None:
@@ -2213,7 +2223,7 @@ def _acceptance_invocation_context(
     except ImportError:
         return None
     session_id = handler_kwargs.get("session_id")
-    turn_id = handler_kwargs.get("turn_id")
+    turn_id = handler_kwargs.get("turn_id") or _core_turn_id()
     if not (isinstance(session_id, str) and session_id and isinstance(turn_id, str) and turn_id):
         return None
     chat_id = str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")

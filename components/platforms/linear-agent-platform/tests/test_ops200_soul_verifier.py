@@ -272,6 +272,15 @@ class Ops200SoulVerifierTests(unittest.TestCase):
         self.assertEqual(self.check(args | {"criterion_hash": "0" * 64})["reason"], "criterion_verification_failed")
         self.assertEqual(self.check(args | {"field": "../x"})["reason"], "criterion_verification_failed")
         self.assertEqual(self.check(args, kwargs={})["reason"], "acceptance_provenance_unavailable")
+        # Live core passes only session_id; turn id comes from the core-bound contextvar.
+        self.assertEqual(self.check(args, kwargs={"session_id": "hermes-native"})["reason"],
+                         "acceptance_provenance_unavailable")
+        from tools.approval_context import reset_current_observability_context, set_current_observability_context
+        tokens = set_current_observability_context(turn_id="turn-native", session_id="hermes-native")
+        try:
+            self.assertEqual(self.check(args, kwargs={"session_id": "hermes-native"})["result"], "PASS")
+        finally:
+            reset_current_observability_context(tokens)
         self.graphql.get_agent_turn_context.return_value["status"] = "complete"
         self.assertEqual(self.check(args)["reason"], "criterion_verification_failed")
 
