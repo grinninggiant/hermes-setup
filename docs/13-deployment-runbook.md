@@ -35,7 +35,7 @@ flowchart LR
 
 ## Step 1 — Install Hermes + verify the CLI ✅ DONE (2026-06-06)
 
-- [x] Originally installed `hermes-agent 2026.6.5` / Hermes v0.16.0; **current install re-verified as official upstream-clean Hermes Agent `v0.20.3` / `2026.8.16.2` on 2026-08-18**.
+- [x] Originally installed `hermes-agent 2026.6.5` / Hermes v0.16.0; **current install re-verified as official upstream Hermes Agent `v0.21.5` / `2026.9.24` on 2026-09-27** (fork → upstream cutover 2026-09-26; details in docs/14).
 - [x] **CLI verbs verified** (gate resolved — plan corrected):
   - `hermes profile create <slug>` ✓ as assumed; also drops a wrapper at `~/.local/bin/<slug>` (`researcher setup` ≡ `hermes -p researcher setup`).
   - Profile selection is a **global `-p/--profile` flag**, not per-subcommand: `hermes -p <slug> setup`, `hermes -p <slug> gateway run`. (`setup --profile` / `gateway run --profile` don't exist.)
