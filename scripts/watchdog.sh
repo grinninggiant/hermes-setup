@@ -77,6 +77,13 @@ PY
 fresh_backup "/Users/mutlupolatcan/.hermes/backups/honcho" "honcho-*.sql.gz" 57600 || {
     ISSUES="$ISSUES\n  - Honcho backup missing or older than 16h"; ALL_OK=false; DOWN_COUNT=$((DOWN_COUNT+1));
 }
+python3 - <<'PY' || {
+import json, time
+d = json.load(open("/Volumes/Hermes Backup/last-success.json"))
+raise SystemExit(time.time() - d["completed_epoch"] > 129600)
+PY
+    ISSUES="$ISSUES\n  - Seagate harici disk yedeği yok veya 36 saatten eski"; ALL_OK=false; DOWN_COUNT=$((DOWN_COUNT+1));
+}
 fresh_profile_snapshots() {
     python3 - 93600 $PROFILES <<'PY'
 from pathlib import Path
