@@ -7086,6 +7086,32 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             "canceled",
         )
 
+    async def test_self_done_during_live_turn_keeps_turn_alive(self):
+        self.adapter._ledger.bind_issue_session("issue-live", "session-live")
+        self.adapter._active_turn_events["session-live"] = object()
+        payload = self.make_data_payload(
+            webhookId="webhook-self-live-done",
+            actor={"id": "agent-derya", "name": "Derya"},
+            data={
+                "id": "issue-live",
+                "updatedAt": "2026-08-04T12:23:00.000Z",
+                "state": {"id": "done-1", "type": "completed"},
+            },
+            updatedFrom={"stateId": "started-1"},
+        )
+        with mock.patch.object(
+            self.adapter, "_cancel_linear_session_processing", new=mock.AsyncMock()
+        ) as cancel:
+            response = await self.adapter._handle_webhook(self.request_for(payload))
+            self.assertEqual(json.loads(response.text)["status"], "ignored_self")
+            cancel.assert_not_awaited()
+            # Without a live turn the self-close still cancels stale processing.
+            del self.adapter._active_turn_events["session-live"]
+            payload["webhookId"] = "webhook-self-idle-done"
+            payload["data"]["updatedAt"] = "2026-08-04T12:24:00.000Z"
+            await self.adapter._handle_webhook(self.request_for(payload))
+            cancel.assert_awaited_once_with("session-live")
+
     async def test_selected_linear_data_types_are_context_only(self):
         event_types = (
             "Comment",
