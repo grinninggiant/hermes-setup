@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import re
 import secrets
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from markdown_it import MarkdownIt
+
+logger = logging.getLogger(__name__)
 
 try:
     from .acceptance import (
@@ -1706,7 +1709,11 @@ async def execute_with_clients(
                 }
             try:
                 retention_result = await retention_dry_run()
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "[linear] immediate retention dry-run failed: %s: %s",
+                    type(exc).__name__, str(exc)[:200],
+                )
                 return {
                     "error": "linear_policy_denied",
                     "reason": "immediate_retention_dry_run_unavailable",
