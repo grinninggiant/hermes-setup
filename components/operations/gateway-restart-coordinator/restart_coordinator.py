@@ -602,6 +602,16 @@ class CoordinatorStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def recent(self, limit: int) -> list[dict[str, Any]]:
+        """Metadata-only newest-first request list; payload/evidence bodies stay out."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT task_id, requester, target_profile, status, dependency_task_id, created_at, updated_at "
+                "FROM requests ORDER BY id DESC LIMIT ?",
+                (min(int(limit), 100),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def integrity(self) -> str:
         with self._connect() as conn:
             return str(conn.execute("PRAGMA quick_check").fetchone()[0])
