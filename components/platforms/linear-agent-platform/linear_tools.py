@@ -497,6 +497,9 @@ def _evaluate_start_context(
         return None, {"status": "already_started", "result_id": state_id}
     if state_type not in {"backlog", "unstarted"}:
         return None, {"error": "linear_policy_denied", "reason": "issue_not_startable"}
+    # Human-owned work starts only after the human moves it to Todo.
+    if state_type == "backlog" and str((context.get("creator") or {}).get("id") or "") != actor_id:
+        return None, {"error": "linear_policy_denied", "reason": "human_issue_not_in_todo"}
     candidates = []
     for item in context.get("started_states") or []:
         item_id = str(item.get("id") or "")
@@ -555,7 +558,8 @@ def _evaluate_child_terminal_context(
                 "reason": delegated_completion_error,
             }
     parent = context.get("parent") or {}
-    if not str(parent.get("id") or ""):
+    own_top_level = not str(parent.get("id") or "") and not delegated_completion
+    if not str(parent.get("id") or "") and not own_top_level:
         return None, {"error": "linear_policy_denied", "reason": "child_parent_required"}
     if delegated_completion:
         child_project_id = str((context.get("project") or {}).get("id") or "")
@@ -572,14 +576,16 @@ def _evaluate_child_terminal_context(
             }
     parent_assignee = parent.get("assignee") or {}
     parent_assignee_id = str(parent_assignee.get("id") or "")
-    if (
+    if own_top_level:
+        pass
+    elif (
         not parent_assignee_id
         or parent_assignee_id == actor_id
         or parent_assignee.get("app") is not False
     ):
         return None, {"error": "linear_policy_denied", "reason": "human_parent_required"}
     parent_state_type = str((parent.get("state") or {}).get("type") or "").casefold()
-    if parent_state_type not in {"backlog", "unstarted", "started"}:
+    if not own_top_level and parent_state_type not in {"backlog", "unstarted", "started"}:
         if parent_state_type in {"completed", "canceled"}:
             if action != "cancel_child":
                 return None, {"error": "linear_policy_denied", "reason": "parent_terminal"}
@@ -760,7 +766,12 @@ async def _resolve_child_terminal_transition(
             )
             if not gate.allowed:
                 return None, {"error": "linear_policy_denied", "reason": gate.reason}
-    sessions = await graphql_client.get_issue_agent_sessions(issue_id)
+    own_top_level = (
+        not str((context.get("parent") or {}).get("id") or "")
+        and str((context.get("delegate") or {}).get("id") or "") == actor_id
+        and str((context.get("creator") or {}).get("id") or "") == actor_id
+    )
+    sessions = [] if own_top_level else await graphql_client.get_issue_agent_sessions(issue_id)
     sessions = await _release_parked_creator_session(
         issue_id,
         context=context,
@@ -1182,6 +1193,8 @@ def _canonicalize_vendor_markdown(description: str) -> str:
     lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n|$)", description)
     if lines and lines[-1] == "":
         lines.pop()
+    # Linear stores tilde code fences as backtick fences.
+    lines = [re.sub(r"^([ \t]{0,3})~~~", r"\1```", line, count=1) for line in lines]
     for index in bullet_item_lines:
         if index >= len(lines):
             continue

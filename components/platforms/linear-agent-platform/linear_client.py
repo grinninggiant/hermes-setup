@@ -236,6 +236,7 @@ query LinearAgentIssueStart($id: String!) {
   issue(id: $id) {
     id
     state { id name type }
+    creator { id }
     delegate { id name }
     team {
       id
@@ -256,6 +257,7 @@ query LinearAgentIssueStart($id: String!) {
             "id": str(issue.get("id") or ""),
             "state": dict(issue.get("state") or {}),
             "delegate": dict(issue.get("delegate") or {}),
+            "creator": dict(issue.get("creator") or {}),
             "team": {"id": str(team.get("id") or "")},
             "started_states": list(((team.get("states") or {}).get("nodes")) or []),
         }
