@@ -962,7 +962,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.63",
+                "version": "0.8.64",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -2970,7 +2970,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         bound_session = self._ledger.get_issue_session(entity_id)
                         # Our own close during a live turn came from that turn's tool call;
                         # cancelling it here drops the final reply and strands the session.
-                        if bound_session and str(bound_session) in self._active_turn_events:
+                        if bound_session and any(
+                            self._linear_processing_owner(str(bound_session))[3:5]
+                        ):
                             logger.info(
                                 "[linear] self %s during live turn; keeping session=%s",
                                 event_state_type, bound_session,

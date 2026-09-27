@@ -7088,7 +7088,9 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_self_done_during_live_turn_keeps_turn_alive(self):
         self.adapter._ledger.bind_issue_session("issue-live", "session-live")
-        self.adapter._active_turn_events["session-live"] = object()
+        # Live turn = base adapter's session guard (set regardless of goal continuation).
+        live_key = self.adapter._linear_processing_owner("session-live")[1]
+        self.adapter._active_sessions[live_key] = asyncio.Event()
         payload = self.make_data_payload(
             webhookId="webhook-self-live-done",
             actor={"id": "agent-derya", "name": "Derya"},
@@ -7106,7 +7108,7 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(response.text)["status"], "ignored_self")
             cancel.assert_not_awaited()
             # Without a live turn the self-close still cancels stale processing.
-            del self.adapter._active_turn_events["session-live"]
+            del self.adapter._active_sessions[live_key]
             payload["webhookId"] = "webhook-self-idle-done"
             payload["data"]["updatedAt"] = "2026-08-04T12:24:00.000Z"
             await self.adapter._handle_webhook(self.request_for(payload))
