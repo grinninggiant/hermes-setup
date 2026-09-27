@@ -138,6 +138,48 @@ def verify_snapshot(path: Path | str) -> dict:
     return {"snapshot": str(path), "files": len(manifest.get("files") or {}), "sqlite_ok": checked}
 
 
+SNAPSHOT_ATTESTATION = "retention-verified.json"
+
+
+def attest_artifact(path: Path | str) -> Path:
+    """Verify one backup artifact and publish the `verified` sidecar retention-report reads.
+
+    Files need a matching `.sha256`; directories are native snapshots (manifest + SQLite).
+    Raises before writing anything if verification fails.
+    """
+    path = Path(path)
+    if path.is_symlink():
+        raise ValueError(f"symlink: {path}")
+    if path.is_dir():
+        verify_snapshot(path)
+        target = path / SNAPSHOT_ATTESTATION
+        evidence = {"verified": True, "method": "manifest+sqlite_quick_check"}
+    else:
+        manifest = path.with_name(path.name + ".sha256")
+        if not manifest.is_file():
+            raise ValueError(f"checksum sidecar missing: {manifest}")
+        expected = manifest.read_text(encoding="utf-8").split()[0]
+        actual = sha256_file(path)
+        if actual != expected:
+            raise ValueError(f"checksum mismatch: {path}")
+        if path.suffix == ".gz":
+            verify_gzip(path)
+        elif path.suffix == ".zip":
+            verify_hermes_zip(path)
+        target = path.with_name(path.name + ".meta.json")
+        evidence = {"verified": True, "method": "sha256+" + path.suffix.lstrip("."), "sha256": actual}
+    before = path.stat()
+    evidence["verified_at_epoch"] = int(time.time())
+    tmp = target.with_name("." + target.name + ".partial")
+    tmp.write_text(json.dumps(evidence, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.chmod(0o600)
+    os.replace(tmp, target)
+    if path.is_dir():
+        # Writing inside a snapshot bumps its mtime; keep recency ordering stable.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    return target
+
+
 def _budget_status(used_bytes: int, thresholds: dict) -> str:
     for status in ("critical", "high", "warning"):
         if used_bytes >= thresholds[status]:
@@ -726,7 +768,7 @@ def _print(payload: object) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
-    for command in ("secure-dir", "secure-file", "write-sha256", "verify-gzip", "verify-hermes-zip", "verify-snapshot"):
+    for command in ("secure-dir", "secure-file", "write-sha256", "verify-gzip", "verify-hermes-zip", "verify-snapshot", "attest"):
         item = sub.add_parser(command)
         item.add_argument("path")
     prune = sub.add_parser("prune")
@@ -753,6 +795,8 @@ def main() -> int:
         _print(verify_hermes_zip(args.path))
     elif args.command == "verify-snapshot":
         _print(verify_snapshot(args.path))
+    elif args.command == "attest":
+        _print({"attestation": str(attest_artifact(args.path))})
     elif args.command == "prune":
         paths = list(Path().glob(args.pattern)) if not os.path.isabs(args.pattern) else list(Path(args.pattern).parent.glob(Path(args.pattern).name))
         _print({"removed": [str(p) for p in prune_to_count(paths, args.keep)]})

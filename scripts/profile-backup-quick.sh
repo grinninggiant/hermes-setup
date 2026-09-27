@@ -75,7 +75,8 @@ for profile in $PROFILES; do
     record_profile_failure "$profile" "fresh snapshot not created"
     continue
   fi
-  if ! python3 "$OPS" verify-snapshot "$snapshot" >/dev/null; then
+  # attest = verify-snapshot + retention-verified.json sidecar for retention-report.
+  if ! python3 "$OPS" attest "$snapshot" >/dev/null; then
     record_profile_failure "$profile" "snapshot verification failed"
     continue
   fi

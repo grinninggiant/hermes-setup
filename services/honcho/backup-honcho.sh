@@ -40,6 +40,7 @@ gzip -t "$PARTIAL"
 mv "$PARTIAL" "$FINAL"
 chmod 600 "$FINAL"
 python3 "$OPS" write-sha256 "$FINAL" >/dev/null
+python3 "$OPS" attest "$FINAL" >/dev/null
 python3 "$OPS" prune "$OUT/honcho-*.sql.gz" --keep 14 >/dev/null
 
 printf '%s OK: %s (%s bytes)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$(basename "$FINAL")" "$SIZE" >> "$LOG"
