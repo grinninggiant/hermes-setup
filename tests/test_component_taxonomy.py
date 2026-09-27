@@ -10,7 +10,9 @@ EXPECTED_COMPONENTS = {
     "secrets/1password-hermes-bootstrap",
     "memory/honcho-codex-bridge",
     "operations/gateway-restart-coordinator",
+    "operations/gateway-restart-request",
     "security/github-personal-ssh-guard",
+    "security/github-app-token-broker",
     "commands/codex-usage-command",
 }
 

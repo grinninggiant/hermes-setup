@@ -16,7 +16,9 @@ A component name must reveal both what product/vendor it belongs to and what cap
 | Secrets | [`secrets/1password-hermes-bootstrap`](secrets/1password-hermes-bootstrap/README.md) | 1Password SDK-backed Hermes credential bootstrap |
 | Memory | [`memory/honcho-codex-bridge`](memory/honcho-codex-bridge/README.md) | Honcho inference to Hermes Codex OAuth bridge |
 | Operations | [`operations/gateway-restart-coordinator`](operations/gateway-restart-coordinator/README.md) | Ordered and recoverable gateway restart coordination |
+| Operations | [`operations/gateway-restart-request`](operations/gateway-restart-request/README.md) | Agent-side validated request tool for the coordinator |
 | Security | [`security/github-personal-ssh-guard`](security/github-personal-ssh-guard/README.md) | Guard against agent use of the host's personal GitHub SSH identity |
+| Security | [`security/github-app-token-broker`](security/github-app-token-broker/README.md) | Organization-scoped GitHub App tokens for agent `gh` and Git HTTPS |
 | Commands | [`commands/codex-usage-command`](commands/codex-usage-command/README.md) | Fleet-wide Telegram `/codex_usage` command |
 
 ## Naming contract

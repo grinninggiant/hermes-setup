@@ -138,14 +138,28 @@ fi
 MESSAGE=""
 RECOVERY=false
 if [ -n "$REPORT" ] || [ -n "$ISSUES" ]; then
-    MESSAGE="\nWatchdog - $NOW\n---\n"
-    [ -z "$REPORT" ] || MESSAGE="${MESSAGE}\nRestarted:$REPORT"
-    [ -z "$ISSUES" ] || MESSAGE="${MESSAGE}\nFailed:$ISSUES"
-    MESSAGE="${MESSAGE}\n---\n"
-    if [ "$ALL_OK" = true ] && [ "$RESTART_COUNT" -gt 0 ]; then MESSAGE="${MESSAGE}All healthy | $RESTART_COUNT restart(s)";
-    elif [ "$DOWN_COUNT" -gt 0 ]; then MESSAGE="${MESSAGE}$DOWN_COUNT component failure(s)"; fi
+    MESSAGE="## Watchdog — $NOW\n\n| Durum | Bileşen |\n|---|---|\n"
+    if [ -n "$REPORT" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            line="${line#  - }"
+            MESSAGE="${MESSAGE}| ♻️ Yeniden başladı | ${line} |\n"
+        done <<< "$(printf "%b" "$REPORT")"
+    fi
+    if [ -n "$ISSUES" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            line="${line#  - }"
+            MESSAGE="${MESSAGE}| ⛔ Hata | ${line} |\n"
+        done <<< "$(printf "%b" "$ISSUES")"
+    fi
+    if [ "$ALL_OK" = true ] && [ "$RESTART_COUNT" -gt 0 ]; then
+        MESSAGE="${MESSAGE}| Özet | Tümü sağlıklı · ${RESTART_COUNT} restart |\n"
+    elif [ "$DOWN_COUNT" -gt 0 ]; then
+        MESSAGE="${MESSAGE}| Özet | ${DOWN_COUNT} bileşen arızalı |\n"
+    fi
 elif [ "$ALL_OK" = true ] && [ -f "$STATUS_FILE" ] && [ "$(cat "$STATUS_FILE")" != "OK" ]; then
-    MESSAGE="\nWatchdog - $NOW\n---\nRecovered: all monitored components healthy\n---\n"
+    MESSAGE="## Watchdog — $NOW\n\n| Durum | Sonuç |\n|---|---|\n| ✅ Kurtarıldı | İzlenen tüm bileşenler sağlıklı |\n"
     RECOVERY=true
 fi
 

@@ -5,7 +5,7 @@ Credential-free Hermes plugin and installer that prevent agents from reaching Gi
 ## Boundaries
 
 - The plugin blocks direct GitHub SSH routes at the Hermes pre-tool boundary.
-- `scripts/hermes-agent-ssh-guard.sh` rejects Git-over-SSH before the host SSH client executes.
+- [`scripts/hermes-agent-ssh-guard.sh`](scripts/hermes-agent-ssh-guard.sh) (deployed as `~/.hermes/scripts/hermes-agent-ssh-guard`) rejects Git-over-SSH before the host SSH client executes.
 - HTTPS access through the approved profile-scoped broker remains available.
 - This is an accidental credential-use guard, not a sandbox against arbitrary local code.
 - The deployed plugin identity remains `github-transport-guard` for config compatibility.
