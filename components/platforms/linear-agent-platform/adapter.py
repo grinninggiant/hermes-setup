@@ -45,6 +45,28 @@ from .acceptance import acceptance_criteria, acceptance_gate
 from .ledger import DeliveryLedger, OutboxItem
 from .linear_client import LinearAPIError, LinearClient
 
+
+def _dump_asyncio_tasks_on_request(database_path: str) -> str | None:
+    """Operator diagnostic: touching ``linear-task-dump.request`` beside the ledger writes every
+    pending asyncio task's stack on this (gateway) loop to ``linear-task-dump.txt``. Read-only."""
+    if not database_path:
+        return None
+    state_dir = Path(database_path).parent
+    request = state_dir / "linear-task-dump.request"
+    if not request.exists():
+        return None
+    request.unlink(missing_ok=True)
+    output = state_dir / "linear-task-dump.txt"
+    with open(output, "w", encoding="utf-8") as fh:
+        fh.write(f"# {dt.datetime.now(dt.timezone.utc).isoformat()}\n")
+        for task in asyncio.all_tasks():
+            fh.write(f"\n=== {task.get_name()} {task!r:.300}\n")
+            task.print_stack(limit=40, file=fh)
+    os.chmod(output, 0o600)
+    logger.warning("[linear] asyncio task dump written to %s", output)
+    return str(output)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -940,7 +962,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.61",
+                "version": "0.8.62",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -3546,6 +3568,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
     async def _outbox_loop(self) -> None:
         while self._running:
             try:
+                _dump_asyncio_tasks_on_request(self.database_path)
                 self._repair_acceptance_thoughts()
                 delivered = await self._drain_outbox_once()
                 if delivered:
