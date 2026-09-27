@@ -591,7 +591,7 @@ class RegistrationTests(unittest.TestCase):
         graphql.get_issue_closure_context = mock.AsyncMock(return_value={
             "id": "uuid-300",
             "identifier": "OPS-300",
-            "title": "Direct task",
+            "title": "Direct görev başlat",
             "team": {"id": "ops-1"},
             "creator": {"id": "actor-1"},
             "delegate": {"id": "actor-1"},
@@ -622,7 +622,7 @@ class RegistrationTests(unittest.TestCase):
                 "operation_key": "runtime-direct-create",
                 "target_team_id": "ops-1",
                 "team": "ops-1",
-                "title": "Direct task",
+                "title": "Direct görev başlat",
                 "delegate": "actor-1",
             })))
 
@@ -640,7 +640,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(grant["policy_result"], "gateway_authorized_direct_dm")
         self.assertEqual(
             grant["issue_fingerprint"],
-            DeliveryLedger.direct_issue_fingerprint("ops-1", "Direct task"),
+            DeliveryLedger.direct_issue_fingerprint("ops-1", "Direct görev başlat"),
         )
         callback.assert_called_once_with("general", "uuid-300")
 

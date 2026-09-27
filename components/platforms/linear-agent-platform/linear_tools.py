@@ -2611,8 +2611,9 @@ def register_outbound_tools(
                                 and hmac.compare_digest(creator_id, actor_id)
                                 and hmac.compare_digest(delegate_id, actor_id)
                                 and hmac.compare_digest(
-                                    str(context.get("title") or ""),
-                                    str(safe_args.get("title") or ""),
+                                    # bytes: compare_digest rejects non-ASCII str (Turkish titles)
+                                    str(context.get("title") or "").encode("utf-8"),
+                                    str(safe_args.get("title") or "").encode("utf-8"),
                                 )
                                 and hmac.compare_digest(
                                     team_id, str(safe_args.get("target_team_id") or "")
@@ -2630,10 +2631,14 @@ def register_outbound_tools(
                                     operation_key,
                                     "direct_create_readback_policy_mismatch",
                                 )
-                        except Exception:
+                        except Exception as exc:
                             # The issue mutation is already durably successful. Keep the
                             # reservation recoverable by an idempotent tool replay rather
                             # than misreporting the committed vendor create as failed.
+                            logger.warning(
+                                "[linear] direct grant bind failed op=%s error=%s",
+                                operation_key, type(exc).__name__,
+                            )
                             bound = False
                         if bound and direct_grant_bound_callback is not None:
                             try:
