@@ -1386,7 +1386,8 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         counter = mock.AsyncMock(side_effect=[248, 249])
         mcp = FakeMCP()
         operation_key = "external-writer-race"
-        with mock.patch("linear_tools.count_workspace_issues", new=counter):
+        with mock.patch("linear_tools.count_workspace_issues", new=counter), \
+                self.assertLogs("linear_tools", level="WARNING") as logs:
             result = await execute_with_clients(
                 profile_id="general",
                 vendor_tool="save_issue",
@@ -1409,6 +1410,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(counter.await_count, 2)
         self.assertEqual([call[0] for call in mcp.calls], ["get_user"])
+        self.assertIn("observed=248 confirmed=249", logs.output[0])
 
     async def test_create_replay_bypasses_fresh_quota_count_and_preserves_signal(self):
         first, first_mcp, first_counter = await self.run_create(
