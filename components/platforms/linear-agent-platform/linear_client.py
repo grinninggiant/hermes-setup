@@ -1133,6 +1133,9 @@ mutation LinearNativeAgentActivity($input: AgentActivityCreateInput!) {
                 raise LinearAPIError(str(exc), retryable=True, retry_after=exc.retry_after) from exc
             if await self.activity_exists(activity_id):
                 return activity_id
+            if "entity not found" in str(exc).lower():
+                # A timed-out create can be committed but not yet readable; retry, don't dead-letter.
+                raise LinearAPIError(str(exc), retryable=True, retry_after=exc.retry_after) from exc
             raise
         result = data.get("agentActivityCreate") or {}
         activity = result.get("agentActivity") or {}
