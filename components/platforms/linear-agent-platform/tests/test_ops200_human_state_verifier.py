@@ -44,7 +44,7 @@ class HumanStateVerifierTests(unittest.TestCase):
         self.terminal = {
             "id": _OPS200_ISSUE_ID, "updatedAt": REVISION, "description": DESCRIPTION,
             "team": {"id": "ops-1"}, "state": {"id": "started-1", "type": "started"},
-            "creator": {"id": "actor-1"}, "delegate": {"id": "actor-1"},
+            "creator": {"id": "human-1"}, "delegate": {"id": "actor-1"},
             "parent": None,
         }
         self.graphql = mock.MagicMock(actor_id="actor-1", organization_id="org-1")

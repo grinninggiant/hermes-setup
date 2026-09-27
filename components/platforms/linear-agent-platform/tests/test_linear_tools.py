@@ -3550,6 +3550,25 @@ payload
         self.assertEqual(result["status"], "success", result)
         self.assertIn(("save_issue", {"id": "OPS-106", "state": "done-1"}, True), mcp.calls)
 
+    async def test_agent_cannot_cancel_own_top_level_issue(self):
+        context = self.child_terminal_context()
+        context["parent"] = {}
+        result, mcp = await self.run_child_terminal_action(
+            context=context, operation_key="op-cancel-own-top-level", action="cancel_child",
+        )
+        self.assertEqual(result.get("reason"), "child_parent_required", result)
+        self.assertNotIn("save_issue", [call[0] for call in mcp.calls])
+
+    async def test_agent_cannot_complete_own_root_with_open_children(self):
+        context = self.child_terminal_context()
+        context["parent"] = {}
+        context["open_children"] = ["OPS-107"]
+        result, mcp = await self.run_child_terminal_action(
+            context=context, operation_key="op-complete-root-open-children",
+        )
+        self.assertEqual(result.get("reason"), "root_has_open_children", result)
+        self.assertNotIn("save_issue", [call[0] for call in mcp.calls])
+
     async def test_agent_cannot_complete_human_created_top_level_issue(self):
         context = self.child_terminal_context()
         context["parent"] = {}
