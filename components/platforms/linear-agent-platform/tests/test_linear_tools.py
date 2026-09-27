@@ -3526,18 +3526,42 @@ payload
                     1,
                 )
 
-    async def test_complete_child_denies_issue_without_parent(self):
+    async def test_complete_denies_parentless_issue_delegated_elsewhere(self):
         context = self.child_terminal_context()
         context["parent"] = {}
+        context["delegate"] = {"id": "specialist-1"}
         result, mcp = await self.run_child_terminal_action(
             context=context,
             operation_key="op-complete-parent-required",
         )
+        self.assertEqual(result["error"], "linear_policy_denied")
+        self.assertNotIn("save_issue", [call[0] for call in mcp.calls])
+
+    async def test_agent_completes_own_top_level_issue(self):
+        context = self.child_terminal_context()
+        context["parent"] = {}
+        after = {**context, "state": {"id": "done-1", "type": "completed"},
+                 "updatedAt": "2026-08-30T20:02:00.000Z"}
+        result, mcp = await self.run_child_terminal_action(
+            context=context,
+            operation_key="op-complete-own-top-level",
+            after_context=after,
+        )
+        self.assertEqual(result["status"], "success", result)
+        self.assertIn(("save_issue", {"id": "OPS-106", "state": "done-1"}, True), mcp.calls)
+
+    async def test_agent_cannot_complete_human_created_top_level_issue(self):
+        context = self.child_terminal_context()
+        context["parent"] = {}
+        context["creator"] = {"id": "human-1"}
+        result, _mcp = await self.run_child_terminal_action(
+            context=context,
+            operation_key="op-complete-human-top-level",
+        )
         self.assertEqual(
             result,
-            {"error": "linear_policy_denied", "reason": "child_parent_required"},
+            {"error": "linear_policy_denied", "reason": "child_creator_mismatch"},
         )
-        self.assertEqual([call[0] for call in mcp.calls], ["get_user"])
 
     async def test_complete_child_requires_distinct_human_parent_assignee(self):
         for assignee_id in ("", "actor-1"):
@@ -4085,6 +4109,41 @@ payload
         self.assertEqual(
             result,
             {"status": "success", "replayed": True, "result_id": "OPS-1"},
+        )
+
+    async def test_start_from_backlog_only_for_agent_created_issue(self):
+        for creator, expected in (("actor-1", "success"), ("human-1", "human_issue_not_in_todo")):
+            with self.subTest(creator=creator):
+                before = {
+                    "team": {"id": "ops-1"},
+                    "state": {"id": "backlog-1", "type": "backlog"},
+                    "creator": {"id": creator},
+                    "delegate": {"id": "actor-1"},
+                    "started_states": [{"id": "progress-1", "type": "started", "position": 20}],
+                }
+                after = {**before, "state": {"id": "progress-1", "type": "started"}}
+                result = await execute_with_clients(
+                    profile_id="general",
+                    vendor_tool="save_issue",
+                    arguments={
+                        "id": "OPS-1",
+                        "target_team_id": "ops-1",
+                        "operation_key": "op-start-backlog-" + creator,
+                        "lifecycle_action": "start",
+                    },
+                    mutation=True,
+                    policy=self.policy,
+                    ledger=self.ledger,
+                    graphql_client=FakeGraphQL(start_contexts=[before, before, after]),
+                    mcp_client=FakeMCP(),
+                )
+                self.assertEqual(result.get("status") or result.get("reason"), expected, result)
+
+    def test_canonical_markdown_treats_tilde_and_backtick_fences_alike(self):
+        from linear_tools import _canonicalize_vendor_markdown as canon
+        self.assertEqual(
+            canon("x\n\n~~~markdown\n- [ ] a\n~~~\n\n- y\n"),
+            canon("x\n\n```markdown\n- [ ] a\n```\n\n* y\n"),
         )
 
     async def test_semantic_start_denials_never_dispatch_vendor_mutation(self):
