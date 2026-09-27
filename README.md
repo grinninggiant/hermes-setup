@@ -245,7 +245,7 @@ The plan is split by concern. Original section numbers (`## 1` … `## 17`) are 
 11. [Game Development Workstream](docs/11-game-dev.md) — discovery-first pipeline
 12. [Agent-to-Agent Communication](docs/12-agent-comms.md) — local coordination, Notion knowledge, Honcho context, and kanban
 13. [Deployment Runbook](docs/13-deployment-runbook.md) — the *what, in order*, with a live build log of what's done
-14. [Upgrade & Maintenance](docs/14-upgrade-and-maintenance.md) — the brew-upgrade checklist (plist/FDA traps), hardened backups, watchdog v2, session-store hygiene, config-git rollback, skill-consolidation blast radius
+14. [Upgrade & Maintenance](docs/14-upgrade-and-maintenance.md) — canonical upgrade lifecycle (§19, OPS-215) and release-tag checklist, hardened backups, watchdog v2, session-store hygiene, config-git rollback, skill-consolidation blast radius
 15. [Linear native platform adapter](components/platforms/linear-agent-platform/README.md) — Agent Sessions, OAuth, signed webhook ingress, semantic dedup, Stop lifecycle, tests and rollback
 16. [Codex usage Telegram command](components/commands/codex-usage-command/README.md) — canonical `/codex_usage` plugin, official rate-limit RPC, nine-profile restore installer and tests
 17. [Honcho Codex OAuth adapter](components/memory/honcho-codex-bridge/README.md) — local OpenAI-compatible transport from Honcho inference routes to Hermes Codex OAuth, with tests, probes and rollback

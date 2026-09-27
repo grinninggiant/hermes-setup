@@ -6,9 +6,133 @@ Live procedures for keeping the fleet healthy across hermes-agent upgrades, plus
 
 ---
 
+## 19. Upgrade lifecycle program (OPS-215)
+
+This section is the **single canonical upgrade procedure** for every operated surface. Notion runbooks (`Hermes Agent / Honcho / Linear–Hermes — Upgrade, Rollback ve Kabul`) and component docs point here; they add component-specific checks, never a second procedure. Dated execution evidence lives only in the per-release Linear child issue.
+
+### 19.1 Surface and ownership map
+
+| Surface | Owner | Authoritative source | Live baseline read | Component procedure |
+|---|---|---|---|---|
+| Core / CLI / Python | Derya | `NousResearch/hermes-agent` release tags + docs `getting-started/updating` | `hermes --version`, `git -C ~/.hermes/hermes-agent describe --tags`, `hermes update --plan` | §20 |
+| Nine gateways | Derya | launchd `ai.hermes.gateway-*` | `launchctl list \| grep ai.hermes.gateway`, `gateway_state.json` | §20 step 5 + gateway-restart-coordinator README |
+| Profile config / migrations | Derya | core `hermes config check` | per-profile `config.yaml` + effective read-back | §20 step 5 |
+| Desktop app | Derya | Hermes Desktop official release/installer | `/Applications/Hermes.app` `CFBundleShortVersionString`, `codesign -dv`, `~/.hermes/rollback/desktop/` | §19.6 |
+| Desktop / serve backend | Derya | core `hermes serve` | `ai.hermes.serve-general`, `ai.hermes.desktop-general` → `scripts/hermes-*-keychain.sh` | §19.6 |
+| Dashboard / TUI / web assets | Derya | core `web/`, `ui-tui/` | `ai.hermes.dashboard` loaded? `:9119` listening? | [06 §8.2.1](06-networking.md) (only if the job is loaded) |
+| Linear plugin | Derya (code: Naz on request) | this repo `components/platforms/linear-agent-platform` | each profile `plugins/linear/plugin.yaml` version | Notion `Linear–Hermes — Upgrade, Rollback ve Kabul` (checks only) |
+| Other profile plugins | Derya | this repo `components/*` | profile `plugins/` + deployed hash | component README |
+| Honcho stack | Derya | `plastic-labs/honcho` tags; `services/honcho-stack/config/docker-compose.yml` | `git describe --tags` in `server/`, container health | Notion `Honcho — …` + [backup/restore §21](#21-backup-system--current-state-2026-07-26) |
+| Honcho Codex adapter | Derya | `components/memory/honcho-codex-bridge` | `runtime/honcho-codex-adapter/source`, `:18080` | [upgrade-lifecycle.md](../components/memory/honcho-codex-bridge/docs/upgrade-lifecycle.md) |
+| Credential bootstrap wrappers | Mutlu (scope), Derya (code) | `components/secrets/1password-hermes-bootstrap` | `~/.hermes/scripts/*-keychain.sh` hashes | component README; scope change = approval |
+| Restart coordinator | Derya | `components/operations/gateway-restart-coordinator` | `ai.hermes.gateway-restart-coordinator` | component README |
+
+### 19.2 Release channel
+
+The fleet is pinned to **official release tags**, not `origin/main`: the accepted core commit is the tag commit (for `v2026.9.24` it is not an ancestor of `main`). Consequences:
+
+- Release intake reads `git ls-remote --tags origin 'v*'`. `hermes update --check` compares against `main` and reports thousands of commits; it is not a release signal.
+- **Do not run `hermes update` or the Desktop in-app Update button** on the production checkout: both move to the `main` tip, not a tested tag. Promotion follows the official tag procedure (`git checkout <tag>` + `uv pip install -e ".[all]"`, docs `getting-started/updating`, "roll back to a specific release tag").
+- Switching the fleet to track `main` is a fleet policy change and needs Mutlu's explicit approval.
+
+### 19.3 Lifecycle gates
+
+Each gate produces its own evidence; none substitutes for another.
+
+1. **Intake** — official release notes/tag, live baseline per §19.1, affected surfaces.
+2. **Impact** — nine-profile caller/cron/launchd matrix for any path, runtime, config, credential or service change (`hermes update --plan` lists running services).
+3. **Decision class** — one or more of: independent · lockstep with core · plugin migration · config migration · restart-required · data/schema migration · security approval · spend/credential-scope approval.
+4. **Backup + rollback coordinate** — independent `hermes backup --quick --output <exact>` passing `unzip -t`; previous tag/bundle/image/plugin digest recorded. No coordinate → no mutation.
+5. **Candidate** — side-by-side exact tag/build/image; live pointers unchanged.
+6. **Static/compat** — import, `hermes doctor`, component suites, Honcho adapter `stage_hermes_upgrade.sh`, plugin suites.
+7. **Disposable canary** — isolated home/port; real non-sensitive API/tool/session call.
+8. **Promotion** — tested target == promoted target, verified before any restart.
+9. **Restart** — coordinator-first; auxiliary gateways serially, fail-fast; general last.
+10. **Acceptance** — disk, serving process, version, config, plugin, outbox and real user surface separately.
+11. **Docs** — this repo, then Notion pointers, in the same execution.
+12. **Soak/closure** — bounded soak; rollback artefact retention decided separately.
+
+### 19.4 Automation and approval boundary
+
+- **Automatic (read-only):** release/tag scout, baseline reads, `update --plan`, dry-run compat gates.
+- **Autonomous (Derya, test-backed, reversible):** candidate staging, tests, commit/push/merge, commit-pinned plugin promotion, core tag promotion with a verified rollback coordinate, coordinator-first restarts, canaries, rollback to the recorded coordinate.
+- **Explicit Mutlu approval:** approval/security control changes, credential/secret scope, permanent deletion, spend, broad fleet policy/schema (including changing the release channel), irreversible data/schema migration.
+
+### 19.5 Per-release Linear child template
+
+One child per release/component under OPS-215, deduplicated by `component + target`. Copy into the issue description:
+
+```markdown
+## Amaç
+<component> <current> → <target> yükseltmesi. Resmî kaynak: <url>
+
+## Kapsam
+- Live baseline: <version/commit/build/image/plugin hash>
+- Karar sınıfı: <19.3 step 3 classes>
+- Etki matrisi: 9 profil × caller/cron/launchd
+
+## Kapsam dışı
+<not upgraded here>
+
+## Uygulama planı
+1. Backup + rollback koordinatı
+2. Candidate stage
+3. Compat/test
+4. Disposable canary
+5. Promotion
+6. Coordinator-first restart (general en son)
+7. Acceptance + docs
+
+## Bağımlılıklar ve alt işler
+<blocking issues>
+
+## Kabul kriterleri
+- [ ] Preflight: baseline, etki matrisi ve rollback koordinatı kaydedildi
+- [ ] Test: compat/component suite'leri candidate üzerinde PASS
+- [ ] Canary: disposable canary gerçek çağrıyla PASS
+- [ ] Rollout: promoted == tested; 9/9 gateway beklenen sürümde sağlıklı
+- [ ] Rollback: koordinat read-back ile doğrulandı (gerekirse drill)
+- [ ] Acceptance: gerçek kullanıcı yüzeyi + plugin/outbox temiz; docs hizalı
+
+## Doğrulama ve teslim kanıtı
+criterion → gerçek test → runtime/vendor read-back → PASS
+
+## Riskler ve geri dönüş
+Stop koşulları: §19.7. Geri dönüş: <exact coordinate + command>
+```
+
+### 19.6 Desktop matrix
+
+| Gate | Check | Rollback |
+|---|---|---|
+| Origin | official release/installer, version + build | previous bundle under `~/.hermes/rollback/desktop/` |
+| Signature | `codesign -dv`, `xattr` quarantine/provenance as expected | same bundle |
+| Secure launcher | `hermes-desktop-keychain.sh` unchanged; no secret in argv/log/config | previous wrapper hash |
+| Backend | `ai.hermes.serve-general` loopback listener; Desktop ↔ core API compatible | previous core tag |
+| UI smoke | open, profile/session list, new + existing session, streaming, attachment, deep link | previous bundle |
+| Relaunch | quit/relaunch keeps state; no stale backend PID | — |
+| Updater | in-app core Update not used (§19.2) | — |
+
+### 19.7 Stop conditions
+
+Promoted ≠ tested target · missing backup/integrity/rollback read-back · unsupported Python ABI or unclear schema migration · plugin/core/Desktop contract mismatch (including a failing Honcho adapter compat gate) · actor/profile/credential/workspace drift · secret leakage or scope expansion · duplicate process/session/execution · dead or unreconciled outbox · green health with a failing semantic canary.
+
+### 19.8 Next-release dry-run
+
+Before promoting the next core tag, run read-only and record in the child issue:
+
+```bash
+git -C ~/.hermes/hermes-agent ls-remote --tags origin 'v*' | tail -3   # target tag
+hermes --version && hermes update --plan                                # baseline + services
+cd components/memory/honcho-codex-bridge && bash scripts/stage_hermes_upgrade.sh \
+  <candidate-python> <adapter-config> <adapter-python> <target-sha>     # must exit 0
+```
+
+Success = target resolved, all services listed with a restart method, adapter gate exit 0, rollback tag present locally. Any stop condition above aborts.
+
 ## 20. The upgrade checklist
 
-The production fleet does not execute Homebrew Hermes. Since 2026-09-26 it runs the official installer layout: one git checkout of `NousResearch/hermes-agent` at `~/.hermes/hermes-agent` (branch `main` tracking `origin/main`, partial clone) with its venv at `venv/`. Every surface resolves through it:
+The production fleet does not execute Homebrew Hermes. Since 2026-09-26 it runs the official installer layout: one git checkout of `NousResearch/hermes-agent` at `~/.hermes/hermes-agent` (partial clone; HEAD pinned to an official release tag commit, see §19.2) with its venv at `venv/`. Every surface resolves through it:
 
 ```text
 /Users/mutlupolatcan/.local/bin/hermes            -> ~/.hermes/hermes-agent/venv/bin/hermes
@@ -22,68 +146,51 @@ The immutable fork releases under `~/.hermes/runtime/releases/` are retired. The
 
 Do not upgrade the live directory in place and do not make Python `3.14` the production runtime. Stage the official candidate side by side, preserve the stable path for rollback, and keep the candidate and Honcho adapter in the same supported Python `major.minor` family (`3.13`). The adapter compatibility gate is documented in [`components/memory/honcho-codex-bridge/docs/upgrade-lifecycle.md`](../components/memory/honcho-codex-bridge/docs/upgrade-lifecycle.md).
 
-Full procedure, in order:
+Full procedure, in order (release-tag channel, §19.2):
 
 ```bash
 set -euo pipefail
+LIVE=/Users/mutlupolatcan/.hermes/hermes-agent
 
-# 1. Fetch official origin/main, record its exact commit, and stage that exact
-#    commit under a versioned sibling path. Use Python 3.13 and run
-#    package/import/pip-check plus adapter compatibility gates.
-git -C /absolute/path/to/official-hermes-checkout fetch origin
-TARGET_SHA=$(git -C /absolute/path/to/official-hermes-checkout rev-parse origin/main)
-CANDIDATE=/Users/mutlupolatcan/.hermes/runtime/hermes-agent-candidate-v<release>
-test -x "$CANDIDATE/venv/bin/hermes"
+# 1. Intake: resolve the target release tag and its commit; record the
+#    current tag as the rollback coordinate.
+git -C "$LIVE" fetch origin --tags
+TARGET_TAG=v<YYYY.M.D>
+TARGET_SHA=$(git -C "$LIVE" rev-parse "$TARGET_TAG^{commit}")
+ROLLBACK_TAG=$(git -C "$LIVE" describe --tags --exact-match HEAD)
+
+# 2. Candidate: side-by-side worktree at the exact tag, Python 3.13 venv,
+#    import/doctor + Honcho adapter gate (§19.8). Live pointers unchanged.
+CANDIDATE=/Users/mutlupolatcan/.hermes/runtime/hermes-agent-candidate-$TARGET_TAG
+git -C "$LIVE" worktree add --detach "$CANDIDATE" "$TARGET_SHA"
+(cd "$CANDIDATE" && uv venv venv --python 3.13 && VIRTUAL_ENV=venv uv pip install -e ".[all]")
 "$CANDIDATE/venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 13)'
-test "$(git -C "$CANDIDATE" rev-parse HEAD)" = "$TARGET_SHA"
 
-# 2. Run a non-production gateway canary and the adapter compatibility suite.
-#    Do not modify the stable runtime or production launchd jobs yet.
-
-# 3. Follow docs/06-networking.md §8.2.1: build web + TUI assets from the
-#    exact candidate commit, choose a checked-free loopback port (9120 may
-#    be the SDK), and start with --isolated --skip-build and explicit asset
-#    paths. Require process provenance, HTTP/static/auth/UI checks. Do not
-#    mistake successful routing to an existing server for candidate startup.
-
-# 4. Take an independent native quick backup and require its manifest. Then
-#    fetch again and require origin/main to be the same tested commit. If it
-#    moved, stop and restage/retest. After explicit approval, use the official
-#    updater with its additional backup. Do not carry local core commits.
-BACKUP="/Users/mutlupolatcan/.hermes/backups/pre-update-${TARGET_SHA}.zip"
+# 3. Backup: independent quick backup that passes unzip -t.
+BACKUP="/Users/mutlupolatcan/.hermes/backups/pre-update-${TARGET_TAG}.zip"
 test ! -e "$BACKUP"
 hermes backup --quick --output "$BACKUP"
-test -s "$BACKUP"
-unzip -t "$BACKUP" >/dev/null
-git -C /absolute/path/to/official-hermes-checkout fetch origin
-test "$(git -C /absolute/path/to/official-hermes-checkout rev-parse origin/main)" = "$TARGET_SHA"
-hermes update --yes --backup
+test -s "$BACKUP" && unzip -t "$BACKUP" >/dev/null
 
-# The updater performs its own fetch and cannot pin TARGET_SHA. Before any
-# gateway restart, fail closed unless the promoted checkout is exactly the
-# tested commit. On mismatch, serve nothing new: restore the previous managed
-# release/backup, then stage and test the new upstream target.
-PROMOTED_SHA=$(git -C /absolute/path/to/promoted-hermes-agent rev-parse HEAD)
-if [[ "$PROMOTED_SHA" != "$TARGET_SHA" ]]; then
-  echo "Promoted SHA differs from tested candidate; do not restart any gateway." >&2
-  echo "Restore the previous managed release/backup, then restage the new target." >&2
-  exit 1
-fi
+# 4. Promote the tested tag (official tag procedure; never `hermes update`,
+#    which moves to the main tip). Fail closed before any restart.
+git -C "$LIVE" checkout --detach "$TARGET_SHA"
+(cd "$LIVE" && VIRTUAL_ENV=venv uv pip install -e ".[all]")
+test "$(git -C "$LIVE" rev-parse HEAD)" = "$TARGET_SHA"
+hermes config check
 
-# 5. Migrate all nine configs, then restart the eight auxiliary gateways in
-#    sequence. Restart general separately only after explicit approval.
+# 5. Restart through the gateway-restart-coordinator: eight auxiliary
+#    gateways serially (fail-fast), general last. `hermes update --plan`
+#    lists every running service and its restart method.
 
-# 6. Move the dashboard executable and matching web/TUI asset coordinates
-#    together through docs/06-networking.md §8.2.1. Retain the old plist,
-#    lint the candidate, reload only ai.hermes.dashboard and verify its
-#    actual PID, listener, authenticated UI and negative auth checks.
+# 6. Dashboard only if ai.hermes.dashboard is loaded: move its executable
+#    and web/TUI assets together per docs/06-networking.md §8.2.1.
 
-# 7. Verify disk package, live processes, ports, HTTP, and the global CLI as
-#    separate surfaces. All nine gateway commands must resolve below the
-#    stable managed runtime and the dashboard must return HTTP 200.
+# 7. Verify disk, processes, ports and CLI as separate surfaces.
 ~/.local/bin/hermes --version
-command -v hermes && hermes --version
-curl -fsS http://127.0.0.1:9119/ >/dev/null
+hermes update --plan          # every service must report TARGET_SHA
+
+# Rollback: same steps 4-5 with ROLLBACK_TAG, then `hermes config check`.
 ```
 
 The current accepted core is official Hermes Agent `v0.21.5` (`2026.9.24`, `f97608f178d1`) on Python `3.13.15`, installed from `NousResearch/hermes-agent` with zero local commits and zero behavioral source diff. It replaced the `grinninggiant/hermes-agent` fork on 2026-09-26 with explicit owner approval, accepting two security regressions the fork had closed: with `approvals.mode: off` (all nine profiles) plugin-escalated approval gates are bypassed, and child/helper-thread tool boundaries follow upstream. Local capabilities belong in profile plugins/config, not in the core checkout.
@@ -181,14 +288,14 @@ All 23 affected job definitions repointed 2026-07-05. Also found and fixed a **d
 
 Production is intentionally split by responsibility:
 
-- `~/.hermes/hermes-agent` is the official git install of Hermes core, updated only by `hermes update`.
+- `~/.hermes/hermes-agent` is the official git install of Hermes core, promoted only to tested release tags (§19.2, §20).
 - `~/.local/bin/hermes` points at its venv.
 - `~/.hermes/profiles/<name>` owns profile state, configuration and installed plugins.
 - `~/Library/LaunchAgents` owns macOS service definitions.
 - `~/.hermes/scripts` owns machine-level deterministic wrappers and maintenance scripts.
 - This repository owns reviewed local plugins, deployment helpers and durable documentation—not a fork of Hermes core.
 
-The active Hermes checkout must match official `NousResearch/hermes-agent` `origin/main`: zero local commits and zero behavioral source diff. Old files under `patches/hermes-agent/` are historical migration artefacts only; the current updater does not apply or carry them.
+The active Hermes checkout must equal an official `NousResearch/hermes-agent` release tag commit: zero local commits and zero behavioral source diff. Old files under `patches/hermes-agent/` are historical migration artefacts only; the current updater does not apply or carry them.
 
 Current local behavior is extension-first:
 
@@ -198,7 +305,7 @@ Current local behavior is extension-first:
 
 Upgrade acceptance therefore has four independent gates:
 
-1. Official core checkout equals `origin/main` and the updater backup exists.
+1. Official core checkout equals the tested release tag commit and the pre-update backup exists.
 2. Reviewed local plugin commit is on private `hermes-setup` `origin/main`, then commit-pinned into each profile.
 3. Every restarted profile serves the expected plugin version and clean health/outbox state.
 4. Real canaries pass: Linear fresh-session + ephemeral-progress + human-Done closure, and Honcho authenticated profile/card/search reads.
