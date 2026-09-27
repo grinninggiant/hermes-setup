@@ -69,17 +69,17 @@ done
 rm -rf "$DEST"
 mv "$PART" "$DEST"
 
-# Host keeps only the newest artifact of each kind; anything older is superseded by the
-# verified copy just committed above. Reached only after success, so a missing disk deletes nothing.
+# Seagate holds the verified copy now, so the host drops it and everything older.
+# Reached only after success: disk missing/locked/failed copy => host keeps everything.
 for f in "$HERMES"/backups/honcho/honcho-*.sql.gz; do
-  if [ "$f" -ot "$DUMP" ]; then rm -f "$f" "$f.sha256" "$f.meta.json"; fi
+  if [ ! "$f" -nt "$DUMP" ]; then rm -f "$f" "$f.sha256" "$f.meta.json"; fi
 done
 for p in $PROFILES; do
   SNAP="$HERMES/profiles/$p/state-snapshots/$(ls "$DEST/profiles/$p")"
   [ -d "$SNAP" ] || continue
   for d in "$HERMES/profiles/$p/state-snapshots"/*/; do
     d="${d%/}"
-    if [ "$d" -ot "$SNAP" ]; then rm -rf "$d"; fi
+    if [ ! "$d" -nt "$SNAP" ]; then rm -rf "$d"; fi
   done
 done
 
@@ -101,4 +101,7 @@ PY
 
 python3 -c 'import json,sys,time; print(json.dumps({"set":sys.argv[1],"completed_epoch":int(time.time())}))' "$DAY" > "$MNT/.last-success.json.partial"
 mv "$MNT/.last-success.json.partial" "$MNT/last-success.json"
+# Host-side marker: watchdog runs as /bin/bash under launchd and cannot read the removable volume.
+cp "$MNT/last-success.json" "$HERMES/backups/hermes/.external-last-success.json.partial"
+mv "$HERMES/backups/hermes/.external-last-success.json.partial" "$HERMES/backups/hermes/external-last-success.json"
 echo "ok set=$DAY honcho=$(basename "$DUMP") size=$(du -sh "$DEST" | cut -f1)"
