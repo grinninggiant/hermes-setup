@@ -921,7 +921,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.51",
+                "version": "0.8.52",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -1127,12 +1127,18 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     and owner_id in self._planned_owner_ids
                     and hmac.compare_digest(creator_id, self._linear.actor_id)
                     and hmac.compare_digest(delegate_id, self._linear.actor_id)
-                    and self._ledger.has_unbound_direct_reservation(
-                        actor_id=self._linear.actor_id,
-                        team_id=team_id,
-                        issue_fingerprint=self._ledger.direct_issue_fingerprint(
-                            team_id, str(context.get("title") or "")
-                        ),
+                    and (
+                        self._ledger.has_unbound_direct_reservation(
+                            actor_id=self._linear.actor_id,
+                            team_id=team_id,
+                            issue_fingerprint=self._ledger.direct_issue_fingerprint(
+                                team_id, str(context.get("title") or "")
+                            ),
+                        )
+                        # The create tool may bind the grant while the context
+                        # read above is in flight; its wake-up then found no event.
+                        or (self._ledger.get_direct_activation_grant(issue_id) or {}).get("state")
+                        == "granted"
                     )
                 ):
                     async with _admission_lock(self._issue_lock(issue_id), read_deadline):
@@ -1143,6 +1149,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             issue_id, agent_session_id, delivery_key, payload
                         )
                     self._ledger.mark_done(delivery_key)
+                    self.schedule_direct_activation_reconcile(issue_id)  # no-op until bound
                     return web.json_response(
                         {"status": "direct_activation_waiting_for_grant"}, status=200
                     )
