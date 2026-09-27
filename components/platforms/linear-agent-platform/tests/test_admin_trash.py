@@ -40,6 +40,20 @@ ISSUE = {
 }
 
 
+class PlatformConfigResolutionTests(unittest.TestCase):
+    def test_native_top_level_precedence_and_legacy_fallback(self):
+        from linear_tools import _load_linear_extra
+
+        legacy = {"outbound_mcp": {"enabled": True, "admin_trash_enabled": False}}
+        current = {"outbound_mcp": {"enabled": True, "admin_trash_enabled": True}}
+        config = {"gateway": {"platforms": {"linear": {"extra": legacy}}}}
+        with mock.patch("hermes_cli.config.load_config", return_value=config):
+            self.assertEqual(_load_linear_extra(), legacy)
+            config["platforms"] = {"linear": {"extra": current}}
+            self.assertEqual(_load_linear_extra(), current)
+            self.assertFalse(legacy["outbound_mcp"]["admin_trash_enabled"])
+
+
 class FakeContext:
     profile_name = "general"
 
