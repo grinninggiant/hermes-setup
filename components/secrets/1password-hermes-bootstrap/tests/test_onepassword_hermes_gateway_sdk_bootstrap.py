@@ -855,7 +855,7 @@ exit "${SEND_EXIT:-1}"
             self.assertFalse((root / "state" / "hermes-watchdog-prev").exists())
             first_message = send_log.read_text(encoding="utf-8")
             self.assertIn("general not running", first_message)
-            self.assertIn("1 component failure(s)", first_message)
+            self.assertIn("1 bileşen arızalı", first_message)
 
             environment["SEND_EXIT"] = "0"
             second = subprocess.run(
@@ -960,7 +960,7 @@ printf '\n---delivery---\n' >> "$SEND_LOG"
             )
             self.assertEqual(recovered.returncode, 0)
             second = send_log.read_text(encoding="utf-8")
-            self.assertIn("Recovered", second)
+            self.assertIn("Kurtarıldı", second)
             self.assertEqual(second.count("---delivery---"), 2)
 
             steady = subprocess.run(
