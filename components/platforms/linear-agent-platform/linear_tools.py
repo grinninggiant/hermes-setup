@@ -1785,7 +1785,8 @@ async def execute_with_clients(
                     accepted_revision=current_revision,
                     evidence=normalized_acceptance_evidence,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning("[linear] acceptance evidence persist failed: %s", exc)
                 await asyncio.to_thread(
                     ledger.mark_unknown,
                     operation_key,
@@ -2069,7 +2070,8 @@ async def execute_with_clients(
                     accepted_revision=str(acceptance_read_back.get("updatedAt") or ""),
                     evidence=normalized_acceptance_evidence,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning("[linear] acceptance evidence persist failed: %s", exc)
                 await asyncio.to_thread(
                     ledger.mark_unknown,
                     operation_key,
