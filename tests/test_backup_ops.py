@@ -105,6 +105,47 @@ class BackupOpsUnitTests(unittest.TestCase):
         self.assertTrue((self.root / 'b-4.zip').exists())
 
 
+class AttestTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('canonical_backup_ops', REPO_ROOT / 'scripts/backup_ops.py')
+        self.ops = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ops)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_attest_gzip_requires_matching_checksum_and_writes_private_sidecar(self):
+        dump = self.root / 'honcho-1.sql.gz'
+        with gzip.open(dump, 'wb') as handle:
+            handle.write(b'select 1;\n' * 100)
+        with self.assertRaises(ValueError):
+            self.ops.attest_artifact(dump)  # no .sha256 yet
+        self.ops.write_sha256_manifest(dump)
+        sidecar = self.ops.attest_artifact(dump)
+        self.assertEqual(sidecar.name, 'honcho-1.sql.gz.meta.json')
+        self.assertIs(json.loads(sidecar.read_text())['verified'], True)
+        self.assertEqual(stat.S_IMODE(sidecar.stat().st_mode), 0o600)
+        dump.write_bytes(dump.read_bytes() + b'x')
+        with self.assertRaises(ValueError):
+            self.ops.attest_artifact(dump)
+
+    def test_attest_snapshot_preserves_directory_mtime_ordering(self):
+        snap = self.root / '20260101-000000-scheduled-daily'
+        snap.mkdir()
+        (snap / 'config.yaml').write_text('a: 1\n')
+        (snap / 'manifest.json').write_text(json.dumps({'files': {'config.yaml': 5}}))
+        os.utime(snap, (1_000_000, 1_000_000))
+        sidecar = self.ops.attest_artifact(snap)
+        self.assertEqual(sidecar, snap / 'retention-verified.json')
+        self.assertIs(json.loads(sidecar.read_text())['verified'], True)
+        self.assertEqual(snap.stat().st_mtime, 1_000_000)
+        (snap / 'config.yaml').write_text('changed\n')
+        with self.assertRaises(ValueError):
+            self.ops.attest_artifact(snap)
+
+
 class RetentionReportTests(unittest.TestCase):
     NOW = 2_000_000_000
 
@@ -525,9 +566,9 @@ class BackupPolicyContractTests(unittest.TestCase):
             self.assertNotIn('pg_dump', text)
 
     def test_hermes_script_is_native_quick_only(self):
-        text = (ROOT / 'scripts/profile-backup-quick.sh').read_text()
+        text = (REPO_ROOT / 'scripts/profile-backup-quick.sh').read_text()
         self.assertIn('backup --quick --label scheduled-daily', text)
-        self.assertIn('verify-snapshot', text)
+        self.assertIn('"$OPS" attest "$snapshot"', text)
         self.assertIn('prune-snapshots', text)
         self.assertNotIn('tar czf', text)
         self.assertIn('umask 077', text)
@@ -558,7 +599,7 @@ class BackupPolicyContractTests(unittest.TestCase):
             fake_ops.write_text(
                 '#!/usr/bin/env python3\n'
                 'import sys\n'
-                'if sys.argv[1] == "verify-snapshot" and "/bad/" in sys.argv[2]:\n'
+                'if sys.argv[1] == "attest" and "/bad/" in sys.argv[2]:\n'
                 '    raise SystemExit(1)\n'
             )
             fake_send.write_text('#!/bin/bash\nexit 0\n')
