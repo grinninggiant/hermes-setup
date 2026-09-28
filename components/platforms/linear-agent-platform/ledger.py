@@ -384,15 +384,6 @@ class DeliveryLedger:
             ).fetchone()
         return str(row[0]) if row else None
 
-    def get_session_issue(self, session_id: str) -> str | None:
-        """Return the uniquely bound issue for an AgentSession, failing closed on ambiguity."""
-        with self._locked():
-            rows = self._db.execute(
-                "SELECT issue_id FROM issue_session_bindings WHERE session_id = ? "
-                "ORDER BY updated_at DESC, issue_id LIMIT 2",
-                (session_id,),
-            ).fetchall()
-        return str(rows[0][0]) if len(rows) == 1 else None
 
     def claim_channel_route(
         self,
@@ -1992,23 +1983,6 @@ class DeliveryLedger:
             )
             self._db.commit()
 
-    def requeue_dead_outbox(self, item_id: str, *, now: int | None = None) -> bool:
-        """Return one inspected dead letter to the delivery queue."""
-        now = int(time.time()) if now is None else int(now)
-        with self._locked():
-            cur = self._db.execute(
-                "UPDATE outbox SET state = 'pending', next_attempt_at = ?, last_error = NULL, "
-                "updated_at = ? WHERE id = ? AND state = 'dead'",
-                (now, now, item_id),
-            )
-            if cur.rowcount:
-                self._db.execute(
-                    "UPDATE closure_reconciliations SET state = 'pending', last_error = NULL, "
-                    "updated_at = ? WHERE outbox_id = ?",
-                    (now, item_id),
-                )
-            self._db.commit()
-            return bool(cur.rowcount)
 
     @staticmethod
     def _decode_wait(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -3176,28 +3150,6 @@ class DeliveryLedger:
             rows = self._db.execute(query, parameters).fetchall()
         return {str(row[0]) for row in rows}
 
-    def latest_acceptance_evidence(
-        self, issue_id: str, actor_id: str,
-    ) -> tuple[str, set[str]] | None:
-        """Return the newest revision and its PASS hashes for one exact delegate."""
-        if not issue_id or not actor_id:
-            return None
-        with self._locked():
-            revision_row = self._db.execute(
-                "SELECT accepted_revision FROM acceptance_evidence "
-                "WHERE issue_id=? AND actor_id=? AND result='PASS' "
-                "ORDER BY accepted_revision DESC LIMIT 1",
-                (issue_id, actor_id),
-            ).fetchone()
-            if revision_row is None:
-                return None
-            revision = str(revision_row[0])
-            rows = self._db.execute(
-                "SELECT criterion_hash FROM acceptance_evidence "
-                "WHERE issue_id=? AND actor_id=? AND accepted_revision=? AND result='PASS'",
-                (issue_id, actor_id, revision),
-            ).fetchall()
-        return revision, {str(row[0]) for row in rows}
 
     def rebind_acceptance_revision(
         self, issue_id: str, actor_id: str, *, from_revision: str, to_revision: str,

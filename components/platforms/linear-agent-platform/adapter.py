@@ -93,14 +93,6 @@ async def _admission_lock(lock: asyncio.Lock, deadline: float | None):
         lock.release()
 
 
-def _ops200_profile_fix_active() -> bool:
-    import sys
-    core_file = getattr(sys.modules.get("gateway.run"), "__file__", None)
-    return bool(core_file and Path(core_file).resolve().parent.parent.name == (
-        "hermes-agent-5cc98f1f2ce11bc4c4368ae7e7fabf9c86e81abe-general"
-    ))
-
-
 _WEBHOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,200}$")
 _ALLOWED_ACTIONS = {"created", "prompted"}
 
@@ -151,18 +143,10 @@ _LINEAR_EPHEMERAL_NOTICES = frozenset(
     }
 )
 _OPEN_AGENT_SESSION_STATUSES = frozenset({"pending", "active", "awaitingInput"})
-# These are the only native slash commands that may answer a core-owned model
-# execution wait.  They still go through the normal core command/auth seam; the
-# adapter merely prevents its own turn-state fence from treating the command as
-# another model turn.
-_NATIVE_APPROVAL_COMMANDS = frozenset({"approve", "deny"})
 _CHANNEL_ROUTE_BATCH_SIZE = 10
 _CHANNEL_ROUTE_MAX_ATTEMPTS = 5
 _CHANNEL_ROUTE_POLL_SECONDS = 1.0
 _PROGRESS_TURN_STATE_LIMIT = 256
-_TURN_DECISION_BATCH_SIZE = 50
-_TURN_ADMISSION_MAX_ATTEMPTS = 3
-_STAGED_DELIVERY_MAX_ATTEMPTS = 3
 _DEFAULT_GOAL_BUDGET_ROLLOVERS = 3
 _ACCEPTANCE_CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX])\]\s*(.+?)\s*$")
 _ACCEPTANCE_H2_NAMES = {"acceptance", "acceptance criteria", "kabul kriterleri"}
@@ -206,11 +190,6 @@ _SILENT_CONTROL_REASONS = frozenset({
     "stopped", "native_goal_paused", "native_goal_not_rejudged",
     "native_goal_paused_without_question", "late_clarify_unverified",
 })
-
-
-def _normalize_terminal_reason_code(value: Any) -> str:
-    code = str(value or "").strip()
-    return code if code in _CONTINUATION_REASON_CODES else "unverified"
 
 
 def _read_env_file(path: str) -> dict[str, str]:
@@ -302,17 +281,6 @@ def _activity_body(payload: dict[str, Any]) -> str:
         if isinstance(content, dict):
             body = content.get("body")
     return str(body or "")
-
-
-def _native_approval_command(event: MessageEvent) -> bool:
-    """Return true only for the exact native approval command names."""
-    if not bool(getattr(event, "allow_gateway_control", False)):
-        return False
-    text = str(getattr(event, "text", "") or "").lstrip()
-    if not text.startswith("/"):
-        return False
-    command = text[1:].split(None, 1)[0].split("@", 1)[0].casefold()
-    return command in _NATIVE_APPROVAL_COMMANDS
 
 
 def _delivery_key(payload: dict[str, Any], raw: bytes) -> str:
