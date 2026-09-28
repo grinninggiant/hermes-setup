@@ -19,7 +19,6 @@ import yaml
 # (table, state column) pairs summarized by `ledger`; missing tables are reported, not fatal.
 BRIDGE_COUNTS = (
     ("outbox", "state"),
-    ("turn_decisions", "dispatch_state"),
     ("direct_activation_grants", "state"),
     ("waiting_executions", "state"),
     ("activation_waits", "state"),

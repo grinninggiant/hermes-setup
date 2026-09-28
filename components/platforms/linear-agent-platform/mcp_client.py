@@ -115,23 +115,6 @@ MAX_CONTENT_ITEMS = 16
 MAX_TEXT_LENGTH = 256 * 1024
 
 
-def _json_schema_types(schema: Any) -> set[str]:
-    if not isinstance(schema, dict):
-        return set()
-    found: set[str] = set()
-    raw_type = schema.get("type")
-    if isinstance(raw_type, str):
-        found.add(raw_type)
-    elif isinstance(raw_type, list):
-        found.update(value for value in raw_type if isinstance(value, str))
-    for keyword in ("anyOf", "oneOf"):
-        variants = schema.get(keyword)
-        if isinstance(variants, list):
-            for variant in variants:
-                found.update(_json_schema_types(variant))
-    return found
-
-
 def _expected_input_type(field: str) -> str:
     if field in ARRAY_INPUT_FIELDS:
         return "array"

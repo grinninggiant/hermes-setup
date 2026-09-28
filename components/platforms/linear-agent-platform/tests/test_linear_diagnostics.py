@@ -49,7 +49,6 @@ class LinearDiagnosticsTests(unittest.TestCase):
             self.assertEqual(code, 0)
             data = json.loads(out)
             self.assertEqual(data["bridge"]["outbox"], {"delivered": 1, "dead": 1})
-            self.assertIsNone(data["bridge"]["turn_decisions"])  # absent table tolerated
             self.assertEqual([r["id"] for r in data["open_outbox"]], ["b"])
             self.assertEqual(data["outbound_mcp"], {"outcome_unknown": 1})
             self.assertNotIn("SECRET", out)

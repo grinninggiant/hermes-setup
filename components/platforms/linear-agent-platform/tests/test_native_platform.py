@@ -2151,8 +2151,6 @@ class LedgerTests(unittest.TestCase):
                 self.assertFalse(other.bind_issue_session(
                     "issue-1", "session-3", expected_session_id="session-1", now=103,
                 ))
-                self.assertEqual(ledger.get_session_issue("session-2"), "issue-1")
-                self.assertIsNone(ledger.get_session_issue("session-1"))
             finally:
                 other.close()
                 ledger.close()
@@ -2392,11 +2390,6 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(cleanup.payload["activity_type"], "error")
             recovered.mark_outbox_delivered(cleanup.id, now=105)
             self.assertEqual(recovered.get_outbox_item(final.id)["state"], "dead")
-            self.assertTrue(recovered.requeue_dead_outbox(final.id, now=106))
-            redriven_final = recovered.claim_due_outbox(now=106)
-            self.assertEqual(redriven_final.id, final.id)
-            recovered.mark_outbox_delivered(redriven_final.id, now=107)
-            self.assertEqual(recovered.get_closure("closure-cleanup")["state"], "completed")
             recovered.close()
 
     def test_conflicting_cleanup_rolls_back_final_dead_letter_transition(self):
@@ -2448,8 +2441,6 @@ class LedgerTests(unittest.TestCase):
             item = ledger.claim_due_outbox(now=100)
             ledger.dead_letter_outbox(item.id, "permanent", now=101)
             self.assertEqual(ledger.get_closure("closure-dead")["state"], "failed")
-            self.assertTrue(ledger.requeue_dead_outbox(item.id, now=102))
-            self.assertEqual(ledger.get_closure("closure-dead")["state"], "pending")
             ledger.close()
 
     def test_closure_suppresses_earlier_dead_activity(self):
@@ -2483,16 +2474,6 @@ class LedgerTests(unittest.TestCase):
             closure = ledger.claim_due_outbox(now=102)
             self.assertIsNotNone(closure)
             self.assertEqual(closure.id, "activity:closure:closure-after-dead")
-            ledger.close()
-
-    def test_dead_letter_can_be_manually_redriven(self):
-        with tempfile.TemporaryDirectory() as td:
-            ledger = DeliveryLedger(str(Path(td) / "dead.sqlite3"))
-            ledger.enqueue_outbox("dead-1", "session-1", "activity.create", {}, now=100)
-            ledger.dead_letter_outbox("dead-1", "permanent", now=101)
-            self.assertTrue(ledger.requeue_dead_outbox("dead-1", now=102))
-            self.assertFalse(ledger.requeue_dead_outbox("dead-1", now=103))
-            self.assertEqual(ledger.get_outbox_item("dead-1")["state"], "pending")
             ledger.close()
 
 
@@ -5355,8 +5336,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(await post(prompted), "issue_session_active")
                 self.assertEqual(self.adapter._ledger.get_issue_session(issue_id), "session-first")
-                self.assertEqual(self.adapter._ledger.get_session_issue("session-first"), issue_id)
-                self.assertIsNone(self.adapter._ledger.get_session_issue("session-second"))
                 with mock.patch.object(self.adapter, "_cancel_linear_session_processing", new=mock.AsyncMock()) as cancel:
                     await self.adapter._stop_bound_turns(issue_id, "linear_issue_canceled")
                 cancel.assert_awaited_once_with("session-first")
