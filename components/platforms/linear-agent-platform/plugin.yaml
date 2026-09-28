@@ -1,5 +1,5 @@
 name: linear
-version: 0.8.67
+version: 0.8.68
 description: Native Linear Agent Sessions with evidence-gated acceptance and policy-gated MCP tools
 kind: platform
 author: Polatcan Studio

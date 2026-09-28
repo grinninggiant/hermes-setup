@@ -949,6 +949,58 @@ query LinearAgentSessionDeliveryGuard($id: String!) {
             "state": dict(state) if isinstance(state, dict) else {},
         }
 
+    async def get_issue_turn_context(self, issue_id: str) -> dict[str, Any]:
+        """Issue fields of get_agent_turn_context for a local owner session (no AgentSession)."""
+        data = await self.graphql(
+            """
+query LinearIssueTurnContext($id: String!) {
+  issue(id: $id) {
+    id identifier title description updatedAt
+    state { id name type }
+    delegate { id name }
+  }
+}
+""",
+            {"id": issue_id},
+        )
+        issue = data.get("issue")
+        if (
+            not isinstance(issue, dict)
+            or not str(issue.get("id") or "")
+            or not isinstance(issue.get("state"), dict)
+            or not isinstance(issue.get("delegate"), dict)
+        ):
+            raise LinearAPIError("Issue turn context was incomplete")
+        return {
+            "id": str(issue["id"]),
+            "identifier": str(issue.get("identifier") or issue["id"]),
+            "title": str(issue.get("title") or ""),
+            "description": str(issue.get("description") or ""),
+            "updatedAt": str(issue.get("updatedAt") or ""),
+            "state": dict(issue["state"]),
+            "delegate": dict(issue["delegate"]),
+        }
+
+    async def get_comment_evidence(self, comment_id: str) -> dict[str, str]:
+        """Read one comment's author, issue and body for evidence_comment checks."""
+        data = await self.graphql(
+            """
+query LinearCommentEvidence($id: String!) {
+  comment(id: $id) { id body user { id } issue { id } }
+}
+""",
+            {"id": comment_id},
+        )
+        comment = data.get("comment")
+        if not isinstance(comment, dict) or str(comment.get("id") or "") != comment_id:
+            raise LinearAPIError("Comment evidence was unavailable")
+        return {
+            "id": comment_id,
+            "body": str(comment.get("body") or ""),
+            "user_id": str((comment.get("user") or {}).get("id") or ""),
+            "issue_id": str((comment.get("issue") or {}).get("id") or ""),
+        }
+
     async def get_agent_turn_context(self, session_id: str) -> dict[str, Any]:
         """Read the live session, issue, delegate, state, and complete blocker set."""
         data = await self.graphql(
