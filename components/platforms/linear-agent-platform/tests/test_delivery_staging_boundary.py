@@ -5,9 +5,11 @@ from gateway.platforms.base import BasePlatformAdapter
 from gateway.run_goals import GatewayGoalsMixin
 from gateway.platforms.base import ProcessingOutcome
 from test_native_continuation import NativeContinuationTests, turn_event
+from _fork_core import fork_core_only  # noqa: E402
 
 
 class StagedDeliveryBoundaryTests(NativeContinuationTests):
+    @fork_core_only
     async def test_staged_response_never_reaches_generic_sender_before_judge(self):
         event = turn_event()
         await self.adapter.on_processing_start(event)
@@ -41,6 +43,8 @@ class StagedDeliveryBoundaryTests(NativeContinuationTests):
 
         await self.adapter.on_processing_complete(second, ProcessingOutcome.SUCCESS)
         self.assertNotIn("linear-session", self.adapter._pending_turn_deliveries)
+
+    @fork_core_only
 
     async def test_retryable_second_authoritative_read_retains_staged_delivery(self):
         from test_native_continuation import FakeGoalManager, LinearAPIError
@@ -107,6 +111,8 @@ class StagedDeliveryBoundaryTests(NativeContinuationTests):
             "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"response\"%'"
         ).fetchone()[0]
         self.assertEqual(response_rows, 1)
+
+    @fork_core_only
 
     async def test_stop_between_staged_retries_fences_without_success_or_loop(self):
         from test_native_continuation import FakeGoalManager, LinearAPIError

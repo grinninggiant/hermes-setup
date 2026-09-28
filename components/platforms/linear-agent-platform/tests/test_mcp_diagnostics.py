@@ -18,6 +18,9 @@ SECRET = "Bearer secret-token session-id=private body=private"
 
 class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        names_free = mock.patch("linear_tools._tool_names_available", return_value=True)
+        names_free.start()
+        self.addCleanup(names_free.stop)
         self.fixture = fixtures.LinearMCPClientTests()
         await self.fixture.asyncSetUp()
         self.client = self.fixture.client()
@@ -174,6 +177,11 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
             await execution.asyncTearDown()
 
 class SafeOutputTests(unittest.TestCase):
+    def setUp(self):
+        names_free = mock.patch("linear_tools._tool_names_available", return_value=True)
+        names_free.start()
+        self.addCleanup(names_free.stop)
+
     def test_unknown_exception_is_not_stringified_or_inspected(self):
         class HostileError(RuntimeError):
             def __str__(self):

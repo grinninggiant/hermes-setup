@@ -27,6 +27,7 @@ except ImportError:  # Upstream cores carry no platform goal-status seam.
     GoalStatusNotice = GoalStatusNoticeKind = None
 from gateway.run_agent_cache import GatewayAgentCacheMixin
 from gateway.session import SessionSource
+from _fork_core import fork_core_only  # noqa: E402
 
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -807,6 +808,8 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(".evaluate_after_turn(", source_text)
         self.assertNotIn("GoalManager", source_text)
 
+    @fork_core_only
+
     async def test_metadata_light_native_wake_has_owned_turn_inside_handler(self):
         from gateway.platforms.base import BasePlatformAdapter
 
@@ -852,6 +855,8 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sent, [("linear-session", "elicitation")])
         finally:
             clarify_gateway.clear_session(key)
+
+    @fork_core_only
 
     async def test_metadata_light_veto_does_not_bind_or_execute(self):
         from gateway.platforms.base import BasePlatformAdapter
@@ -924,6 +929,8 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
             "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"response\"%'"
         ).fetchone()[0]
         self.assertEqual(response_rows, 0)
+
+    @fork_core_only
 
     async def test_core_delivery_stages_until_native_judge_then_delivers_once(self):
         """The core calls response preparation before its native goal judge."""
@@ -1322,6 +1329,8 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(await self.adapter.allow_internal_execution(event))
 
+    @fork_core_only
+
     async def test_native_goal_status_notice_is_not_a_linear_response(self):
         notice = GoalStatusNotice(
             kind=GoalStatusNoticeKind.GOAL,
@@ -1576,13 +1585,14 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
         await self.adapter._recover_turn_decisions()
         stopped = await self.adapter._stop_bound_turns("issue-164", "disabled stop")
 
-        self.assertFalse(stopped)
+        # Recovery and fencing stay inert, but removing the delegate still stops live work.
+        self.assertTrue(stopped)
         self.assertEqual(
             self.adapter._ledger.get_turn_decision(row["decision_id"])["dispatch_state"],
             "enqueued",
         )
         self.assertEqual(self.admitted, [])
-        self.adapter._cancel_linear_session_processing.assert_not_awaited()
+        self.adapter._cancel_linear_session_processing.assert_awaited_once_with("linear-session")
 
     async def test_unchecked_done_recovery_before_resume_is_effectively_once(self):
         FakeGoalManager.existing = True

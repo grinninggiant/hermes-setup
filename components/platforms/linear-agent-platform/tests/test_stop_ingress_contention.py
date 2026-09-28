@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 import test_native_platform as fixtures
 import test_native_continuation as native
+from _fork_core import fork_core_only  # noqa: E402
 
 
 class StopIngressContentionTests(unittest.IsolatedAsyncioTestCase):
@@ -340,6 +341,8 @@ class StopIngressContentionTests(unittest.IsolatedAsyncioTestCase):
 class StopRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
     """Exercise native worker gates and targeted interruption in the paired core."""
 
+    @fork_core_only
+
     async def test_worker_entry_rechecks_stop_gate_for_external_and_internal_turns(self):
         from contextlib import nullcontext
         from types import SimpleNamespace
@@ -402,6 +405,8 @@ class StopRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls, [], "closed Stop gate reached the real core worker boundary")
                 self.assertTrue(result["interrupted"])
 
+    @fork_core_only
+
     async def test_public_interrupt_cannot_retarget_same_session_successor_during_lookup(self):
         from types import SimpleNamespace
         from gateway.run import GatewayRunner
@@ -453,6 +458,8 @@ class StopRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(task, return_exceptions=True)
         self.assertEqual(successor.reasons, [], "session identity is not exact turn-generation identity")
         self.assertTrue(runner._is_session_run_current(key, successor_generation))
+
+    @fork_core_only
 
     async def test_plugin_cancel_cannot_cancel_successor_after_core_lookup(self):
         from types import SimpleNamespace
