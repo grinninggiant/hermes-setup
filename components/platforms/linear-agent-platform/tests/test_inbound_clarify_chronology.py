@@ -390,3 +390,6 @@ class InboundClarifyChronologyTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
                 self.assertTrue((await asyncio.wait_for(send, 5)).success)
+
+
+from _fork_core import require_clarify_owner_binding as setUpModule  # noqa: E402

@@ -309,10 +309,9 @@ def fake_gateway_runner(store=None):
     runner = SimpleNamespace(
             async_session_store=store or FakeSessionStore(),
             interrupt_session_processing=mock.AsyncMock(
-                spec=GatewayAgentCacheMixin.interrupt_session_processing,
                 return_value=True,
             ),
-            _profile_name_for_source=lambda _source: None,
+            _profile_name_for_source=lambda _source, **_kw: None,
     )
     return attach_fake_goal_api(runner)
 
@@ -884,7 +883,6 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
             goal_state_for_source=mock.AsyncMock(return_value=None),
             ensure_goal_for_source=mock.AsyncMock(return_value=ensured),
             interrupt_session_processing=mock.AsyncMock(
-                spec=GatewayAgentCacheMixin.interrupt_session_processing,
                 return_value=True,
             ),
         )

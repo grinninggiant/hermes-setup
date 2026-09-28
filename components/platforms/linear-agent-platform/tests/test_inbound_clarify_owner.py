@@ -30,7 +30,7 @@ class InboundClarifyOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._ledger.bind_issue_session("issue-221", "linear-session-221")
         store = self.adapter.gateway_runner.async_session_store
         store.get_or_create_session = mock.AsyncMock(return_value=store.lookup_by_session_key.return_value)
-        self.adapter.gateway_runner._profile_name_for_source = lambda *a: None
+        self.adapter.gateway_runner._profile_name_for_source = lambda *a, **_kw: None
         self.adapter.gateway_runner.goal_state_for_source = mock.AsyncMock(
             return_value=SimpleNamespace(status="active"))
         app = web.Application()
@@ -495,3 +495,6 @@ class InboundClarifyOwnerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from _fork_core import require_clarify_owner_binding as setUpModule  # noqa: E402
