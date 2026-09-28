@@ -851,7 +851,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             {
                 "status": status,
                 "adapter": "linear-native",
-                "version": "0.8.69",
+                "version": "0.8.70",
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
@@ -3295,7 +3295,10 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                                 item.id, item.aggregate_key,
                             )
                             return True
-                        if item.payload.get("activity_type") == "response":
+                        if (
+                            item.payload.get("activity_type") == "response"
+                            and not item.payload.get("acceptance_open")
+                        ):
                             if (
                                 "acceptance_snapshot" in item.payload
                                 or item.id.startswith("activity:final:")
@@ -3836,6 +3839,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 or content.startswith(_LINEAR_HOME_CHANNEL_NOTICE_PREFIX)
             ) else "response"
             item_key = None
+            acceptance_open_reason = ""
             acceptance_snapshot: dict[str, Any] | None = None
             atomic_final_key = False
             if activity_type == "response":
@@ -3858,15 +3862,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 ):
                     gate_reason = "acceptance_delegate_mismatch"
                 if gate_reason not in {"no_acceptance_criteria", "acceptance_complete"}:
-                    activity_type = "error"
+                    # Deliver the answer (status questions must not be dropped) but
+                    # label it: without full evidence it is never a completion.
                     content = (
-                        "Acceptance final gate blocked the success response: "
-                        f"{gate_reason}. Unverified criteria remain open; no completion was delivered."
+                        f"⚠️ Kabul kanıtı eksik ({gate_reason}); bu yanıt tamamlanma sayılmaz.\n\n"
+                        + content
                     )
-                    item_key = (
-                        f"acceptance-gate:{chat_id}:"
-                        f"{delivery_context.get('updated_at') or 'unknown'}:{gate_reason}"
-                    )
+                    acceptance_open_reason = gate_reason
                 else:
                     acceptance_snapshot = {
                         "issue_id": issue_id,
@@ -3888,6 +3890,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 content,
                 item_key=item_key,
                 ephemeral=nonterminal_progress,
+                metadata={"acceptance_open": acceptance_open_reason} if acceptance_open_reason else None,
                 acceptance_snapshot=acceptance_snapshot,
                 atomic_final_key=atomic_final_key,
             )
@@ -3912,13 +3915,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         "Transient Linear progress is dead-lettered",
                         retryable=False,
                     )
-            if activity_type == "error" and item_key and item_key.startswith("acceptance-gate:"):
-                return SendResult(
-                    success=False,
-                    message_id=activity_id,
-                    error="Acceptance final gate rejected the success response",
-                    retryable=False,
-                )
             # Success means durably accepted. The outbox owns transport retries.
             return SendResult(success=True, message_id=activity_id)
         except LinearAPIError as exc:

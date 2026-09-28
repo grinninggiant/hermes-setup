@@ -3173,20 +3173,20 @@ payload
             1,
         )
 
-    async def test_mark_acceptance_rejects_unrelated_prechecked_criterion_without_vendor_mutation(self):
-        description = "## Kabul kriterleri\n- [x] Human prechecked criterion"
+    async def test_mark_acceptance_backfill_rejects_unchecked_criterion(self):
+        description = "## Kabul kriterleri\n- [ ] Unproven criterion"
         evidence = [{
             "criterion_hash": acceptance_criteria(description)[0].criterion_hash,
             "test_class": "integration",
             "evidence_digest": "c" * 64,
-            "evidence_pointer": "linear://activity/prechecked-proof",
+            "evidence_pointer": "linear://activity/unchecked-proof",
             "observed_revision": "2026-08-09T18:00:00.000Z",
             "result": "PASS",
             "timestamp": "2026-08-09T18:00:01.000Z",
         }]
 
         result, mcp, _graphql = await self.run_acceptance_action(
-            operation_key="mark-acceptance-prechecked-backfill",
+            operation_key="mark-acceptance-unchecked-backfill",
             contexts=[self.plan_context(description=description)],
             description=description,
             evidence=evidence,
@@ -3230,38 +3230,31 @@ payload
             {criterion.criterion_hash},
         )
 
-    async def test_mark_acceptance_backfill_is_only_ops200_soul(self):
-        for label, issue_id, text in (
-            ("other_issue", "issue-1", _OPS200_SOUL_TEXT),
-            ("other_criterion", _OPS200_ISSUE_ID, "Unrelated checked proof"),
-        ):
-            with self.subTest(label=label):
-                description = f"## Kabul kriterleri\n- [x] {text}\n- [ ] Pending proof"
-                criterion = acceptance_criteria(description)[0]
-                before = {**self.plan_context(description=description), "id": issue_id}
-                result, mcp, _graphql = await self.run_acceptance_action(
-                    operation_key=f"backfill-scope-{label}",
-                    contexts=[before, before],
-                    description=description,
-                    issue_id=issue_id,
-                    evidence=[{
-                        "criterion_hash": criterion.criterion_hash,
-                        "test_class": "integration",
-                        "evidence_digest": "f" * 64,
-                        "evidence_pointer": f"linear://activity/{label}",
-                        "observed_revision": before["updatedAt"],
-                        "result": "PASS",
-                        "timestamp": "2026-08-09T18:00:01.000Z",
-                    }],
-                )
-                self.assertEqual(result.get("reason"), "acceptance_evidence_invalid", result)
-                self.assertFalse(any(call[0] == "save_issue" for call in mcp.calls))
-                self.assertEqual(
-                    self.acceptance_ledger.acceptance_evidence_hashes(
-                        issue_id, "actor-1", accepted_revision=before["updatedAt"],
-                    ),
-                    set(),
-                )
+    async def test_mark_acceptance_backfills_any_checked_criterion(self):
+        description = "## Kabul kriterleri\n- [x] Previously checked proof\n- [ ] Pending proof"
+        criterion = acceptance_criteria(description)[0]
+        before = self.plan_context(description=description)
+        result, mcp, _graphql = await self.run_acceptance_action(
+            operation_key="generic-backfill",
+            contexts=[before, before],
+            description=description,
+            evidence=[{
+                "criterion_hash": criterion.criterion_hash,
+                "test_class": "vendor",
+                "evidence_digest": "f" * 64,
+                "evidence_pointer": "linear://activity/generic-backfill",
+                "observed_revision": before["updatedAt"],
+                "result": "PASS",
+                "timestamp": "2026-08-09T18:00:01.000Z",
+            }],
+        )
+        self.assertEqual(result.get("status"), "already_accepted", result)
+        self.assertFalse(any(call[0] == "save_issue" for call in mcp.calls))
+        self.assertEqual(
+            self.acceptance_ledger.acceptance_evidence_hashes(
+                "issue-1", "actor-1", accepted_revision=before["updatedAt"]),
+            {criterion.criterion_hash},
+        )
 
     async def test_mark_acceptance_backfill_rechecks_authority_before_persist(self):
         description = f"## Kabul kriterleri\n- [x] {_OPS200_SOUL_TEXT}\n- [ ] Pending proof"
