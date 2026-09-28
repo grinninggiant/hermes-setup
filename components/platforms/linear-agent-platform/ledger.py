@@ -891,7 +891,7 @@ class DeliveryLedger:
         }
 
     def expire_orphan_direct_grants(self, *, max_age: int = 3600, now: int | None = None) -> int:
-        """Cancel bound grants whose Direct event never arrived (webhook lost or superseded)."""
+        """Cancel bound grants with no live Direct event (never arrived, or failed/canceled)."""
         now = int(time.time()) if now is None else int(now)
         with self._locked():
             count = self._db.execute(
@@ -899,7 +899,8 @@ class DeliveryLedger:
                 "last_error='granted_without_event_expired', updated_at=? "
                 "WHERE state='granted' AND updated_at <= ? AND NOT EXISTS ("
                 "SELECT 1 FROM direct_activation_events e "
-                "WHERE e.issue_id = direct_activation_grants.issue_id)",
+                "WHERE e.issue_id = direct_activation_grants.issue_id "
+                "AND e.state IN ('waiting', 'claimed'))",
                 (now, now - max_age),
             ).rowcount
             self._db.commit()
