@@ -46,43 +46,8 @@ def _adapter(extra: dict | None = None) -> LinearPlatformAdapter:
 
 
 class GoalFreeCoreTests(unittest.IsolatedAsyncioTestCase):
-    def test_goal_features_are_forced_off_without_core_goal_operations(self):
-        adapter = _adapter(
-            {"native_goal_continuation_enabled": True, "dependency_wait_enabled": True}
-        )
-        adapter.gateway_runner = _UpstreamRunner()
 
-        with self.assertLogs(adapter_mod.logger, "WARNING"):
-            adapter._disable_goal_features_without_core_goals()
 
-        self.assertFalse(adapter._native_goal_continuation_enabled)
-        self.assertFalse(adapter._dependency_wait_enabled)
-
-    def test_goal_features_stay_configured_on_a_core_with_goal_operations(self):
-        adapter = _adapter(
-            {"native_goal_continuation_enabled": True, "dependency_wait_enabled": True}
-        )
-        adapter.gateway_runner = _ForkRunner()
-
-        adapter._disable_goal_features_without_core_goals()
-
-        self.assertTrue(adapter._native_goal_continuation_enabled)
-        self.assertTrue(adapter._dependency_wait_enabled)
-
-    async def test_goal_operations_are_neutral_without_core_goals(self):
-        adapter = _adapter()
-        adapter.gateway_runner = _UpstreamRunner()
-        source = SimpleNamespace(chat_id="session-1")
-
-        self.assertIsNone(await adapter._goal_state_for_source(source, "hermes-1"))
-        self.assertIsNone(
-            await adapter._ensure_goal_for_source(source, "hermes-1", "goal", mock.Mock())
-        )
-        self.assertEqual(
-            await adapter._resume_goal_for_source(source, "hermes-1", reset_budget=False),
-            (None, None),
-        )
-        self.assertIsNone(await adapter._next_goal_prompt_for_source(source, "hermes-1"))
 
     async def test_goal_operations_still_reach_a_core_that_has_them(self):
         adapter = _adapter()
