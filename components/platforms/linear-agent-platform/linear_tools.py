@@ -1557,13 +1557,11 @@ async def execute_with_clients(
                 item.criterion_hash for item in source_by_hash.values() if item.checked
             }
             evidence_matches_transition = evidence_hashes == changed_hashes
+            # Verifier-proven evidence may be recorded for boxes that are already
+            # checked (lost or never-persisted proof); the description must not change.
             evidence_backfills_checked = (
                 not changed_hashes
-                and profile_id == "general"
-                and context.get("id") == _OPS200_ISSUE_ID
-                and bool(target_criteria)
-                and target_criteria[0].text == _OPS200_SOUL_TEXT
-                and evidence_hashes == {target_criteria[0].criterion_hash}
+                and bool(evidence_hashes)
                 and evidence_hashes.issubset(checked_source_hashes)
             )
             if (

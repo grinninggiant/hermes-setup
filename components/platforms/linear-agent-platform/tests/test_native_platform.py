@@ -7456,7 +7456,7 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(self.adapter._linear.activity_ephemeral[-1])
 
-    async def test_unchecked_acceptance_blocks_success_response_with_error_activity(self):
+    async def test_unchecked_acceptance_delivers_labelled_noncompletion_response(self):
         self.adapter._linear.delivery_contexts["session-acceptance-open"] = {
             "id": "session-acceptance-open",
             "status": "active",
@@ -7468,13 +7468,14 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             "state": {"id": "started-1", "name": "In Progress", "type": "started"},
         }
 
-        result = await self.adapter.send("session-acceptance-open", "Claimed success")
+        result = await self.adapter.send("session-acceptance-open", "Status answer")
 
-        self.assertFalse(result.success)
-        self.assertFalse(result.retryable)
-        self.assertEqual(self.adapter._linear.calls[-1][1], "error")
-        self.assertIn("acceptance_unchecked", self.adapter._linear.calls[-1][2])
-        self.assertNotIn(("session-acceptance-open", "response", "Claimed success"), self.adapter._linear.calls)
+        self.assertTrue(result.success)
+        _session, activity_type, body = self.adapter._linear.calls[-1]
+        self.assertEqual(activity_type, "response")
+        self.assertTrue(body.startswith("⚠️ Kabul kanıtı eksik (acceptance_unchecked)"))
+        self.assertTrue(body.endswith("Status answer"))
+        self.assertNotIn(("session-acceptance-open", "response", "Status answer"), self.adapter._linear.calls)
 
     async def test_all_checked_with_delegate_evidence_delivers_final_exactly_once(self):
         description = "## Kabul kriterleri\n- [x] Live canary passes"
@@ -7558,8 +7559,8 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
 
         result = await self.adapter.send("session-acceptance-revision", "Verified final")
 
-        self.assertFalse(result.success)
-        self.assertEqual(self.adapter._linear.calls[-1][1], "error")
+        self.assertTrue(result.success)
+        self.assertIn("acceptance_evidence_incomplete", self.adapter._linear.calls[-1][2])
         self.assertEqual(
             self.adapter._ledger.acceptance_evidence_hashes(
                 "issue-acceptance-revision",
