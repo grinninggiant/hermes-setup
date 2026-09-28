@@ -53,6 +53,17 @@ class LifecycleReviewFixes(unittest.TestCase):
         self.assertEqual(self._state("k2"), ("canceled", "granted_without_event_expired"))
         self.assertEqual(self.ledger.direct_activation_counts(now=1001 + 3601)["stuck_active"], 0)
 
+    def test_granted_grant_with_failed_event_expires(self):
+        _grant(self.ledger, "k3", 1000)
+        self.assertTrue(self.ledger.bind_direct_activation_grant("k3", "issue-3", now=1001))
+        self.ledger._db.execute(
+            "INSERT INTO direct_activation_events(issue_id, session_id, delivery_key, prompt_json, "
+            "state, last_error, created_at, updated_at) "
+            "VALUES('issue-3', 's', 'd', '{}', 'failed', 'unbound_event_expired', 1001, 1001)"
+        )
+        self.assertEqual(self.ledger.expire_orphan_direct_grants(now=1001 + 3600), 1)
+        self.assertEqual(self._state("k3")[0], "canceled")
+
     def test_plan_rejection_names_rule(self):
         self.assertEqual(_plan_sections_detail("short")[1], "plan_too_short")
 
