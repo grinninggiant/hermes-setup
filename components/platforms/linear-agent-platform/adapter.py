@@ -17,7 +17,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Mapping
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable
@@ -39,7 +39,6 @@ try:
 except ImportError:  # Upstream cores carry no platform goal-status seam.
     GoalStatusNotice = Any
 from gateway.session import SessionSource, build_session_key  # type: ignore[import-not-found]
-from hermes_cli.goals import GoalContract
 
 from .acceptance import acceptance_criteria, acceptance_gate
 from .ledger import DeliveryLedger, OutboxItem
@@ -485,12 +484,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and 0 <= configured_rollovers <= _DEFAULT_GOAL_BUDGET_ROLLOVERS
             else _DEFAULT_GOAL_BUDGET_ROLLOVERS
         )
-        self._native_goal_continuation_enabled = (
-            extra.get("native_goal_continuation_enabled") is True
-        )
         self._status_writeback_enabled = extra.get("issue_status_writeback_enabled") is True
         self._data_change_events_enabled = extra.get("data_change_events_enabled") is True
-        self._dependency_wait_enabled = extra.get("dependency_wait_enabled") is True
         self._planned_activation_enabled = extra.get("planned_activation_enabled") is True
         allowed_activation_teams = extra.get("activation_allowed_team_ids")
         if not isinstance(allowed_activation_teams, list):
@@ -654,7 +649,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     retention_seconds=self._retention,
                     outbox_claim_timeout_seconds=max(30, int(self._outbox_max_delay)),
                     startup_recovery=startup_recovery,
-                    continuation_state_enabled=self._native_goal_continuation_enabled,
+                    continuation_state_enabled=False,
                 )
             if self._linear is None:
                 self._linear = LinearClient(self.oauth_file)
@@ -684,7 +679,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             self._signing_secrets = tuple(
                 secret for secret in (current_secret, previous_secret) if len(secret) >= 16
             )
-            self._disable_goal_features_without_core_goals()
             if not await self.connect_outbound_only(startup_recovery=True):
                 raise RuntimeError("Linear outbound dependencies failed to connect")
             assert self._linear is not None
@@ -703,8 +697,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             # Direct activation recovery is a core durable lifecycle, independent
             # of the optional dependency-wait and planned-activation features.
             self._dependency_task = asyncio.create_task(self._dependency_loop())
-            if self._native_goal_continuation_enabled:
-                self._turn_recovery_task = asyncio.create_task(self._recover_turn_decisions())
             logger.info(
                 "[linear] Native adapter listening on %s:%d%s actor=%s organization=%s",
                 self.host,
@@ -966,11 +958,9 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 "features": {
                     "data_change_events": self._data_change_events_enabled,
                     "data_event_types": sorted(_DATA_EVENT_TYPES),
-                    "dependency_wait": self._dependency_wait_enabled,
                     "planned_activation": self._planned_activation_enabled,
                     "status_writeback": self._status_writeback_enabled,
                     "closure_reconciliation": self._closure_reconciliation_enabled,
-                    "native_goal_continuation": self._native_goal_continuation_enabled,
                 },
                 "outbox": outbox,
                 "waiting": waiting,
@@ -1328,21 +1318,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     self._ledger.cancel_wait(agent_session_id)
                     self._ledger.cancel_activation_for_session(agent_session_id)
                     self._ledger.cancel_direct_activation_for_session(agent_session_id)
-            if action == "prompted" and not is_stop:
-                clarify_status = await self._resolve_clarify_input(
-                    agent_session_id, issue_id, payload, delivery_key=delivery_key
-                )
-                if clarify_status is not None:
-                    if clarify_status == "clarify_unavailable":
-                        self._ledger.release(delivery_key)
-                        claimed = False
-                        return web.json_response({"status": clarify_status}, status=503)
-                    self._ledger.mark_done(delivery_key)
-                    return web.json_response(
-                        {"status": clarify_status}, status=200
-                    )
-                if self._native_goal_continuation_enabled and not _activity_body(payload).lstrip().startswith("/"):
-                    self._ledger.bind_clarify_reply(delivery_key, "")
             if (
                 action == "created"
                 and self._planned_activation_enabled
@@ -1407,46 +1382,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                         return web.json_response(
                             {"status": "waiting_for_activation"}, status=200
                         )
-            if action == "created" and self._dependency_wait_enabled and issue_id:
-                async with asyncio.timeout_at(read_deadline):
-                    blockers = await self._linear.get_open_blockers(issue_id)
-                _check_admission_deadline(read_deadline)
-                if direct_activation_created:
-                    direct_issue_lock = self._issue_lock(issue_id)
-                    async with asyncio.timeout_at(read_deadline):
-                        await direct_issue_lock.acquire()
-                    direct_issue_lock_held = True
-                    _check_admission_deadline(read_deadline)
-                if (
-                    direct_activation_created
-                    and not self._direct_activation_claim_is_current(
-                        issue_id, agent_session_id
-                    )
-                ):
-                    self._ledger.mark_done(delivery_key)
-                    return web.json_response(
-                        {"status": "direct_activation_canceled"}, status=200
-                    )
-                if blockers:
-                    self._ledger.put_wait(
-                        agent_session_id,
-                        issue_id,
-                        delivery_key,
-                        payload,
-                        blockers,
-                    )
-                    labels = ", ".join(str(item.get("identifier") or item.get("id")) for item in blockers)
-                    self._enqueue_activity(
-                        agent_session_id,
-                        "elicitation",
-                        f"Waiting for blocking issue(s): {labels}. I will resume automatically when they are completed.",
-                        item_key=f"waiting:{delivery_key}",
-                    )
-                    self._enqueue_status(agent_session_id, issue_id, "blocked", delivery_key)
-                    self._ledger.mark_done(delivery_key)
-                    # The existing dependency loop recovers a completion missed
-                    # before put_wait; do not put vendor I/O after durable ACK state.
-                    return web.json_response({"status": "awaiting_input"}, status=200)
             if direct_activation_created and issue_id and not direct_issue_lock_held:
                 direct_issue_lock = self._issue_lock(issue_id)
                 async with asyncio.timeout_at(read_deadline):
@@ -1489,15 +1424,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     )
                 )
             ):
-                try:
-                    if self._native_goal_continuation_enabled:
-                        await self._fence_turn_decisions_for_visibility(
-                            agent_session_id,
-                            f"linear_{signal or agent_session_status or ('human_prompt' if human_preemption else 'stop')}_signal",
-                        )
-                finally:
-                    if is_stop or human_preemption:
-                        await self._cancel_linear_session_processing(agent_session_id)
+                if is_stop or human_preemption:
+                    await self._cancel_linear_session_processing(agent_session_id)
             if not is_stop and self._ledger.has_session_closure(agent_session_id):
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "closure_reconciled"}, status=200)
@@ -1521,10 +1449,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             )
             # Private provenance, never a field copied from webhook metadata.
             event._linear_verified_normal_prompt = human_preemption
-            if human_preemption and self._native_goal_continuation_enabled:
-                # Native clarify was already classified above. Core's generic
-                # FIFO interceptor must not answer a successor during fallback.
-                event.allow_gateway_control = False
             if native_command and not self._trusted_native_command_requester(event):
                 # Never let the webhook adapter's synthetic source (or the core
                 # webhook platform exemption) authorize a control command.
@@ -1539,14 +1463,11 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 # manager/Direct ambiguity-fenced claim. Consume it once so a
                 # queued event's later pre-handler check gets a fresh read.
                 event._linear_created_read_deadline = read_deadline
-            normal_native_prompt = human_preemption and self._native_goal_continuation_enabled
             if action == "created":
                 _check_admission_deadline(read_deadline)
             if direct_activation_created:
                 direct_dispatch_attempted = True
             await self.handle_message(event)
-            if normal_native_prompt and getattr(event, "_gateway_accepted", False) is not True:
-                raise RuntimeError("Linear normal prompt was not admitted")
             if direct_activation_created and issue_id:
                 if not self._ledger.mark_direct_activation_dispatched(
                     issue_id, agent_session_id
@@ -2978,14 +2899,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                                 event_state_type, bound_session,
                             )
                         elif bound_session:
-                            try:
-                                async with self._session_lock(bound_session):
-                                    if self._native_goal_continuation_enabled:
-                                        await self._fence_turn_decisions_for_visibility(
-                                            bound_session, f"linear_issue_{event_state_type}"
-                                        )
-                            finally:
-                                await self._cancel_linear_session_processing(bound_session)
+                            await self._cancel_linear_session_processing(bound_session)
                 self._ledger.mark_done(delivery_key)
                 return web.json_response({"status": "ignored_self"}, status=200)
             notification = payload.get("notification")
@@ -3007,14 +2921,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             self._ledger.mark_manager_activation(entity_id, "canceled")
                         bound_session = self._ledger.get_issue_session(entity_id)
                         if bound_session:
-                            try:
-                                async with self._session_lock(bound_session):
-                                    if self._native_goal_continuation_enabled:
-                                        await self._fence_turn_decisions_for_visibility(
-                                            bound_session, f"linear_issue_{event_state_type}"
-                                        )
-                            finally:
-                                await self._cancel_linear_session_processing(bound_session)
+                            await self._cancel_linear_session_processing(bound_session)
                     reopen_status = await self._reconcile_human_reopen(
                         payload, entity_id, _issue_locked=True
                     )
@@ -3062,18 +2969,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             if event_type in {"Issue", "IssueRelation"}:
                 for target_id in target_ids:
                     await self._stop_bound_turns_if_blocked(target_id)
-            candidates: dict[str, dict[str, Any]] = {}
-            if self._dependency_wait_enabled:
-                for target_id in target_ids:
-                    for wait in self._ledger.find_waiting_by_blocker(target_id):
-                        candidates[wait["session_id"]] = wait
-                    for wait in self._ledger.list_waiting():
-                        if wait["issue_id"] == target_id:
-                            candidates[wait["session_id"]] = wait
             resumed = 0
-            for session_id in candidates:
-                if await self._reconcile_wait(session_id):
-                    resumed += 1
             if activation_status in {"activation_ambiguous", "delegation_ambiguous"} or reopen_status == "reopen_ambiguous":
                 self._ledger.release(delivery_key)
                 claimed = False
@@ -3107,54 +3003,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                     logger.exception("[linear] Failed to release data delivery %s", delivery_key)
             logger.exception("[linear] Data event reconciliation failed: %s", exc)
             return web.json_response({"status": "unavailable"}, status=503)
-
-    async def _reconcile_wait(self, session_id: str) -> bool:
-        if self._linear is None or self._ledger is None:
-            return False
-        wait = self._ledger.get_wait(session_id)
-        if not wait or wait["state"] != "waiting":
-            return False
-        blockers = await self._linear.get_open_blockers(wait["issue_id"])
-        if blockers:
-            self._ledger.update_wait_blockers(session_id, blockers)
-            return False
-        if not self._ledger.claim_wait(session_id):
-            return False
-        try:
-            async with self._session_lock(session_id):
-                if self._ledger.has_session_closure(session_id):
-                    return False
-                payload = wait["prompt"]
-                event = self._message_event(
-                    payload,
-                    wait["delivery_key"],
-                    "dependency-resume",
-                    dependency_resume=True,
-                )
-                if not self._native_goal_continuation_enabled:
-                    self._schedule_thought(
-                        session_id,
-                        wait["issue_id"],
-                        wait["delivery_key"],
-                        include_queued=False,
-                        body="All blocking issues are complete; Hermes is preparing automatic admission.",
-                    )
-                if self._ledger.has_session_closure(session_id):
-                    return False
-                await self._admit_turn_event(event)
-                if self._ledger.mark_direct_activation_dispatched(
-                    wait["issue_id"], session_id
-                ):
-                    self._ledger.mark_direct_activation_event(
-                        wait["issue_id"], "dispatched"
-                    )
-                self._ledger.mark_wait_resumed(session_id)
-            logger.info("[linear] resumed waiting session=%s issue=%s", session_id, wait["issue_id"])
-            return True
-        except Exception as exc:
-            self._ledger.fail_wait(session_id, str(exc))
-            logger.exception("[linear] Failed to resume waiting session=%s: %s", session_id, exc)
-            return False
 
     def schedule_direct_activation_reconcile(self, issue_id: str) -> None:
         """Wake durable Direct reconciliation from an outbound tool thread."""
@@ -3197,11 +3045,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 return False
             team_id = str((context.get("team") or {}).get("id") or "")
             session_id = str(pending.get("session_id") or "")
-            blockers = (
-                await self._linear.get_open_blockers(issue_id)
-                if self._dependency_wait_enabled
-                else []
-            )
+            blockers = []
             if not self._ledger.claim_direct_activation(
                 issue_id,
                 session_id,
@@ -3290,23 +3134,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                             await self._reconcile_direct_activation_event(pending["issue_id"])
                         except Exception:
                             logger.exception("[linear] Direct recovery failed issue=%s", pending["issue_id"])
-                    if self._dependency_wait_enabled:
-                        if self._native_goal_continuation_enabled:
-                            for wait in self._ledger.list_waiting(state="resumed"):
-                                try:
-                                    await self._recover_unadmitted_dependency_wait(wait["session_id"])
-                                except Exception:
-                                    logger.exception(
-                                        "[linear] Unadmitted wait recovery failed session=%s", wait["session_id"]
-                                    )
-                        for wait in self._ledger.list_waiting():
-                            try:
-                                await self._reconcile_wait(wait["session_id"])
-                            except Exception as exc:
-                                logger.exception(
-                                    "[linear] Dependency recovery failed session=%s issue=%s: %s",
-                                    wait["session_id"], wait["issue_id"], exc,
-                                )
                 await asyncio.sleep(self._dependency_poll_seconds)
             except asyncio.CancelledError:
                 raise
@@ -3455,76 +3282,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         finally:
             if transition_locked:
                 self._progress_transition_lock.release()
-        return activity_id
-
-    def _enqueue_turn_success(
-        self,
-        decision: dict[str, Any],
-        body: str,
-        turn_result: Mapping[str, Any],
-        issue: Mapping[str, Any],
-    ) -> str:
-        """Atomically bind a classified success to its durable response activity."""
-        if self._ledger is None:
-            raise RuntimeError("Linear outbox is unavailable")
-        session_id = str(decision["agent_session_id"])
-        item_key = f"turn-success:{decision['decision_id']}"
-        activity_id = self._activity_uuid(item_key)
-        self._progress_transition_lock.acquire()
-        try:
-            if self._ledger.has_session_closure(session_id):
-                raise RuntimeError("Linear session closed before successful delivery")
-            turn_key = self._current_progress_turn_key(session_id)
-            if not turn_key:
-                turn_key = self._ledger.ensure_progress_turn(
-                    session_id, f"terminal:{activity_id}"
-                )
-            payload: dict[str, Any] = {
-                "activity_id": activity_id,
-                "agent_session_id": session_id,
-                "activity_type": "response",
-                "body": body,
-                "linear_turn_decision_id": str(decision["decision_id"]),
-                "linear_issue_id": str(decision["issue_id"]),
-                "acceptance_snapshot": {
-                    "issue_id": str(issue.get("id") or ""),
-                    "updated_at": str(issue.get("updatedAt") or ""),
-                    "delegate_id": str((issue.get("delegate") or {}).get("id") or ""),
-                    "criterion_hashes": sorted(
-                        item.criterion_hash
-                        for item in acceptance_criteria(str(issue.get("description") or ""))
-                    ),
-                    "evidence_hashes": sorted(self._ledger.acceptance_evidence_hashes(
-                        str(issue.get("id") or ""), str(self._linear.actor_id or ""),
-                        accepted_revision=str(issue.get("updatedAt") or ""),
-                    )),
-                },
-                "linear_turn_result": {
-                    key: turn_result[key]
-                    for key in (
-                        "completed",
-                        "failed",
-                        "interrupted",
-                        "turn_exit_reason",
-                        "session_id",
-                    )
-                },
-            }
-            if turn_key:
-                payload["terminal_progress_key"] = turn_key
-            self._ledger.complete_turn_success(
-                str(decision["decision_id"]),
-                f"activity:{item_key}",
-                session_id,
-                payload,
-            )
-            self._ledger.cancel_acceptance_thoughts(session_id)
-            self._outbox_wakeup.set()
-            self._notify_terminal_progress_fence(
-                session_id, expected_turn_key=turn_key
-            )
-        finally:
-            self._progress_transition_lock.release()
         return activity_id
 
     def _enqueue_status(
@@ -3749,7 +3506,7 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return False
         async with self._outbox_drain_lock:
             item = self._ledger.claim_due_outbox(
-                include_continuations=self._native_goal_continuation_enabled
+                include_continuations=False
             )
             if item is None:
                 return False
@@ -4155,37 +3912,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if not exact:
             raise LinearAPIError("Final acceptance snapshot is stale", retryable=False)
 
-    @classmethod
-    def _bounded_goal_contract(cls, issue: dict[str, Any]) -> tuple[str, GoalContract]:
-        identifier = str(issue.get("identifier") or issue.get("id") or "Linear")[:80]
-        title = " ".join(str(issue.get("title") or "Agent task").split())[:240]
-        goal = f"Complete Linear issue {identifier} — {title}"[:384]
-        criteria = []
-        for match in cls._acceptance_checkbox_matches(issue):
-            criterion = " ".join(match.group(2).split())[:240]
-            if criterion and criterion not in criteria:
-                criteria.append(criterion)
-            if len(criteria) >= 40:
-                break
-        if criteria:
-            checklist = "; ".join(f"[{item}]" for item in criteria)[:6000]
-            verification = (
-                "Every Linear acceptance checkbox must be satisfied and supported by "
-                f"concrete evidence that evaluates to PASS: {checklist}"
-            )
-        else:
-            verification = (
-                "Read the live Linear issue acceptance section. Every acceptance checkbox "
-                "must be satisfied with concrete evidence that evaluates to PASS."
-            )
-        return goal, GoalContract(
-            outcome="All live Linear acceptance criteria are complete.",
-            verification=verification,
-            constraints="Preserve human-owned Linear workflow state and report truthful evidence.",
-            boundaries=f"Work only toward {identifier} and its explicitly delegated dependencies.",
-            stop_when="Stop when blocked, awaiting human input, approval, cancellation, or issue closure.",
-        )
-
     def _core_goals_available(self) -> bool:
         """Only the retired fork core exposed gateway goal operations.
 
@@ -4194,17 +3920,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         """
         runner = getattr(self, "gateway_runner", None)
         return callable(getattr(runner, "goal_state_for_source", None))
-
-    def _disable_goal_features_without_core_goals(self) -> None:
-        if self._core_goals_available():
-            return
-        if self._native_goal_continuation_enabled or self._dependency_wait_enabled:
-            logger.warning(
-                "[linear] Hermes core has no gateway goal operations; "
-                "native goal continuation and dependency wait stay disabled"
-            )
-        self._native_goal_continuation_enabled = False
-        self._dependency_wait_enabled = False
 
     def _goal_operation(self, name: str) -> Callable[..., Any]:
         operation = getattr(getattr(self, "gateway_runner", None), name, None)
@@ -4220,49 +3935,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         return await self._goal_operation("goal_state_for_source")(
             source, session_id=hermes_session_id
         )
-
-    async def _ensure_goal_for_source(
-        self,
-        source: SessionSource,
-        hermes_session_id: str,
-        goal: str,
-        contract: GoalContract,
-    ) -> Any:
-        if not self._core_goals_available():
-            return None
-        return await self._goal_operation("ensure_goal_for_source")(
-            source,
-            goal,
-            contract=contract,
-            session_id=hermes_session_id,
-        )
-
-    async def _resume_goal_for_source(
-        self,
-        source: SessionSource,
-        hermes_session_id: str,
-        *,
-        reset_budget: bool,
-    ) -> tuple[Any, str | None]:
-        if not self._core_goals_available():
-            return None, None
-        result = await self._goal_operation("resume_goal_for_source")(
-            source,
-            reset_budget=reset_budget,
-            session_id=hermes_session_id,
-        )
-        return getattr(result, "state", None), getattr(
-            result, "continuation_prompt", None
-        )
-
-    async def _next_goal_prompt_for_source(
-        self, source: SessionSource, hermes_session_id: str
-    ) -> str | None:
-        if not self._core_goals_available():
-            return None
-        return await self._goal_operation(
-            "next_goal_continuation_prompt_for_source"
-        )(source, session_id=hermes_session_id)
 
     def _classify_turn_outcome_with_reason(
         self,
@@ -4363,14 +4035,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         return self._classify_turn_outcome_with_reason(event, turn_result, context)[0]
 
     @staticmethod
-    def _decision_generation_and_ordinal(state: Any) -> tuple[int, int]:
-        if state is None:
-            raise RuntimeError("native goal state is unavailable")
-        generation = max(1, int(float(state.created_at) * 1_000_000))
-        ordinal = max(0, int(state.turns_used))
-        return generation, ordinal
-
-    @staticmethod
     def _acceptance_checkbox_matches(issue: dict[str, Any]) -> list[re.Match[str]]:
         description = str(issue.get("description") or "")
         lines = description.splitlines()
@@ -4421,14 +4085,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         stamped = str(getattr(source, "profile", "") or "").strip()
         return stamped or None
 
-    @staticmethod
-    def _source_snapshot(source: SessionSource) -> dict[str, Any]:
-        """Serialize the public SessionSource needed for restart-safe routing."""
-        snapshot = {field.name: getattr(source, field.name) for field in fields(SessionSource)}
-        platform = snapshot.get("platform")
-        snapshot["platform"] = str(getattr(platform, "value", platform) or "")
-        return snapshot
-
     def _source_from_snapshot(
         self, snapshot: Mapping[str, Any], agent_session_id: str
     ) -> SessionSource:
@@ -4477,15 +4133,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             "turn_id": str(turn_id or ""),
         }
 
-    async def _admit_turn_event(self, event: MessageEvent) -> bool:
-        """Schedule through Hermes' public, receipt-bearing wake boundary."""
-        from gateway.wake import WakeNotAccepted, admit_internal_event
-
-        await admit_internal_event(self, event)
-        if getattr(event, "_linear_ingress_vetoed", False):
-            raise WakeNotAccepted("Linear ingress vetoed execution")
-        return True
-
     def _linear_processing_owner(self, session_id: str) -> tuple[Any, ...]:
         source = self.build_source(
             chat_id=session_id,
@@ -4517,11 +4164,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         ) or None
         try:
             if self._ledger is not None:
-                if self._native_goal_continuation_enabled:
-                    # Commit the execution fence before receipt writes or awaits:
-                    # failed receipt cleanup must not leave recovery able to run.
-                    # The caller's locked visibility fence is still required.
-                    self._ledger.fence_turn_decisions(session_id, "linear_authoritative_stop")
                 self._ledger.cancel_acceptance_thoughts(session_id)
         finally:
             # Failed persistence keeps HTTP retryable, never execution alive.
@@ -4565,30 +4207,14 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             # Upstream cancel has no owner fence; never cancel a newer turn.
             await self.cancel_session_processing(session_key)
 
-    async def _fence_turn_decisions_for_visibility(self, session_id: str, reason: str) -> int:
-        # This is the sole lock shared with tagged activity dispatch; callers
-        # may already hold the session lock (webhook/issue preemption).
-        async with self._outbox_drain_lock:
-            ledger = self._ledger
-            if ledger is None:
-                raise RuntimeError("Linear ledger unavailable for visibility fence")
-            return ledger.fence_turn_decisions(session_id, reason)
-
     async def _stop_bound_turns(self, issue_id: str, reason: str) -> bool:
         if self._ledger is None:
             return False
         session_id = self._ledger.get_issue_session(issue_id)
         if not session_id:
             return False
-        changed = 0
-        try:
-            if self._native_goal_continuation_enabled:
-                async with self._session_lock(session_id):
-                    changed = await self._fence_turn_decisions_for_visibility(session_id, reason)
-        finally:
-            # Removing the delegate must stop running work even without continuation.
-            await self._cancel_linear_session_processing(session_id)
-        return bool(changed or session_id)
+        await self._cancel_linear_session_processing(session_id)
+        return True
 
     async def _stop_bound_turns_if_blocked(self, issue_id: str) -> bool:
         if self._ledger is None or self._linear is None:
@@ -4599,205 +4225,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         if not await self._linear.get_open_blockers(issue_id):
             return False
         return await self._stop_bound_turns(issue_id, "linear_issue_blocked")
-
-    async def handle_message(self, event: MessageEvent) -> None:
-        """Bind and gate Linear turns before the base adapter schedules model execution.
-
-        Hermes' native goal wakes are intentionally metadata-light.  The durable Linear
-        AgentSession binding and the runner's session store are therefore resolved here, at
-        the last adapter-owned ingress boundary before ``BasePlatformAdapter`` installs its
-        processing task.  ``on_processing_start`` is too late and its return value is ignored.
-        """
-        if self._native_goal_continuation_enabled:
-            vetoed = await self._prepare_bound_linear_ingress(event)
-            event._linear_ingress_vetoed = vetoed
-            if vetoed:
-                event._gateway_accepted = True
-                return
-        await super().handle_message(event)
-
-    async def allow_internal_execution(self, event: MessageEvent) -> bool:
-        """Re-run authoritative gates at the core's last pre-handler boundary."""
-        if not self._native_goal_continuation_enabled:
-            return True
-        if await self._prepare_bound_linear_ingress(event):
-            return False
-        decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
-        if decision_id:
-            decision = self._ledger.get_turn_decision(decision_id) if self._ledger else None
-            # Core logs and swallows ordinary processing-start exceptions.
-            # Only the event that acquired the running claim may reach a model.
-            if (not decision or decision["dispatch_state"] != "running" or event.source is None
-                or self._active_turn_events.get(event.source.chat_id) is not event):
-                return False
-        # Native FIFO wakes bypass handle_message and arrive metadata-light:
-        # core processing-start precedes this admission callback. Only now has
-        # the exact live session binding passed every authoritative gate.
-        if event.source is not None and self._active_turn_events.get(event.source.chat_id) is not event:
-            self._bind_active_turn(event)
-        return True
-
-    async def prepare_goal_status_notice(
-        self, source: SessionSource, notice: GoalStatusNotice
-    ) -> GoalStatusNotice | None:
-        """Keep native goal/loop bookkeeping from becoming a Linear final response."""
-        del source
-        return None if self._native_goal_continuation_enabled else notice
-
-    async def _prepare_bound_linear_ingress(self, event: MessageEvent) -> bool:
-        if self._ledger is None or self._linear is None or event.source is None:
-            return False
-        session_id = str(event.source.chat_id or "")
-        supplied_session = str(event.metadata.get("linear_agent_session_id") or "")
-        if supplied_session and supplied_session != session_id:
-            return await self._visible_ingress_veto(event, "strict_session_mismatch")
-        decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
-        decision = self._ledger.get_turn_decision(decision_id) if decision_id else None
-        issue_id = self._ledger.get_session_issue(session_id)
-        if issue_id is None and decision is not None and decision["agent_session_id"] == session_id:
-            issue_id = str(decision["issue_id"])
-        supplied_issue = str(event.metadata.get("linear_issue_id") or "")
-        if issue_id is None:
-            # Unrelated internal wakes must retain ordinary Hermes behavior.
-            return False if event.internal and not supplied_session else await self._visible_ingress_veto(
-                event, "issue_binding_missing"
-            )
-        if supplied_issue and supplied_issue != issue_id:
-            return await self._visible_ingress_veto(event, "issue_mismatch")
-        if decision_id and (
-            decision is None
-            or decision["agent_session_id"] != session_id
-            or decision["issue_id"] != issue_id
-        ):
-            return await self._visible_ingress_veto(event, "decision_mismatch")
-
-        extra = getattr(self.config, "extra", None) or {}
-        session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
-            profile=self._session_key_profile(event.source),
-        )
-        store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
-        if store is None:
-            return await self._visible_ingress_veto(event, "hermes_session_unavailable")
-        entry = (
-            await store.lookup_by_session_key(session_key)
-            if event.internal
-            else await store.get_or_create_session(
-                event.source, touch_activity=True
-            )
-        )
-        if entry is None or str(getattr(entry, "session_key", "")) != session_key:
-            return await self._visible_ingress_veto(event, "strict_session_mismatch")
-        hermes_session_id = str(getattr(entry, "session_id", "") or "")
-        supplied_hermes = str(event.metadata.get("gateway_session_id") or "")
-        if not hermes_session_id or (supplied_hermes and supplied_hermes != hermes_session_id):
-            return await self._visible_ingress_veto(event, "strict_session_mismatch")
-        if decision is not None and decision["hermes_session_id"] != hermes_session_id:
-            return await self._visible_ingress_veto(event, "hermes_decision_mismatch")
-
-        event.metadata.update(
-            {
-                "linear_agent_session_id": session_id,
-                "linear_issue_id": issue_id,
-                "gateway_session_key": session_key,
-                "gateway_session_id": hermes_session_id,
-                "gateway_session_strict": True,
-            }
-        )
-        read_deadline = getattr(event, "_linear_created_read_deadline", None)
-        event._linear_created_read_deadline = None
-        async with asyncio.timeout_at(read_deadline):
-            context = await self._linear.get_agent_turn_context(session_id)
-        _check_admission_deadline(read_deadline)
-        probe = {
-            "completed": False,
-            "failed": False,
-            "interrupted": False,
-            "turn_exit_reason": "max_iterations_reached(ingress)",
-            "session_id": hermes_session_id,
-        }
-        outcome = self._classify_turn_outcome(event, probe, context)
-        if event.metadata.get("linear_dependency_resume"):
-            if outcome not in {"continue", "awaiting_input"} or context.get("open_blockers"):
-                return await self._visible_ingress_veto(event, outcome)
-            if not await self._progress_dependency_wait(event):
-                return await self._visible_ingress_veto(event, "dependency_resume_unverified")
-            # Native activity progression, never an in-memory status override.
-            context = await self._linear.get_agent_turn_context(session_id)
-            outcome = self._classify_turn_outcome(event, probe, context)
-        # Core owns approval waiter lookup and resolution.  When the native
-        # session is waiting for model execution, let only /approve and /deny
-        # reach that non-model command path.  All lifecycle, issue, delegate,
-        # requester, and session checks above remain mandatory; every other
-        # slash command keeps the existing guarded path.
-        if _native_approval_command(event) and outcome in {"approval", "awaiting_input"}:
-            return False
-        issue = context.get("issue")
-        state = await self._goal_state_for_source(event.source, hermes_session_id)
-        if event.metadata.get("linear_dependency_resume") and self._dependency_resume_claim(event) is None:
-            return await self._visible_ingress_veto(event, "dependency_resume_fenced")
-        if event.metadata.get("linear_dependency_resume") and state is not None and not (
-            state.status == "active" and state.turns_used == 0
-            and getattr(state, "last_turn_at", 0) == 0
-            and state.created_at == getattr(event, "_linear_dependency_goal_generation", None)
-        ):
-            return await self._visible_ingress_veto(event, "dependency_resume_goal_exists")
-        if event.internal:
-            if state is None or str(state.status) != "active":
-                outcome = "stopped"
-            if outcome != "continue":
-                return await self._visible_ingress_veto(
-                    event, outcome
-                )
-        elif outcome not in {"continue", "success"}:
-            return await self._visible_ingress_veto(
-                event, outcome
-            )
-        elif state is None:
-            if not isinstance(issue, dict):
-                return await self._visible_ingress_veto(event, "issue_missing")
-            goal, contract = self._bounded_goal_contract(issue)
-            state = await self._ensure_goal_for_source(
-                event.source, hermes_session_id, goal, contract
-            )
-            if event.metadata.get("linear_dependency_resume"):
-                event._linear_dependency_goal_generation = state.created_at
-        elif (
-            str(state.status) == "paused"
-            and getattr(event, "_linear_verified_normal_prompt", False)
-        ):
-            if not await self._resume_ops200_profile_pause(event, hermes_session_id, state):
-                if self._ledger.latest_clarify_timeout(session_id) is None:
-                    return await self._visible_ingress_veto(
-                        event, "native_goal_paused_without_question"
-                    )
-                if not await self._resume_late_clarify_goal(event, hermes_session_id, state):
-                    return await self._visible_ingress_veto(event, "late_clarify_unverified")
-        if event.metadata.get("linear_dependency_resume") and self._dependency_resume_claim(event) is None:
-            return await self._visible_ingress_veto(event, "dependency_resume_fenced")
-        _check_admission_deadline(read_deadline)
-        return False
-
-    def _dependency_resume_claim(self, event: MessageEvent) -> dict[str, Any] | None:
-        """Fence the exact claim after awaits, including the last pre-handler hook."""
-        if self._ledger is None:
-            return None
-        session_id = event.metadata["linear_agent_session_id"]
-        wait = self._ledger.get_wait(session_id)
-        from tools import approval, clarify_gateway
-        key = event.metadata["gateway_session_key"]
-        if (not wait or wait["state"] not in {"resuming", "resumed"}
-            or wait["revision"] != getattr(event, "_linear_dependency_revision", None)
-            or wait["issue_id"] != event.metadata["linear_issue_id"]
-            or wait["delivery_key"] != event.metadata["linear_delivery_key"]
-            or wait["prompt"] != event.raw_message
-            or self._ledger.has_session_closure(session_id)
-            or approval.get_pending_gateway_approval(key) is not None
-            or clarify_gateway.get_pending_for_session(key, include_choice_prompts=True) is not None):
-            return None
-        return wait
 
     def _dependency_admission_veto(self, wait: dict[str, Any]) -> tuple[str, str] | None:
         if self._ledger is None:
@@ -4813,103 +4240,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and item["payload"].get("body") == body):
             return self._activity_uuid(key), body
         return None
-
-    async def _recover_unadmitted_dependency_wait(self, session_id: str) -> bool:
-        """Recover proven non-execution, never a paused or executed goal."""
-        if self._ledger is None or self._linear is None:
-            return False
-        try:
-            async with self._session_lock(session_id):
-                wait = self._ledger.get_wait(session_id)
-                if (not wait or wait["state"] != "resumed"
-                    or self._ledger.has_session_closure(session_id)
-                    or self._dependency_admission_veto(wait) is None):
-                    return False
-                event = self._message_event(wait["prompt"], wait["delivery_key"], "dependency-resume", dependency_resume=True)
-                extra = getattr(self.config, "extra", None) or {}
-                key = build_session_key(event.source,
-                    group_sessions_per_user=extra.get("group_sessions_per_user", True),
-                    thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
-                    profile=self._session_key_profile(event.source))
-                store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
-                if store is None:
-                    return False
-                from tools import approval, clarify_gateway
-                if (approval.get_pending_gateway_approval(key) is not None
-                    or clarify_gateway.get_pending_for_session(key, include_choice_prompts=True) is not None):
-                    return False
-                entry = await store.lookup_by_session_key(key)
-                if (entry is None or entry.session_key != key or not entry.session_id
-                    or await store.load_transcript(entry.session_id) != []
-                    or not await self._dependency_wait_is_live(wait)):
-                    return False
-                state = await self._goal_state_for_source(event.source, entry.session_id)
-                if state is not None:
-                    return await self._recover_unstarted_dependency_goal(event, wait, entry, state)
-                if wait["last_error"] == "verified_ingress_not_admitted":
-                    return False
-                return self._ledger.requeue_unadmitted_wait(session_id, wait["revision"])
-        except Exception:
-            logger.warning("[linear] Unadmitted wait verification failed session=%s", session_id, exc_info=True)
-            return False
-
-    async def _recover_unstarted_dependency_goal(self, event, wait, entry, state) -> bool:
-        """Resume the zero-turn startup loss using the existing durable decision CAS."""
-        assert self._ledger is not None
-        runner = self.gateway_runner
-        key, session_id = entry.session_key, wait["session_id"]
-
-        def idle():
-            return not (runner._startup_restore_in_progress
-                        or key in self._active_sessions or key in self._pending_messages
-                        or runner._is_session_running(key))
-
-        progress = self._ledger.get_outbox_item(
-            f"activity:dependency-resume:{wait['delivery_key']}:{wait['revision']}"
-        )
-        if (wait["last_error"] != "verified_ingress_not_admitted"
-            or state.status != "active" or state.turns_used != 0 or state.last_turn_at != 0
-            or not idle() or not progress or progress["state"] != "delivered"
-            or progress["payload"].get("agent_session_id") != session_id
-            or progress["payload"].get("dependency_resume_revision") != wait["revision"]
-            or not progress["created_at"] <= state.created_at < wait["resumed_at"] + 1):
-            return False
-        generation, _ = self._decision_generation_and_ordinal(state)
-        # A source marker keeps generic goal recovery from dropping the
-        # dependency history/Stop proof if this process dies before dispatch.
-        decision = self._ledger.reserve_turn_decision(
-            session_id, wait["issue_id"], entry.session_id, generation, 0,
-            "continue", source={**self._source_snapshot(event.source),
-                                "dependency_resume_revision": wait["revision"]},
-        )
-        if decision["dispatch_state"] not in {"pending", "enqueued"}:
-            return False
-        if decision["dispatch_state"] == "pending" and not self._ledger.transition_turn_decision(
-            decision["decision_id"], "pending", "enqueued"
-        ):
-            return False
-        if not self._ledger.claim_turn_admission_attempt(decision["decision_id"], _TURN_ADMISSION_MAX_ATTEMPTS):
-            return False
-        event.internal = True
-        event.metadata.update({
-            "gateway_session_key": key, "gateway_session_id": entry.session_id,
-            "gateway_session_strict": True,
-            "linear_continuation_decision_id": decision["decision_id"],
-        })
-        event._linear_dependency_revision = wait["revision"]
-        event._linear_dependency_goal_generation = state.created_at
-        if self._dependency_resume_claim(event) is None or not idle():
-            return False
-        self._enqueue_activity(
-            session_id, "thought", "Verified unstarted dependency admission; recovering the same native session.",
-            item_key=f"dependency-recovery:{decision['decision_id']}", ephemeral=True,
-            metadata={"dependency_resume_revision": wait["revision"]},
-        )
-        await self._post_thought(session_id)
-        item = self._ledger.get_outbox_item(f"activity:dependency-recovery:{decision['decision_id']}")
-        if not item or item["state"] != "delivered" or not idle():
-            return False
-        return await self._admit_turn_event(event)
 
     async def _dependency_wait_is_live(self, wait: dict[str, Any]) -> bool:
         """Recheck a claimed dependency notice at admission and outbox delivery."""
@@ -4930,224 +4260,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         return bool(verified and current and current["state"] in {"resuming", "resumed"}
                     and current["revision"] == wait["revision"]
                     and not self._ledger.has_session_closure(wait["session_id"]))
-
-    async def _progress_dependency_wait(self, event: MessageEvent) -> bool:
-        """Progress only a claimed, never-started dependency wait before admission."""
-        if self._ledger is None or self._linear is None:
-            return False
-        session_id = event.metadata["linear_agent_session_id"]
-        issue_id = event.metadata["linear_issue_id"]
-        delivery_key = event.metadata["linear_delivery_key"]
-        wait = self._ledger.get_wait(session_id)
-        # Core startup restore re-enters the same event after acknowledging it.
-        # Revalidate its exact claim; do not create another progress/goal.
-        claim = self._dependency_resume_claim(event)
-        if claim is not None:
-            return await self._dependency_wait_is_live(claim)
-        if (
-            not wait or wait["state"] != "resuming" or wait["issue_id"] != issue_id
-            or wait["delivery_key"] != delivery_key or wait["prompt"] != event.raw_message
-        ):
-            return False
-        # The two existing wait producers use deterministic activity identities;
-        # local outbox retention must not erase the authoritative native evidence.
-        if not await self._dependency_wait_is_live(wait):
-            return False
-        state = await self._goal_state_for_source(event.source, event.metadata["gateway_session_id"])
-        from tools import approval, clarify_gateway
-
-        key = event.metadata["gateway_session_key"]
-        if (
-            state is not None
-            or approval.get_pending_gateway_approval(key) is not None
-            or clarify_gateway.get_pending_for_session(key, include_choice_prompts=True) is not None
-            or self._ledger.get_wait(session_id) != wait
-            or self._ledger.has_session_closure(session_id)
-        ):
-            return False
-        progress_key = f"dependency-resume:{delivery_key}:{wait['revision']}"
-        self._enqueue_activity(
-            session_id, "thought",
-            "All blocking issues are complete; Hermes is preparing automatic admission.",
-            item_key=progress_key,
-            ephemeral=True,
-            metadata={"dependency_resume_revision": wait["revision"]},
-        )
-        await self._post_thought(session_id)
-        item = self._ledger.get_outbox_item(f"activity:{progress_key}")
-        verified = bool(item and item["state"] == "delivered" and await self._dependency_wait_is_live(wait))
-        if verified:
-            event._linear_dependency_revision = wait["revision"]
-        return verified
-
-    async def _visible_ingress_veto(self, event: MessageEvent, reason: str) -> bool:
-        decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
-        decision = self._ledger.get_turn_decision(decision_id) if self._ledger and decision_id else None
-        if decision is not None and decision["dispatch_state"] in {"pending", "enqueued", "running"}:
-            self._enqueue_turn_terminal_activity(
-                decision,
-                reason if reason in {"approval", "awaiting_input"} else "blocked",
-                reason,
-                expected_state=decision["dispatch_state"],
-                final_state="fenced",
-                reason_code=reason,
-            )
-        elif (self._ledger is not None and event.source is not None
-              and reason not in _SILENT_CONTROL_REASONS):
-            digest = hashlib.sha256(
-                f"{event.source.chat_id}\0{event.message_id or event.text}".encode()
-            ).hexdigest()[:24]
-            activity_type = (
-                "elicitation" if reason in {"approval", "awaiting_input"} else "error"
-            )
-            self._enqueue_activity(
-                str(event.source.chat_id),
-                activity_type,
-                self._continuation_blocker_notice(
-                    reason,
-                    step="giriş",
-                )[:4000],
-                item_key=f"ingress-veto:{digest}",
-            )
-            self._outbox_wakeup.set()
-        return True
-
-    async def prepare_turn_delivery(
-        self, event: MessageEvent, response: Any, turn_result: Any
-    ) -> Any:
-        """Stage final text until Hermes' native post-turn goal hook has completed."""
-        try:
-            if (
-                event.metadata.get("linear_agent_session_id")
-                and self._native_goal_continuation_enabled
-            ):
-                if not getattr(event, "_gateway_post_turn_response", None):
-                    event._gateway_post_turn_response = str(response or "")
-                event._gateway_post_turn_response_policy_staged = True
-                if event.source is not None:
-                    self._staged_delivery_attempts.pop(event.source.chat_id, None)
-                    self._pending_turn_deliveries[event.source.chat_id] = (
-                        event,
-                        str(response or ""),
-                        dict(turn_result) if isinstance(turn_result, Mapping) else turn_result,
-                    )
-                # Native goal hooks must judge before any final response is visible.
-                return None
-            return await self._prepare_native_owned_turn_delivery(
-                event, response, turn_result
-            )
-        except Exception as exc:
-            if not event.metadata.get("linear_agent_session_id"):
-                raise
-            logger.exception("[linear] post-turn delivery decision failed closed: %s", exc)
-            return None
-
-    def _continuation_event(
-        self,
-        *,
-        source: SessionSource,
-        prompt: str,
-        decision: dict[str, Any],
-    ) -> MessageEvent:
-        extra = getattr(self.config, "extra", None) or {}
-        session_key = build_session_key(
-            source,
-            group_sessions_per_user=extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
-            profile=self._session_key_profile(source),
-        )
-        return MessageEvent(
-            text=prompt,
-            message_type=MessageType.TEXT,
-            source=source,
-            message_id=decision["decision_id"],
-            internal=True,
-            metadata={
-                "linear_agent_session_id": decision["agent_session_id"],
-                "linear_issue_id": decision["issue_id"],
-                "linear_delivery_key": decision["decision_id"],
-                "linear_continuation_decision_id": decision["decision_id"],
-                "linear_goal_generation": decision["goal_generation"],
-                "linear_goal_ordinal": decision["ordinal"],
-                "linear_internal_continuation": True,
-                "hermes_session_id": decision["hermes_session_id"],
-                "gateway_session_key": session_key,
-                "gateway_session_id": decision["hermes_session_id"],
-                "gateway_session_strict": True,
-            },
-        )
-
-    def _enqueue_turn_terminal_activity(
-        self,
-        decision: dict[str, Any],
-        outcome: str,
-        message: str = "",
-        *,
-        expected_state: str | None = None,
-        final_state: str | None = None,
-        orphan_success: bool = False,
-        reason_code: str | None = None,
-        verified_native_blocked: bool = False,
-    ) -> bool:
-        if self._ledger is None:
-            raise RuntimeError("Linear outbox is unavailable")
-        normalized_reason = _normalize_terminal_reason_code(reason_code or outcome)
-        activity_type = "elicitation" if outcome in {"awaiting_input", "approval"} else "error"
-        session_id = str(decision["agent_session_id"])
-        item_key = f"turn-decision:{decision['decision_id']}"
-        activity_id = self._activity_uuid(item_key)
-        turn_key = self._current_progress_turn_key(session_id)
-        if not turn_key:
-            turn_key = self._ledger.ensure_progress_turn(
-                session_id, f"terminal:{activity_id}"
-            )
-        expected = expected_state or str(decision["dispatch_state"])
-        if normalized_reason in _SILENT_CONTROL_REASONS and not (
-            normalized_reason == "native_goal_paused" and verified_native_blocked
-        ):
-            changed = self._ledger.fence_turn_without_activity(
-                str(decision["decision_id"]), expected, session_id, turn_key,
-                outcome=outcome if decision["outcome"] in {"continue", "success"} else None,
-                reason=normalized_reason,
-            )
-            if changed:
-                self._notify_terminal_progress_fence(session_id, expected_turn_key=turn_key)
-            return changed
-        payload: dict[str, Any] = {
-            "activity_id": activity_id,
-            "agent_session_id": session_id,
-            "activity_type": activity_type,
-            "body": self._continuation_blocker_notice(
-                normalized_reason,
-                step="devam teslimi",
-            )[:4000],
-        }
-        if verified_native_blocked:
-            payload["visibility_decision_id"] = str(decision["decision_id"])
-        if orphan_success:
-            payload["orphan_success_decision_id"] = str(decision["decision_id"])
-        if turn_key:
-            payload["terminal_progress_key"] = turn_key
-        final = final_state or (
-            "fenced" if verified_native_blocked or decision["outcome"] == "continue"
-            else "completed"
-        )
-        changed = self._ledger.complete_turn_with_activity(
-            str(decision["decision_id"]),
-            expected,
-            final,
-            f"activity:{item_key}",
-            session_id,
-            payload,
-            outcome=outcome if decision["outcome"] in {"continue", "success"} else None,
-            error=normalized_reason,
-        )
-        if changed:
-            self._outbox_wakeup.set()
-            self._notify_terminal_progress_fence(
-                session_id, expected_turn_key=turn_key
-            )
-        return changed
 
     def _continuation_blocker_notice(
         self, reason_code: str, *, step: str
@@ -5243,678 +4355,13 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             "Gerekli işlem: sorumlu teknik ajan ilgili kimlik ve durumu doğrulamalıdır."
         )
 
-    def _complete_turn_thought(
-        self, decision: dict[str, Any], response: str, *, human_followup: bool = False
-    ) -> bool:
-        if self._ledger is None:
-            raise RuntimeError("Linear outbox is unavailable")
-        item_key = f"turn-summary:{decision['decision_id']}"
-        payload = {
-            "activity_id": self._activity_uuid(item_key),
-            "agent_session_id": decision["agent_session_id"],
-            "activity_type": "thought",
-            "body": response[:12000],
-            "ephemeral": not human_followup,
-        }
-        if human_followup:
-            payload["visibility_decision_id"] = str(decision["decision_id"])
-            payload["terminal_progress_key"] = self._current_progress_turn_key(
-                str(decision["agent_session_id"])
-            )
-        return self._ledger.complete_turn_with_activity(
-            decision["decision_id"],
-            "pending",
-            "completed",
-            f"activity:{item_key}",
-            decision["agent_session_id"],
-            payload,
-        )
-
-    @staticmethod
-    def _native_budget_paused(state: Any) -> bool:
-        return bool(
-            state is not None
-            and str(getattr(state, "status", "")) == "paused"
-            and str(getattr(state, "paused_reason", "")).startswith(
-                "turn budget exhausted ("
-            )
-        )
-
     async def _prepare_native_owned_turn_delivery(
         self, event: MessageEvent, response: Any, turn_result: Any
-    ) -> None:
-        """Classify after Hermes' native post-turn goal hook has made its decision."""
-        if not event.metadata.get("linear_agent_session_id"):
-            return response
-        if not self._native_goal_continuation_enabled:
-            return response
-        if self._ledger is None or self._linear is None or event.source is None:
-            return None
-        # Core clarify timeout removes the registry entry before returning the
-        # timeout sentinel. Fence that already-delivered question at the staged
-        # delivery boundary, before outcome classification can enqueue a generic
-        # replacement elicitation.
-        failed_or_interrupted = isinstance(turn_result, Mapping) and (
-            bool(turn_result.get("failed"))
-            or bool(turn_result.get("interrupted"))
-            or turn_result.get("completed") is False
-        )
-        if not failed_or_interrupted and self._native_clarify_timeout_fenced(event):
-            await self._record_clarify_timeout_goal(event, turn_result)
-            logger.info(
-                "[linear] staged delivery fenced: clarify timeout session=%s",
-                event.source.chat_id,
-            )
-            return None
-        prior_id = str(getattr(event, "_linear_turn_decision_id", "") or "")
-        session_id = str(event.metadata.get("linear_agent_session_id") or "")
-        issue_id = str(event.metadata.get("linear_issue_id") or "")
-        hermes_session_id = str(
-            turn_result.get("session_id") if isinstance(turn_result, Mapping) else ""
-        )
-        if not hermes_session_id:
-            return None
-        prior_decision = (
-            self._ledger.get_turn_decision(prior_id) if prior_id else None
-        )
-        if prior_decision is not None and prior_decision["dispatch_state"] != "pending":
-            return None
-
-        async with self._session_lock(session_id):
-            try:
-                context = await self._linear.get_agent_turn_context(session_id)
-                live_outcome, live_reason = self._classify_turn_outcome_with_reason(
-                    event, turn_result, context
-                )
-            except Exception as exc:
-                if (isinstance(exc, LinearAPIError) and exc.retryable) or _ledger_busy(exc):
-                    raise
-                logger.warning(
-                    "[linear] authoritative turn read-back failed closed session=%s: %s",
-                    session_id,
-                    exc,
-                )
-                context = {"issue": {"id": issue_id}}
-                live_outcome = "blocked"
-                live_reason = "unverified"
-
-            try:
-                state = await self._goal_state_for_source(
-                    event.source, hermes_session_id
-                )
-            except Exception as exc:
-                if (isinstance(exc, LinearAPIError) and exc.retryable) or _ledger_busy(exc):
-                    raise
-                logger.warning(
-                    "[linear] native goal read failed closed session=%s: %s",
-                    session_id,
-                    exc,
-                )
-                state = None
-                live_outcome = "blocked"
-                live_reason = "unverified"
-            if state is None:
-                if live_outcome in {"continue", "success"}:
-                    live_outcome = "blocked"
-                generation = 0
-                ordinal = max(
-                    1,
-                    int(
-                        hashlib.sha256(str(event.message_id or "").encode()).hexdigest()[:12],
-                        16,
-                    ),
-                )
-            else:
-                base_generation, ordinal = self._decision_generation_and_ordinal(state)
-                rollovers = self._ledger.count_budget_rollovers(
-                    session_id, base_generation
-                )
-                generation = base_generation + rollovers
-
-            native_status = str(getattr(state, "status", "") or "")
-            started = getattr(event, "_linear_processing_started_at", 0)
-            last_turn = getattr(state, "last_turn_at", None)
-            exceptional = ""
-            if live_outcome in {"stopped", "blocked", "approval", "awaiting_input"}:
-                outcome = live_outcome
-            elif (
-                live_outcome == "success"
-                and native_status == "paused"
-                and started
-                and isinstance(last_turn, (int, float))
-                and last_turn >= started
-            ):
-                # A fresh native pause does not revoke independently verified final evidence.
-                outcome = "success"
-            elif native_status == "done":
-                if live_outcome == "success":
-                    outcome = "success"
-                else:
-                    outcome = "continue"
-                    exceptional = "unchecked_acceptance"
-            elif self._native_budget_paused(state):
-                outcome = "continue"
-                exceptional = "native_budget_rollover"
-            elif native_status == "paused":
-                outcome = "blocked"
-                started = getattr(event, "_linear_processing_started_at", 0)
-                last_turn = getattr(state, "last_turn_at", None)
-                live_reason = (
-                    "native_goal_not_rejudged"
-                    if started and isinstance(last_turn, (int, float)) and last_turn < started
-                    else "native_goal_paused"
-                )
-            elif native_status == "active":
-                # Active includes native process/delegation waits. Hermes owns both the
-                # continuation FIFO and the session-scoped wait wakeup.
-                outcome = "continue"
-            else:
-                outcome = "blocked"
-                live_reason = "unverified"
-
-            decision = prior_decision or self._ledger.reserve_turn_decision(
-                session_id,
-                issue_id,
-                hermes_session_id,
-                generation,
-                ordinal,
-                outcome,
-                source=self._source_snapshot(event.source),
-            )
-            event._linear_turn_decision_id = decision["decision_id"]
-            if decision["dispatch_state"] in {"completed", "fenced", "running"}:
-                return None
-            if (
-                prior_decision is not None
-                and prior_decision["outcome"] == "success"
-                and outcome != "success"
-            ):
-                # A staged success must never become a continuation merely because
-                # live state changed while delivery was being retried.
-                terminal_outcome = outcome if outcome != "continue" else "blocked"
-                if self._ledger.update_pending_turn_outcome(
-                    decision["decision_id"], "success", terminal_outcome
-                ):
-                    changed = self._ledger.get_turn_decision(decision["decision_id"])
-                    if changed is not None:
-                        self._enqueue_turn_terminal_activity(
-                            changed,
-                            terminal_outcome,
-                            "Pending final response lost its authoritative delivery gates.",
-                        )
-                return None
-
-            if outcome == "success":
-                # Acceptance and every lifecycle gate are read once more immediately
-                # before the durable response is admitted to the outbox.
-                fresh = await self._linear.get_agent_turn_context(session_id)
-                fresh_outcome, fresh_reason = self._classify_turn_outcome_with_reason(
-                    event, turn_result, fresh
-                )
-                if fresh_outcome == "success":
-                    if await self._turn_success_session_matches(decision, turn_result):
-                        self._enqueue_turn_success(
-                            decision, str(response or ""), turn_result, fresh["issue"]
-                        )
-                    else:
-                        if not self._ledger.fence_turn_success_without_activity(
-                            decision["decision_id"],
-                            "Immediate Linear success was fenced by authoritative "
-                            "Hermes session rotation",
-                        ):
-                            raise RuntimeError(
-                                "Immediate Linear success could not be fenced atomically"
-                            )
-                elif self._ledger.update_pending_turn_outcome(
-                    decision["decision_id"], "success", fresh_outcome
-                ):
-                    changed = self._ledger.get_turn_decision(decision["decision_id"])
-                    if changed is not None:
-                        self._enqueue_turn_terminal_activity(
-                            changed, fresh_outcome, reason_code=fresh_reason
-                        )
-                return None
-
-            if outcome != "continue":
-                started = getattr(event, "_linear_processing_started_at", 0)
-                last_turn = getattr(state, "last_turn_at", None)
-                verified_native_blocked = (
-                    outcome == "blocked"
-                    and live_outcome in {"continue", "success"}
-                    and live_reason == "native_goal_paused"
-                    and isinstance(turn_result, Mapping)
-                    and not turn_result.get("failed")
-                    and not turn_result.get("interrupted")
-                    and bool(started)
-                    and isinstance(last_turn, (int, float))
-                    and last_turn >= started
-                    and str(getattr(state, "last_verdict", "")) == "blocked"
-                    and str(getattr(state, "paused_reason", "") or "").startswith(
-                        "judged unachievable:"
-                    )
-                    and await self._turn_success_session_matches(decision, turn_result)
-                )
-                self._enqueue_turn_terminal_activity(
-                    decision, outcome, reason_code=live_reason,
-                    verified_native_blocked=verified_native_blocked,
-                )
-                return None
-
-            if (
-                event.metadata.get("linear_action") == "prompted"
-                and not await self._turn_success_session_matches(decision, turn_result)
-            ):
-                self._enqueue_turn_terminal_activity(
-                    decision, "stopped", reason_code="stopped"
-                )
-                return None
-
-            if not exceptional:
-                self._complete_turn_thought(
-                    decision, str(response or ""),
-                    human_followup=event.metadata.get("linear_action") == "prompted",
-                )
-                self._outbox_wakeup.set()
-                return None
-
-            if exceptional == "unchecked_acceptance":
-                self._ledger.transition_turn_decision(
-                    decision["decision_id"],
-                    "pending",
-                    "pending",
-                    error="unchecked_acceptance",
-                )
-                self._ledger.mark_goal_resume_required(decision["decision_id"])
-                resumed, prompt = await self._resume_goal_for_source(
-                    event.source, hermes_session_id, reset_budget=False
-                )
-                if resumed is None or str(resumed.status) != "active" or not self._ledger.mark_goal_resume_applied(
-                    decision["decision_id"]
-                ):
-                    self._enqueue_turn_terminal_activity(
-                        decision, "blocked", "Native goal could not be resumed."
-                    )
-                    return None
-            else:
-                rollover_context = await self._linear.get_agent_turn_context(session_id)
-                rollover_gate = self._classify_turn_outcome(
-                    event, turn_result, rollover_context
-                )
-                if rollover_gate != "continue":
-                    terminal_outcome = (
-                        rollover_gate if rollover_gate != "success" else "blocked"
-                    )
-                    if self._ledger.update_pending_turn_outcome(
-                        decision["decision_id"], "continue", terminal_outcome
-                    ):
-                        changed = self._ledger.get_turn_decision(decision["decision_id"])
-                        if changed is not None:
-                            self._enqueue_turn_terminal_activity(
-                                changed,
-                                terminal_outcome,
-                                "Fresh Linear gates vetoed native budget rollover.",
-                            )
-                    return None
-                if not self._ledger.claim_budget_rollover(
-                    decision["decision_id"],
-                    session_id,
-                    base_generation,
-                    self._goal_max_budget_rollovers,
-                ):
-                    self._enqueue_turn_terminal_activity(
-                        decision,
-                        "blocked",
-                        "Native goal budget rollover limit reached; human review is required.",
-                    )
-                    return None
-                resumed, prompt = await self._resume_goal_for_source(
-                    event.source, hermes_session_id, reset_budget=True
-                )
-                if resumed is None or str(resumed.status) != "active":
-                    self._enqueue_turn_terminal_activity(
-                        decision, "blocked", "Native goal budget rollover failed."
-                    )
-                    return None
-                if not self._ledger.complete_budget_rollover(
-                    decision["decision_id"], session_id, base_generation
-                ):
-                    raise RuntimeError("native goal budget rollover completion raced")
-
-            if not isinstance(prompt, str) or not prompt.strip():
-                self._enqueue_turn_terminal_activity(
-                    decision, "blocked", "Native continuation prompt is unavailable."
-                )
-                return None
-            if response:
-                human_followup = event.metadata.get("linear_action") == "prompted"
-                self._enqueue_activity(
-                    session_id,
-                    "thought",
-                    str(response)[:12000],
-                    item_key=f"turn-summary:{decision['decision_id']}",
-                    ephemeral=not human_followup,
-                    metadata={
-                        "visibility_decision_id": decision["decision_id"],
-                        "terminal_progress_key": self._current_progress_turn_key(session_id),
-                    } if human_followup else None,
-                )
-            if not self._ledger.transition_turn_decision(
-                decision["decision_id"], "pending", "enqueued"
-            ):
-                return None
-            continuation = self._continuation_event(
-                source=event.source, prompt=prompt, decision=decision
-            )
-            if not self._ledger.claim_turn_admission_attempt(
-                decision["decision_id"], _TURN_ADMISSION_MAX_ATTEMPTS
-            ):
-                current = self._ledger.get_turn_decision(decision["decision_id"])
-                if current is not None:
-                    self._enqueue_turn_terminal_activity(
-                        current,
-                        "blocked",
-                        "Continuation admission retry limit reached; human review is required.",
-                        expected_state=current["dispatch_state"],
-                        final_state="fenced",
-                    )
-                return None
-            try:
-                await self._admit_turn_event(continuation)
-            except Exception as exc:
-                logger.warning(
-                    "[linear] continuation admission not accepted decision=%s: %s",
-                    decision["decision_id"],
-                    exc,
-                )
-                self._turn_recovery_requested = True
-                recovery_task = getattr(self, "_turn_recovery_task", None)
-                if self._running and (recovery_task is None or recovery_task.done()):
-                    self._turn_recovery_task = asyncio.create_task(
-                        self._delayed_turn_decision_recovery()
-                    )
-            self._outbox_wakeup.set()
-            return None
-
-    def _locally_owned_turn_event(
-        self, session_id: str, decision_id: str
-    ) -> MessageEvent | None:
-        """Find the live worker event, including its native-judge handoff."""
-        active_event = self._active_turn_events.get(session_id)
-        if active_event is not None:
-            active_decision_id = str(
-                active_event.metadata.get("linear_continuation_decision_id") or ""
-            )
-            if not active_decision_id or active_decision_id == decision_id:
-                return active_event
-
-        pending_delivery = self._pending_turn_deliveries.get(session_id)
-        if pending_delivery is None:
-            return None
-        staged_event = pending_delivery[0]
-        staged_decision_id = str(
-            getattr(staged_event, "_linear_turn_decision_id", "")
-            or staged_event.metadata.get("linear_continuation_decision_id")
-            or ""
-        )
-        return staged_event if staged_decision_id == decision_id else None
+    ) -> Any:
+        return response
 
     async def _recover_turn_decisions(self) -> None:
-        """Recover only pre-start decisions and never replay an interrupted running row."""
-        if (
-            not self._native_goal_continuation_enabled
-            or self._ledger is None
-            or self._linear is None
-        ):
-            return
-        self._turn_recovery_requested = False
-        staged_retry_needed, ledger_busy = await self._recover_staged_turn_deliveries()
-        if ledger_busy:
-            if self._running:
-                self._turn_recovery_task = asyncio.create_task(
-                    self._delayed_turn_decision_recovery()
-                )
-            return  # Other recovery scans cannot read the ledger yet either.
-        cursor: tuple[int, str] | None = None
-        while True:
-            rows = self._ledger.running_turn_decisions(
-                limit=_TURN_DECISION_BATCH_SIZE, after=cursor
-            )
-            for row in rows:
-                if self._locally_owned_turn_event(
-                    row["agent_session_id"], row["decision_id"]
-                ) is not None:
-                    # Recovery can run after a transient admission/delivery
-                    # failure while the local worker still owns this turn.
-                    # Only startup recovery, where no owner is present, may
-                    # treat a running row as proven-crashed.
-                    continue
-                message = (
-                    "A previously running continuation was interrupted by restart "
-                    "and was not replayed. Human review is required."
-                )
-                self._enqueue_turn_terminal_activity(
-                    row,
-                    "blocked",
-                    message,
-                    expected_state="running",
-                    final_state="fenced",
-                )
-            if len(rows) < _TURN_DECISION_BATCH_SIZE:
-                break
-            cursor = (rows[-1]["created_at"], rows[-1]["decision_id"])
-            await asyncio.sleep(0)
-
-        retry_needed = False
-        cursor = None
-        while True:
-            rows = self._ledger.recoverable_turn_decisions(
-                limit=_TURN_DECISION_BATCH_SIZE, after=cursor,
-                include_orphan_success=True,
-            )
-            for row in rows:
-                await asyncio.sleep(0)
-                if "dependency_resume_revision" in (row.get("source") or {}):
-                    continue  # The dependency loop owns the stricter recovery proof.
-                async with self._session_lock(row["agent_session_id"]):
-                    if row["outcome"] == "success":
-                        retry_needed = await self._recover_orphan_success(row) or retry_needed
-                        continue
-                    try:
-                        context = await self._linear.get_agent_turn_context(row["agent_session_id"])
-                        synthetic_result = {
-                            "completed": True,
-                            "failed": False,
-                            "interrupted": False,
-                            "turn_exit_reason": "recovery",
-                            "session_id": row["hermes_session_id"],
-                        }
-                        saved_source = row.get("source") or {}
-                        recovery_source = self._source_from_snapshot(
-                            saved_source, row["agent_session_id"]
-                        )
-                        probe = MessageEvent(
-                            text="",
-                            source=recovery_source,
-                            internal=True,
-                            metadata={
-                                "linear_agent_session_id": row["agent_session_id"],
-                                "linear_issue_id": row["issue_id"],
-                            },
-                        )
-                        live_outcome = self._classify_turn_outcome(probe, synthetic_result, context)
-                        if live_outcome == "awaiting_input" and context.get("status") == "awaitingInput":
-                            session_id = row["agent_session_id"]
-                            turn_key = self._current_progress_turn_key(session_id)
-                            if not turn_key:
-                                turn_key = self._ledger.ensure_progress_turn(
-                                    session_id, f"wait:{row['decision_id']}"
-                                )
-                            if self._ledger.fence_turn_without_activity(
-                                row["decision_id"], row["dispatch_state"], session_id,
-                                turn_key, outcome="awaiting_input", reason="awaiting_input",
-                            ):
-                                self._notify_terminal_progress_fence(
-                                    session_id, expected_turn_key=turn_key
-                                )
-                            continue
-                        if live_outcome != "continue":
-                            raise RuntimeError(
-                                f"authoritative Linear continuation gate: {live_outcome}"
-                            )
-                        with nullcontext():
-                            state = await self._goal_state_for_source(
-                                recovery_source, row["hermes_session_id"]
-                            )
-                            base_generation = (
-                                int(float(state.created_at) * 1_000_000)
-                                if state is not None else 0
-                            )
-                            turns_used = (
-                                int(state.turns_used)
-                                if state is not None else -1
-                            )
-                            status = (
-                                str(state.status)
-                                if state is not None else ""
-                            )
-                            rollover_count = self._ledger.count_budget_rollovers(
-                                row["agent_session_id"], base_generation
-                            )
-                            prompt = None
-                            is_process_wait = row.get("error") == "native_process_wait"
-                            if is_process_wait:
-                                self._enqueue_turn_terminal_activity(
-                                    row,
-                                    "blocked",
-                                    "Legacy plugin-owned process wait was retired; the native Hermes goal loop owns session-scoped waits.",
-                                    expected_state=row["dispatch_state"],
-                                    final_state="fenced",
-                                )
-                                continue
-                            is_unchecked_resume = row.get("error") == "unchecked_acceptance"
-                            if is_unchecked_resume:
-                                phase = self._ledger.goal_resume_phase(row["decision_id"])
-                                if phase is None:
-                                    if not self._ledger.mark_goal_resume_required(row["decision_id"]):
-                                        raise RuntimeError("unchecked-done resume intent could not be recovered")
-                                    phase = "resume_required"
-                                if phase == "resume_required" and status == "done":
-                                    resumed_state, prompt = await self._resume_goal_for_source(
-                                        recovery_source,
-                                        row["hermes_session_id"],
-                                        reset_budget=False,
-                                    )
-                                    if resumed_state is None:
-                                        raise RuntimeError("unchecked-done native goal disappeared")
-                                    turns_used = int(resumed_state.turns_used)
-                                    status = str(resumed_state.status)
-                                if status != "active" or not self._ledger.mark_goal_resume_applied(
-                                    row["decision_id"]
-                                ):
-                                    raise RuntimeError("unchecked-done native goal did not resume")
-                            is_rollover = bool(row.get("budget_rollover"))
-                            budget_paused = (
-                                status == "paused"
-                                and str(getattr(state, "paused_reason", "")).startswith(
-                                    "turn budget exhausted ("
-                                )
-                                and turns_used == row["ordinal"]
-                            )
-                            if budget_paused and not is_rollover:
-                                if not self._ledger.claim_budget_rollover(
-                                    row["decision_id"],
-                                    row["agent_session_id"],
-                                    base_generation,
-                                    self._goal_max_budget_rollovers,
-                                ):
-                                    raise RuntimeError(
-                                        "native goal budget rollover limit or claim blocked recovery"
-                                    )
-                                is_rollover = True
-                                rollover_count = self._ledger.count_budget_rollovers(
-                                    row["agent_session_id"], base_generation
-                                )
-                            expected_generation = base_generation + max(
-                                0, rollover_count - (1 if is_rollover else 0)
-                            )
-                            if is_rollover and budget_paused:
-                                resumed_state, prompt = await self._resume_goal_for_source(
-                                    recovery_source,
-                                    row["hermes_session_id"],
-                                    reset_budget=True,
-                                )
-                                if resumed_state is None:
-                                    raise RuntimeError("native goal rollover state disappeared")
-                                turns_used = int(resumed_state.turns_used)
-                                status = str(resumed_state.status)
-                            if (
-                                is_rollover
-                                and status == "active"
-                                and turns_used == 0
-                                and self._ledger.pending_budget_rollover(row["decision_id"])
-                            ):
-                                if not self._ledger.complete_budget_rollover(
-                                    row["decision_id"],
-                                    row["agent_session_id"],
-                                    base_generation,
-                                ):
-                                    raise RuntimeError(
-                                        "native goal rollover recovery completion raced"
-                                    )
-                            if prompt is None:
-                                prompt = await self._next_goal_prompt_for_source(
-                                    recovery_source, row["hermes_session_id"]
-                                )
-                        expected_turns = 0 if is_rollover else row["ordinal"]
-                        if (
-                            live_outcome != "continue"
-                            or expected_generation != row["goal_generation"]
-                            or turns_used != expected_turns
-                            or status != "active"
-                            or not isinstance(prompt, str)
-                            or not prompt.strip()
-                        ):
-                            raise RuntimeError("live continuation gates or native goal no longer match")
-                        if row["dispatch_state"] == "pending" and not self._ledger.transition_turn_decision(
-                            row["decision_id"], "pending", "enqueued"
-                        ):
-                            continue
-                        continuation = self._continuation_event(
-                            source=probe.source, prompt=prompt, decision=row
-                        )
-                        if not self._ledger.claim_turn_admission_attempt(
-                            row["decision_id"], _TURN_ADMISSION_MAX_ATTEMPTS
-                        ):
-                            raise RuntimeError(
-                                "continuation admission retry limit reached"
-                            )
-                        try:
-                            await self._admit_turn_event(continuation)
-                        except Exception as admission_exc:
-                            if self._ledger.turn_admission_attempts(
-                                row["decision_id"]
-                            ) < _TURN_ADMISSION_MAX_ATTEMPTS:
-                                retry_needed = True
-                                continue
-                            raise RuntimeError(
-                                "continuation admission retry limit reached"
-                            ) from admission_exc
-                    except Exception as exc:
-                        self._enqueue_turn_terminal_activity(
-                            row,
-                            "blocked",
-                            str(exc),
-                            expected_state=row["dispatch_state"],
-                            final_state="fenced",
-                        )
-            if len(rows) < _TURN_DECISION_BATCH_SIZE:
-                break
-            cursor = (rows[-1]["created_at"], rows[-1]["decision_id"])
-        self._outbox_wakeup.set()
-        if (staged_retry_needed or retry_needed or self._turn_recovery_requested) and self._running:
-            self._turn_recovery_task = asyncio.create_task(
-                self._delayed_turn_decision_recovery()
-            )
+        return
 
     def _orphan_success_activity_allowed(self, row: dict[str, Any], context: dict[str, Any]) -> bool:
         probe = MessageEvent(
@@ -5942,130 +4389,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             and not self._ledger.has_session_closure(row["agent_session_id"])
         )
         return owned_open
-
-    async def _recover_orphan_success(self, row: dict[str, Any]) -> bool:
-        """Report lost process-local text without reconstructing or replaying it."""
-        decision_id = row["decision_id"]
-        if any(
-            getattr(event, "_linear_turn_decision_id", None) == decision_id
-            for event, _response, _result in self._pending_turn_deliveries.values()
-        ):
-            return False
-        message = (
-            "Hermes lost the staged final response during restart before durable delivery. "
-            "The result cannot be recovered automatically; human review is required."
-        )
-        if not self._ledger.claim_turn_admission_attempt(
-            decision_id, _TURN_ADMISSION_MAX_ATTEMPTS
-        ):
-            self._ledger.fence_turn_success_without_activity(decision_id, message)
-            return False
-        try:
-            context = await self._linear.get_agent_turn_context(row["agent_session_id"])
-            owned_open = self._orphan_success_activity_allowed(row, context)
-            if owned_open:
-                self._enqueue_turn_terminal_activity(
-                    row, "blocked", message, expected_state="pending", final_state="fenced",
-                    orphan_success=True, reason_code="restart_orphan_success",
-                )
-            else:
-                self._ledger.fence_turn_success_without_activity(decision_id, message)
-        except Exception as exc:
-            if (
-                isinstance(exc, LinearAPIError) and exc.retryable
-                and self._ledger.turn_admission_attempts(decision_id) < _TURN_ADMISSION_MAX_ATTEMPTS
-            ):
-                return True
-            self._ledger.fence_turn_success_without_activity(decision_id, message)
-        return False
-
-    async def _recover_staged_turn_deliveries(self) -> tuple[bool, bool]:
-        """Retry staged finals through the same native decision boundary.
-
-        The response remains intentionally process-local until the authoritative
-        read succeeds; orphan recovery handles text lost across process restart.
-        """
-        retry_needed = False
-        ledger_busy = False
-        for chat_id, retry_state in list(self._staged_delivery_attempts.items()):
-            pending_delivery, previous_attempts = retry_state
-            if (
-                self._pending_turn_deliveries.get(chat_id) is not pending_delivery
-                or self._staged_delivery_attempts.get(chat_id) is not retry_state
-            ):
-                continue
-            event, response, turn_result = pending_delivery
-            key = str(
-                getattr(event, "_linear_turn_decision_id", "")
-                or event.message_id
-                or chat_id
-            )
-            attempts = previous_attempts + 1
-            # Claim this retry before yielding; another recovery cannot retry it.
-            self._staged_delivery_attempts.pop(chat_id, None)
-            try:
-                await self._prepare_native_owned_turn_delivery(
-                    event, response, turn_result
-                )
-                self._remove_owned_staged_delivery(chat_id, pending_delivery)
-            except LinearAPIError as exc:
-                if self._pending_turn_deliveries.get(chat_id) is not pending_delivery:
-                    continue
-                if attempts < _STAGED_DELIVERY_MAX_ATTEMPTS and exc.retryable:
-                    self._staged_delivery_attempts[chat_id] = (pending_delivery, attempts)
-                    retry_needed = True
-                    logger.warning(
-                        "[linear] staged final recovery retry=%d/%d session=%s: %s",
-                        attempts,
-                        _STAGED_DELIVERY_MAX_ATTEMPTS,
-                        chat_id,
-                        exc,
-                    )
-                    continue
-                decision_id = str(getattr(event, "_linear_turn_decision_id", "") or "")
-                decision = (
-                    self._ledger.get_turn_decision(decision_id)
-                    if decision_id
-                    else None
-                )
-                if decision is not None and decision["dispatch_state"] == "pending":
-                    if decision["outcome"] == "success":
-                        if not self._ledger.update_pending_turn_outcome(
-                            decision_id, "success", "blocked"
-                        ):
-                            self._remove_owned_staged_delivery(chat_id, pending_delivery)
-                            continue
-                        decision = self._ledger.get_turn_decision(decision_id)
-                    self._enqueue_turn_terminal_activity(
-                        decision,
-                        "blocked",
-                        "Final response delivery retry limit reached; human review is required.",
-                        expected_state="pending",
-                        final_state="fenced",
-                    )
-                else:
-                    self._enqueue_activity(
-                        chat_id,
-                        "error",
-                        "Final response delivery retry limit reached; human review is required.",
-                        item_key=f"staged-delivery-error:{key}",
-                    )
-                self._remove_owned_staged_delivery(chat_id, pending_delivery)
-            except Exception as exc:
-                if _ledger_busy(exc):
-                    if self._pending_turn_deliveries.get(chat_id) is pending_delivery:
-                        # Contention spends no delivery attempt; retry rechecks ownership.
-                        self._staged_delivery_attempts[chat_id] = (pending_delivery, previous_attempts)
-                        retry_needed = True
-                        ledger_busy = True
-                    continue
-                logger.warning(
-                    "[linear] staged final recovery failed session=%s: %s",
-                    chat_id,
-                    exc,
-                )
-                self._remove_owned_staged_delivery(chat_id, pending_delivery)
-        return retry_needed, ledger_busy
 
     def _remove_owned_staged_delivery(
         self, chat_id: str, pending_delivery: tuple[MessageEvent, str, dict[str, Any]]
@@ -6105,46 +4428,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             or _LINEAR_CORE_BUDGET_NOTICE_RE.fullmatch(content)
         )
         trusted_ephemeral_notice = content in _LINEAR_EPHEMERAL_NOTICES
-        active_event = (
-            self._active_turn_events.get(chat_id)
-            if self._native_goal_continuation_enabled else None
-        )
-        if (self._native_goal_continuation_enabled and active_event is None
-                and (chat_id in self._pending_turn_deliveries or not self._progress_chat_is_allowed(chat_id))
-                and not (transient_progress or long_running_heartbeat or trusted_ephemeral_notice)):
-            # Core's generic error send follows FAILURE completion. The durable
-            # terminal/retry fence must survive releasing local turn ownership.
-            return SendResult(success=False, error="Linear final delivery has no live turn", retryable=False)
-        if active_event is not None and not (
-            transient_progress or long_running_heartbeat or trusted_ephemeral_notice
-        ):
-            turn_result = self._completed_turn_results.pop(chat_id, None)
-            if turn_result is None:
-                return SendResult(
-                    success=False,
-                    error="Linear final delivery has no supported structured turn result",
-                    retryable=True,
-                )
-            hermes_session_id = str(turn_result.get("session_id") or "")
-            if not hermes_session_id:
-                return SendResult(
-                    success=False,
-                    error="Linear final delivery has no Hermes session binding",
-                    retryable=True,
-                )
-            self._active_turn_events.pop(chat_id, None)
-            self._staged_delivery_attempts.pop(chat_id, None)
-            self._pending_turn_deliveries[chat_id] = (
-                active_event,
-                str(content or ""),
-                dict(turn_result),
-            )
-            return SendResult(
-                success=True,
-                message_id=self._activity_uuid(
-                    f"deferred-turn:{chat_id}:{turn_result['turn_id']}"
-                ),
-            )
         try:
             delivery_context = await self._validate_activity_target(chat_id)
             if (
@@ -6274,402 +4557,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         except Exception as exc:
             return SendResult(success=False, error=str(exc), retryable=False)
 
-    async def send_clarify(
-        self,
-        chat_id: str,
-        question: str,
-        choices: list[str] | None,
-        clarify_id: str,
-        session_key: str,
-        metadata: Any = None,
-    ) -> SendResult:
-        """Deliver a registered clarify as a native, typed Linear elicitation.
-
-        This deliberately does not call ``send``: native clarify is an
-        interaction boundary, not a completed-turn response.  The core
-        clarify registry remains the sole authority for resolving replies.
-        """
-        if not self._native_goal_continuation_enabled:
-            return await super().send_clarify(
-                chat_id, question, choices, clarify_id, session_key, metadata
-            )
-        if self._ledger is None or self._linear is None:
-            return SendResult(success=False, error="Linear outbox is unavailable", retryable=True)
-        # Preflight reads cannot have delivered a new question. Preserve ambiguity
-        # only when an earlier call already queued this ID, or enqueue is attempted.
-        delivery_may_exist = True
-        try:
-            delivery_may_exist = self._ledger.get_outbox_item(
-                f"activity:clarify:{clarify_id}"
-            ) is not None
-            from tools import clarify_gateway as clarify_gateway
-
-            entry = clarify_gateway.get_pending_for_session(
-                str(session_key), include_choice_prompts=True
-            )
-            supplied_choices = list(choices) if choices else None
-            if (
-                entry is None
-                or entry.event.is_set()
-                or str(entry.clarify_id) != str(clarify_id)
-                or str(entry.session_key) != str(session_key)
-                or str(entry.question) != str(question)
-                or (list(entry.choices) if entry.choices else None) != supplied_choices
-            ):
-                raise LinearAPIError("Linear clarify registration is missing or mismatched", retryable=False)
-
-            event = self._active_turn_events.get(str(chat_id))
-            if event is None or event.source is None or str(event.source.chat_id) != str(chat_id):
-                raise LinearAPIError("Linear clarify has no live owned turn", retryable=False)
-            if str(event.metadata.get("gateway_session_key") or "") != str(session_key):
-                raise LinearAPIError("Linear clarify session key mismatch", retryable=False)
-            if str(event.metadata.get("linear_agent_session_id") or "") != str(chat_id):
-                raise LinearAPIError("Linear clarify target mismatch", retryable=False)
-            context = None
-            for attempt in range(3):
-                try:
-                    await self._validate_activity_target(str(chat_id))
-                    context = await self._linear.get_agent_turn_context(str(chat_id))
-                    break
-                except LinearAPIError as exc:
-                    if not exc.retryable or attempt == 2:
-                        raise
-                    await asyncio.sleep(0.25 * (2 ** attempt))
-            issue = context.get("issue") if isinstance(context, Mapping) else None
-            actor_id = str(getattr(self._linear, "actor_id", "") or "")
-            if (
-                not isinstance(context, Mapping)
-                or str(context.get("id") or "") != str(chat_id)
-                or str(context.get("status") or "") not in {"pending", "active", "awaitingInput"}
-                or not isinstance(issue, dict)
-                or str(issue.get("id") or "") != str(event.metadata.get("linear_issue_id") or "")
-                or not actor_id
-                or not hmac.compare_digest(str(issue.get("delegate", {}).get("id") or ""), actor_id)
-                or str((issue.get("state") or {}).get("type") or "").casefold()
-                in {"completed", "canceled", "cancelled"}
-            ):
-                raise LinearAPIError("Linear clarify live issue ownership check failed", retryable=False)
-            # Core captures this immutable pair before bounded hooks can yield.
-            # Missing ownership (including older cores) must never use latest progress.
-            owner = getattr(entry, "turn_owner", None)
-            if (not isinstance(owner, tuple) or len(owner) != 2
-                    or not all(isinstance(value, str) and value for value in owner)):
-                raise LinearAPIError("Linear clarify native turn owner is missing or malformed", retryable=False)
-            if not self._clarify_owner_is_live(event, *owner):
-                raise LinearAPIError("Linear clarify turn owner is no longer live", retryable=False)
-            store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
-            lookup = getattr(store, "lookup_by_session_key", None)
-            live_session = await lookup(str(session_key)) if callable(lookup) else None
-            if (str(getattr(live_session, "session_key", "")) != str(session_key)
-                    or str(getattr(live_session, "session_id", "")) != owner[0]):
-                raise LinearAPIError("Linear clarify Hermes session rotated", retryable=False)
-            if self._ledger.has_session_closure(str(chat_id)):
-                raise LinearAPIError("Linear clarify is fenced by terminal turn state", retryable=False)
-
-            item_id = f"activity:clarify:{clarify_id}"
-            # Preemption takes this same lock. Keep the network reads outside
-            # it, then revalidate the exact event and waiter immediately before
-            # the durable enqueue; do not acquire this lock around the drain.
-            async with self._session_lock(str(chat_id)):
-                current_event = self._active_turn_events.get(str(chat_id))
-                current_entry = clarify_gateway.get_pending_for_session(
-                    str(session_key), include_choice_prompts=True
-                )
-                if (
-                    current_event is not event
-                    or not self._clarify_owner_is_live(event, *owner)
-                    or current_entry is not entry
-                    or current_entry.event.is_set()
-                    or str(current_entry.clarify_id) != str(clarify_id)
-                    or str(current_entry.question) != str(question)
-                ):
-                    raise LinearAPIError(
-                        "Linear clarify turn was replaced before enqueue", retryable=False
-                    )
-                # Correlate before the vendor call; a fast webhook may resolve
-                # the question while activity creation is still awaiting its ack.
-                event.metadata["linear_clarify_id"] = str(clarify_id)
-                event.metadata["linear_clarify_resolved"] = False
-                delivery_may_exist = True
-                activity_id = self._enqueue_activity(
-                    str(chat_id),
-                    "elicitation",
-                    self._render_clarify_body(
-                        str(question), supplied_choices, bool(current_entry.multi_select)
-                    ),
-                    item_key=f"clarify:{clarify_id}",
-                    metadata={
-                        "clarify_id": str(clarify_id),
-                        "clarify_session_key": str(session_key),
-                        "clarify_question": str(question),
-                        "clarify_hermes_session_id": owner[0],
-                        "clarify_hermes_turn_id": owner[1],
-                        "clarify_turn_key": str(event.metadata.get("linear_delivery_key") or event.message_id or event.metadata.get("linear_clarify_turn_key") or ""),
-                    },
-                )
-            await self._drain_outbox_once()
-            item = self._ledger.get_outbox_item(item_id)
-            if item is None:
-                raise LinearAPIError("Linear clarify delivery was not durably recorded", retryable=True)
-            if bool(event.metadata.get("linear_clarify_resolved")):
-                # Verified vendor publication can precede the transport ACK.
-                # Keep that monotonic resolution in the already-created row.
-                self._ledger.update_outbox_payload_metadata(
-                    item_id,
-                    {"clarify_resolved": True, "clarify_id": str(clarify_id)},
-                )
-            item_payload = item.get("payload")
-            if isinstance(item_payload, Mapping) and bool(
-                item_payload.get("clarify_suppressed")
-            ):
-                return SendResult(
-                    success=False,
-                    error="Linear clarify prompt was suppressed",
-                    retryable=False,
-                )
-            if item["state"] == "dead":
-                raise LinearAPIError("Linear clarify delivery is dead-lettered", retryable=False)
-            if item["state"] != "delivered":
-                raise LinearAPIError("Linear clarify delivery is pending", retryable=True)
-            if supplied_choices:
-                from tools.clarify_gateway import mark_awaiting_text
-
-                mark_awaiting_text(clarify_id)
-            return SendResult(success=True, message_id=activity_id)
-        except LinearAPIError as exc:
-            return SendResult(
-                success=False,
-                error=str(exc),
-                retryable=exc.retryable,
-                raw_response=(
-                    {"ambiguous": True, "error": str(exc)}
-                    if exc.retryable and delivery_may_exist else None
-                ),
-            )
-        except Exception as exc:
-            return SendResult(success=False, error=str(exc), retryable=False)
-
-    @staticmethod
-    def _render_clarify_body(
-        question: str, choices: list[str] | None, multi_select: bool
-    ) -> str:
-        """Render core clarify data into Linear's documented activity body."""
-        if not choices:
-            return f"❓ {question}"
-        numbered = [f"  {i}. {choice}" for i, choice in enumerate(choices, start=1)]
-        if multi_select:
-            hint = (
-                'Multiple selections allowed — reply with the numbers separated by commas '
-                'or spaces (e.g. "1, 3"), the option text, or your own answer.'
-            )
-        else:
-            hint = "Reply with the number, the option text, or your own answer."
-        return "\n".join([f"❓ {question}", "", *numbered, "", hint])
-
-    async def _resolve_clarify_input(
-        self, agent_session_id: str, issue_id: str, payload: Mapping[str, Any],
-        *, delivery_key: str = "",
-    ) -> str | None:
-        """Resolve a Linear reply through the core registry after local binding checks."""
-        if not self._native_goal_continuation_enabled:
-            return None
-        if self._ledger is None:
-            return "clarify_unavailable"
-        active = self._active_turn_events.get(str(agent_session_id))
-        if active is None or active.source is None:
-            return None
-        if (
-            str(active.metadata.get("linear_agent_session_id") or "")
-            != str(agent_session_id)
-            or str(active.metadata.get("linear_issue_id") or "") != str(issue_id)
-        ):
-            return None
-        body = _activity_body(dict(payload))
-        # Slash commands belong to the normal native command path. The clarify
-        # interceptor must not consume any slash command.
-        if body.lstrip().startswith("/"):
-            return None
-        extra = getattr(self.config, "extra", None) or {}
-        session_key = build_session_key(
-            active.source,
-            group_sessions_per_user=extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
-            profile=self._session_key_profile(active.source),
-        )
-        from tools import clarify_gateway
-
-        # A normal prompted activity must not be classified as a clarify reply
-        # until the core registry proves that this session has a live question.
-        # This keeps actor/context failures on ordinary prompts in the native
-        # command path instead of swallowing them as clarify diagnostics.
-        pending = clarify_gateway.get_pending_for_session(
-            session_key, include_choice_prompts=True
-        )
-        item = self._ledger.get_outbox_item(f"activity:clarify:{pending.clarify_id}") if pending else None
-        captured_clarify_id = str(pending.clarify_id) if (
-            pending is not None and not pending.event.is_set() and item is not None
-            and item["state"] in {"pending", "in_flight", "delivered"}
-            and not item["payload"].get("clarify_suppressed")
-            and not item["payload"].get("clarify_resolved")
-        ) else ""
-        if delivery_key:
-            captured_clarify_id = self._ledger.bind_clarify_reply(delivery_key, captured_clarify_id)
-        if not captured_clarify_id:
-            # Registration precedes publication. An old callback paused in
-            # preflight is not a question the human could have answered.
-            owner = getattr(pending, "turn_owner", None)
-            if pending is not None and item is None and (
-                not isinstance(owner, tuple) or len(owner) != 2
-                or not all(isinstance(value, str) and value for value in owner)
-                or not self._clarify_owner_is_live(active, *owner)
-            ):
-                clarify_gateway.cancel(str(pending.clarify_id))
-            return None
-        if pending is None or pending.event.is_set() or str(pending.clarify_id) != captured_clarify_id:
-            # The captured question expired, not an invitation to answer the
-            # new FIFO head. Normal ingress owns late-answer validation.
-            return None
-        owner = getattr(pending, "turn_owner", None)
-        if (not isinstance(owner, tuple) or len(owner) != 2
-                or not all(isinstance(value, str) and value for value in owner)):
-            return "clarify_unavailable"
-        captured_active = active
-        incoming_actor_id, _ = _actor(dict(payload))
-        registered_user_id = str(getattr(active.source, "user_id", "") or "")
-        # AgentSessionEvent has no top-level actor in the vendor schema. Its
-        # signed prompt author lives on agentActivity. Resolve that identity
-        # only for the approved missing-requester normal-question path; never
-        # grant source identity or change slash/Stop/global actor semantics.
-        if not registered_user_id and not incoming_actor_id:
-            activity = payload.get("agentActivity")
-            activity = activity if isinstance(activity, dict) else {}
-            user = activity.get("user")
-            user = user if isinstance(user, dict) else {}
-            content = activity.get("content")
-            content = content if isinstance(content, dict) else {}
-            author_id = activity.get("userId")
-            if (
-                isinstance(author_id, str) and author_id
-                and user.get("id") == author_id
-                and activity.get("agentSessionId") == str(agent_session_id)
-                and content.get("type") == "prompt"
-                and not activity.get("signal")
-            ):
-                incoming_actor_id = author_id
-        # An absent requester can be resolved only for this normal question,
-        # from the live human issue owner below. Never persist it into source:
-        # that would also grant native slash-command requester authority.
-        if registered_user_id:
-            if bool(active.metadata.get("linear_direct_activation")):
-                return "clarify_requester_binding_unavailable"
-            if not hmac.compare_digest(incoming_actor_id, registered_user_id):
-                return "clarify_actor_mismatch"
-        if self._ledger is not None and self._ledger.has_session_closure(str(agent_session_id)):
-            return "clarify_fenced"
-        if self._linear is None:
-            return "clarify_unavailable"
-        # As with outbound clarify, network/store reads do not hold up Stop.
-        context = await self._linear.get_agent_turn_context(str(agent_session_id))
-        store = getattr(getattr(self, "gateway_runner", None), "async_session_store", None)
-        lookup = getattr(store, "lookup_by_session_key", None)
-        issue = context.get("issue") if isinstance(context, Mapping) else None
-        actor_id = str(getattr(self._linear, "actor_id", "") or "")
-        if (
-            not isinstance(context, Mapping)
-            or str(context.get("id") or "") != str(agent_session_id)
-            or str(context.get("status") or "") not in _OPEN_AGENT_SESSION_STATUSES
-            or not isinstance(issue, dict)
-            or str(issue.get("id") or "") != str(issue_id)
-            or not actor_id
-            or not hmac.compare_digest(str(issue.get("delegate", {}).get("id") or ""), actor_id)
-            or str((issue.get("state") or {}).get("type") or "").casefold()
-            in {"completed", "canceled", "cancelled"}
-        ):
-            return "clarify_fenced"
-        if not registered_user_id:
-            human_owner = issue.get("assignee")
-            if (
-                not isinstance(human_owner, dict)
-                or human_owner.get("app") is not False
-                or not isinstance(human_owner.get("id"), str)
-                or not human_owner["id"]
-                or not incoming_actor_id
-                or not hmac.compare_digest(human_owner["id"], incoming_actor_id)
-                or not hmac.compare_digest(str(context.get("app_user_id") or ""), actor_id)
-                or hmac.compare_digest(incoming_actor_id, actor_id)
-            ):
-                return "clarify_requester_binding_unavailable"
-        # Enqueue/claim (and even a later ACK on replay) cannot prove the
-        # question preceded this prompt. Live waiters allow corrected ordinary
-        # replies; strict late-goal rearm does not. Reads stay outside the Stop lock.
-        activity = payload.get("agentActivity")
-        answer_id = activity.get("id") if isinstance(activity, Mapping) else None
-        if item is None or not isinstance(answer_id, str) or not answer_id or not await self._linear.verify_clarify_reply(
-            str(agent_session_id), str(item["payload"].get("activity_id") or ""),
-            answer_id, incoming_actor_id, body, live_waiter=True,
-        ):
-            return "clarify_unavailable"
-        live_session = await lookup(session_key) if callable(lookup) else None
-        async with self._session_lock(str(agent_session_id)):
-            current_pending = clarify_gateway.get_pending_for_session(session_key, include_choice_prompts=True)
-            item = self._ledger.get_outbox_item(f"activity:clarify:{captured_clarify_id}")
-            if self._ledger.has_session_closure(str(agent_session_id)):
-                return "clarify_fenced"
-            if (
-                self._active_turn_events.get(str(agent_session_id)) is not captured_active
-                or current_pending is not pending
-                or getattr(current_pending, "turn_owner", None) != owner
-                or str(getattr(live_session, "session_key", "")) != session_key
-                or str(getattr(live_session, "session_id", "")) != owner[0]
-                or item is None
-                or item["state"] not in {"pending", "in_flight", "delivered"}
-                or item["payload"].get("clarify_suppressed")
-                or item["payload"].get("clarify_resolved")
-                or not self._clarify_outbox_is_live(OutboxItem(
-                    item["id"], item["aggregate_key"], item["sequence"],
-                    item["operation"], item["payload"], item["attempts"],
-                ))
-            ):
-                return "clarify_unavailable"
-            coerced, rejection = clarify_gateway._coerce_text_response_detailed(current_pending, body)
-            # Async lookup returns a snapshot. Reset/compression can replace it
-            # from a worker even without an await here. Linearize the in-memory
-            # check and registry resolution with the core routing lock; never
-            # wait for that lock on the event loop or hold it during ledger I/O.
-            store_lock = getattr(store, "_lock", None)
-            if store_lock is None or not store_lock.acquire(blocking=False):
-                return "clarify_unavailable"
-            try:
-                current_session = store._entries.get(session_key)
-                if (str(getattr(current_session, "session_key", "")) != session_key
-                        or str(getattr(current_session, "session_id", "")) != owner[0]):
-                    return "clarify_unavailable"
-                resolved = coerced is not None and clarify_gateway.resolve_gateway_clarify(
-                    captured_clarify_id, coerced
-                )
-            finally:
-                store_lock.release()
-            if resolved:
-                active.metadata["linear_clarify_resolved"] = True
-                self._ledger.update_outbox_payload_metadata(
-                    f"activity:clarify:{captured_clarify_id}",
-                    {"clarify_resolved": True, "clarify_id": captured_clarify_id},
-                )
-                # This event is a verified resolution, not model-authored progress.
-                # One fixed, ephemeral receipt per question; no answer content or
-                # reopening of terminal/progress fences. The outbox owns delivery.
-                self._enqueue_activity(
-                    str(agent_session_id),
-                    "thought",
-                    "Yanıt alındı — aynı oturumda çalışmaya devam ediliyor.",
-                    item_key=f"clarify-resolved:{captured_clarify_id}",
-                    ephemeral=True,
-                )
-                return "clarify_resolved"
-            if rejection == "invalid_selection":
-                return "clarify_rejected"
-            return None
-
     def _trusted_native_command_requester(self, event: MessageEvent) -> bool:
         """Require an exact active human source before any native slash dispatch."""
         source = event.source
@@ -6743,234 +4630,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
             return False
         return True
 
-    @staticmethod
-    def _clarify_goal_token(state: Any) -> dict[str, Any]:
-        """Exact native revision, without storing or interpreting judge prose."""
-        return {
-            "created_at": getattr(state, "created_at", None),
-            "turns_used": getattr(state, "turns_used", None),
-            "last_turn_at": getattr(state, "last_turn_at", None),
-            "status": getattr(state, "status", None),
-            "last_verdict": getattr(state, "last_verdict", None),
-            "pause_hash": hashlib.sha256(str(getattr(state, "paused_reason", "")).encode()).hexdigest(),
-        }
-
-    async def _record_clarify_timeout_goal(self, event: MessageEvent, result: Mapping) -> None:
-        """Bind only this turn's fresh blocked judge to its timed-out question."""
-        if self._ledger is None or event.source is None or self.gateway_runner is None:
-            return
-        sid = str(result.get("session_id") or "")
-        started = getattr(event, "_linear_processing_started_at", 0)
-        if not sid or not started:
-            return
-        state = await self._goal_state_for_source(event.source, sid)
-        if (
-            state is None or str(state.status) != "paused"
-            or getattr(state, "last_verdict", "") != "blocked"
-            or not isinstance(getattr(state, "last_turn_at", None), (float, int))
-            or state.last_turn_at < started
-        ):
-            return
-        self._ledger.update_outbox_payload_metadata(
-            f"activity:clarify:{event.metadata['linear_clarify_id']}",
-            {"clarify_timeout_goal": self._clarify_goal_token(state),
-             "clarify_timeout_hermes_session": sid},
-        )
-
-    async def _resume_ops200_profile_pause(self, event: MessageEvent, sid: str, state: Any) -> bool:
-        """One repaired profile-binding pause; a new human prompt is mandatory."""
-        if (
-            not _ops200_profile_fix_active() or self._ledger is None or self._linear is None
-            or event.internal or event.source is None
-            or str(event.source.chat_id) != "8f9bdbc3-ba43-4774-8030-0cfc33d0f4b7"
-            or event.metadata.get("linear_agent_session_id") != "8f9bdbc3-ba43-4774-8030-0cfc33d0f4b7"
-            or event.metadata.get("linear_issue_id") != "d29003de-4f24-43a0-8add-d42fa23fc79f"
-            or sid != "20260923_200530_e690070b"
-            or event.metadata.get("linear_action") != "prompted"
-            or not getattr(event, "_linear_verified_normal_prompt", False)
-            or state.status != "paused" or state.last_verdict != "blocked"
-            or state.created_at != 1790183130.350257
-            or state.last_turn_at != 1790183367.861218
-            or state.turns_used != 1 or state.turns_used >= state.max_turns
-            or state.paused_reason != (
-                "judged unachievable: All 16 acceptance criteria remain unchecked because the "
-                "missing trusted HERMES_SESSION_PROFILE binding causes "
-                "acceptance_provenance_unavailable and must be restored before valid same-turn "
-                "PASS evidence and acceptance mutations can proceed."
-            )
-            or self._ledger.has_session_closure(event.source.chat_id)
-            or self._ledger.get_wait(event.source.chat_id) is not None
-            or self._ledger.latest_clarify_timeout(event.source.chat_id) is not None
-        ):
-            return False
-        from tools import approval, clarify_gateway
-        key = str(event.metadata.get("gateway_session_key") or "")
-        if (not key or approval.get_pending_gateway_approval(key) is not None
-            or clarify_gateway.get_pending_for_session(key, include_choice_prompts=True) is not None):
-            return False
-        activity = (event.raw_message or {}).get("agentActivity") if isinstance(event.raw_message, dict) else None
-        if not isinstance(activity, dict) or activity.get("signal") or event.metadata.get("linear_signal"):
-            return False
-        content = activity.get("content")
-        user = activity.get("user")
-        author = activity.get("userId")
-        activity_id = activity.get("id")
-        if (not isinstance(content, dict) or content.get("type") != "prompt"
-            or not isinstance(user, dict) or not isinstance(author, str) or not author
-            or user.get("id") != author or not isinstance(activity_id, str) or not activity_id
-            or activity.get("agentSessionId") != event.source.chat_id
-            or not isinstance(content.get("body"), str) or not content["body"].strip()
-            or content["body"].lstrip().startswith("/")):
-            return False
-        token = self._clarify_goal_token(state)
-        rows = await self._linear._agent_activity_evidence(event.source.chat_id)
-        if not rows or activity_id not in rows:
-            return False
-        stamp, row = rows[activity_id]
-        if not isinstance(row, dict):
-            return False
-        vendor_content, vendor_user = row.get("content"), row.get("user")
-        if (stamp.timestamp() <= state.last_turn_at
-            or row.get("signal") or not isinstance(vendor_content, dict)
-            or not isinstance(vendor_user, dict)
-            or vendor_content.get("__typename") != "AgentActivityPromptContent"
-            or vendor_content.get("body") != content["body"]
-            or vendor_user.get("id") != author
-            or vendor_user.get("app") is not False
-            or any(other_id != activity_id and at >= stamp and (
-                other.get("signal") or other.get("content", {}).get("__typename") != "AgentActivityThoughtContent"
-            ) for other_id, (at, other) in rows.items())):
-            return False
-        context = await self._linear.get_agent_turn_context(event.source.chat_id)
-        owner = (context.get("issue") or {}).get("assignee") or {}
-        probe = {"completed": False, "failed": False, "interrupted": False,
-                 "turn_exit_reason": "max_iterations_reached(ops200_recovery)", "session_id": sid}
-        if (self._classify_turn_outcome(event, probe, context) != "continue"
-            or owner.get("id") != author or owner.get("app") is not False
-            or author == self._linear.actor_id):
-            return False
-        fresh = await self._goal_state_for_source(event.source, sid)
-        if (fresh is None or self._clarify_goal_token(fresh) != token
-            or self._ledger.has_session_closure(event.source.chat_id)
-            or not _ops200_profile_fix_active()):
-            return False
-        resumed, _ = await self._resume_goal_for_source(event.source, sid, reset_budget=False)
-        if resumed is None or resumed.status != "active" or resumed.turns_used != state.turns_used:
-            return False
-        logger.info("[linear] OPS-200 repaired profile pause resumed on verified human prompt")
-        return True
-
-    async def _resume_late_clarify_goal(self, event: MessageEvent, sid: str, state: Any) -> bool:
-        """Approved normal late-answer gate; never resume an arbitrary paused goal."""
-        # Fixed codes only; never log image URLs, body, author, or judge prose.
-        def reject(reason: str) -> bool:
-            session_ref = hashlib.sha256(str(getattr(event.source, "chat_id", "")).encode()).hexdigest()[:16]
-            logger.info("[linear] late clarify rejected session_ref=%s reason=%s", session_ref, reason)
-            return False
-
-        if (
-            self._ledger is None or self._linear is None or event.source is None
-            or event.internal or not getattr(event, "_linear_verified_normal_prompt", False)
-        ):
-            return reject("prompt_provenance_unverified")
-        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
-        activity = raw.get("agentActivity") or {}
-        if not isinstance(activity, dict):
-            return reject("activity_envelope_invalid")
-        session_id = str(event.source.chat_id)
-        answer_id = activity.get("id")
-        author = activity.get("userId")
-        user = activity.get("user") or {}
-        content = activity.get("content") or {}
-        if not isinstance(answer_id, str) or not answer_id:
-            return reject("answer_id_missing")
-        if not isinstance(author, str) or not author:
-            return reject("author_missing")
-        if not isinstance(user, dict) or user.get("id") != author:
-            return reject("author_envelope_mismatch")
-        if activity.get("agentSessionId") != session_id:
-            return reject("session_envelope_mismatch")
-        if not isinstance(content, dict) or content.get("type") != "prompt":
-            return reject("content_type_mismatch")
-        if activity.get("signal") or event.metadata.get("linear_signal"):
-            return reject("control_signal")
-        if not isinstance(content.get("body"), str) or not content["body"].strip():
-            return reject("body_missing")
-        if content["body"].lstrip().startswith("/"):
-            return reject("command_body")
-        item = self._ledger.latest_clarify_timeout(session_id)
-        payload = item.get("payload", {}) if item else {}
-        token = self._clarify_goal_token(state)
-        if not item or item["state"] != "delivered":
-            return reject("timeout_question_not_delivered")
-        if payload.get("clarify_timeout_goal") != token:
-            return reject("timeout_goal_revision_mismatch")
-        if payload.get("clarify_timeout_hermes_session") != sid:
-            return reject("timeout_session_mismatch")
-        if payload.get("clarify_suppressed") or payload.get("clarify_resolved"):
-            return reject("question_already_closed")
-        if payload.get("late_reply_id") not in (None, answer_id):
-            return reject("different_reply_consumed")
-        if state.status != "paused" or token["last_verdict"] != "blocked":
-            return reject("goal_not_timeout_paused")
-        if state.turns_used >= state.max_turns:
-            return reject("goal_budget_exhausted")
-        if not await self._linear.verify_late_clarify_reply(
-            session_id, str(payload.get("activity_id") or ""), answer_id, author,
-            content["body"],
-        ):
-            return reject("vendor_evidence_unverified")
-        context = await self._linear.get_agent_turn_context(session_id)
-        owner = (context.get("issue") or {}).get("assignee") or {}
-        probe = {"completed": False, "failed": False, "interrupted": False,
-                 "turn_exit_reason": "max_iterations_reached(late_clarify)", "session_id": sid}
-        if self._classify_turn_outcome(event, probe, context) != "continue":
-            return reject("live_lifecycle_denied")
-        if owner.get("id") != author or owner.get("app") is not False or author == self._linear.actor_id:
-            return reject("owner_mismatch")
-        # Re-read after vendor I/O; a Stop or newer native turn cannot inherit
-        # the old timeout's rearm authorization. Caller holds the session lock.
-        fresh = await self._goal_state_for_source(event.source, sid)
-        if fresh is None or self._clarify_goal_token(fresh) != token:
-            return reject("goal_changed_during_vendor_read")
-        if not self._ledger.update_outbox_payload_metadata(item["id"], {"late_reply_id": answer_id}):
-            return False
-        resumed, _ = await self._resume_goal_for_source(event.source, sid, reset_budget=False)
-        if resumed is None or resumed.status != "active" or resumed.turns_used != state.turns_used:
-            return False
-        self._ledger.update_outbox_payload_metadata(item["id"], {"late_reply_rearmed": True})
-        logger.info("[linear] late clarify goal rearmed session=%s question=%s answer=%s", session_id, payload.get("activity_id"), answer_id)
-        return True
-
-    def _native_clarify_timeout_fenced(self, event: MessageEvent) -> bool:
-        if self._ledger is None or event.source is None:
-            return False
-        clarify_id = str(event.metadata.get("linear_clarify_id") or "")
-        if not clarify_id or bool(event.metadata.get("linear_clarify_resolved")):
-            return False
-        extra = getattr(self.config, "extra", None) or {}
-        session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
-            profile=self._session_key_profile(event.source),
-        )
-        from tools import clarify_gateway
-
-        pending = clarify_gateway.get_pending_for_session(
-            session_key, include_choice_prompts=True
-        )
-        item = self._ledger.get_outbox_item(f"activity:clarify:{clarify_id}")
-        payload = item.get("payload") if item and isinstance(item.get("payload"), Mapping) else {}
-        return bool(
-            pending is None
-            and item is not None
-            and item.get("state") in {"pending", "in_flight", "delivered"}
-            and str(payload.get("activity_type") or "") == "elicitation"
-            and not bool(payload.get("clarify_suppressed"))
-            and not bool(payload.get("clarify_resolved"))
-        )
-
     def _clarify_owner_is_live(self, event: MessageEvent, session_id: str, turn_id: str) -> bool:
         """Validate captured native identity against current progress and terminal state."""
         cached = self._completed_turn_results.get(str(event.source.chat_id))
@@ -7036,38 +4695,8 @@ class LinearPlatformAdapter(BasePlatformAdapter):
         except Exception:
             logger.warning("[linear] Terminal progress fence callback failed", exc_info=True)
 
-    def _bind_active_turn(self, event: MessageEvent) -> None:
-        """Bind an admitted event without repeating decision admission or ownership."""
-        if (
-            self._native_goal_continuation_enabled
-            and event.source is not None
-            and event.metadata.get("linear_agent_session_id")
-        ):
-            # Local processing identity, never a synthetic vendor delivery ID.
-            if not (event.metadata.get("linear_delivery_key") or event.message_id):
-                event.metadata["linear_clarify_turn_key"] = str(uuid.uuid4())
-            self._active_turn_events[event.source.chat_id] = event
-
     async def on_processing_start(self, event: MessageEvent) -> bool | None:
-        if self._native_goal_continuation_enabled and event.metadata.get("linear_dependency_resume"):
-            wait = self._dependency_resume_claim(event)
-            if (wait is None or not await self._dependency_wait_is_live(wait)
-                or self._dependency_resume_claim(event) is None):
-                raise asyncio.CancelledError("Dependency resume fenced before execution")
         event._linear_processing_started_at = time.time()
-        self._bind_active_turn(event)
-        decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
-        if (
-            self._native_goal_continuation_enabled
-            and decision_id
-            and self._ledger is not None
-        ):
-            if not self._ledger.transition_turn_decision(
-                decision_id, "enqueued", "running"
-            ):
-                event.metadata["linear_continuation_fenced"] = True
-                raise asyncio.CancelledError("Linear continuation was fenced before execution")
-            return True
         return None
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
@@ -7079,24 +4708,6 @@ class LinearPlatformAdapter(BasePlatformAdapter):
                 and self._active_turn_events.get(event.source.chat_id) is event):
             self._active_turn_events.pop(event.source.chat_id, None)
             self._completed_turn_results.pop(event.source.chat_id, None)
-        decision_id = str(event.metadata.get("linear_continuation_decision_id") or "")
-        if self._native_goal_continuation_enabled and decision_id:
-            rejected = str(event.metadata.get("gateway_session_rejected") or "")
-            if outcome != ProcessingOutcome.SUCCESS or rejected:
-                error = rejected or outcome.value
-                decision = self._ledger.get_turn_decision(decision_id)
-                if decision is not None and decision["dispatch_state"] == "running":
-                    self._enqueue_turn_terminal_activity(
-                        decision,
-                        "blocked",
-                        f"Continuation was rejected before execution: {error}",
-                        expected_state="running",
-                        final_state="fenced",
-                    )
-            else:
-                self._ledger.transition_turn_decision(
-                    decision_id, "running", "completed"
-                )
         pending_delivery = self._pending_turn_deliveries.get(event.source.chat_id)
         # A chat can already have a newer turn staged when an older completion
         # callback arrives.  Completion owns only the exact event it staged.

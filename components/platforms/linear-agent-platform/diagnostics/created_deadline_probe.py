@@ -26,7 +26,6 @@ class CreatedDeadlineProbe(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await fixtures.AdapterWebhookTests.asyncSetUp(self)
         del self.adapter.handle_message  # Keep both adapter and core ingress real.
-        self.adapter._native_goal_continuation_enabled = True
         self.adapter.gateway_runner = native.fake_gateway_runner()
         turn_client = native.FakeLinear()
         turn_client.actor_id = self.adapter._linear.actor_id

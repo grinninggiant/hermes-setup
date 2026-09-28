@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import hashlib
 import hmac
 import importlib.util
@@ -2583,7 +2582,6 @@ class AdapterCredentialTests(unittest.TestCase):
         )
         self.assertFalse(constructed._closure_reconciliation_enabled)
         self.assertFalse(constructed._data_change_events_enabled)
-        self.assertFalse(constructed._dependency_wait_enabled)
         self.assertFalse(constructed._planned_activation_enabled)
         self.assertFalse(constructed._status_writeback_enabled)
         self.assertEqual(constructed._closure_allowed_team_ids, set())
@@ -3007,7 +3005,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._linear = FakeLinear("org-1")
         self.adapter._ledger = DeliveryLedger(db_path)
         self.adapter._data_change_events_enabled = True
-        self.adapter._dependency_wait_enabled = True
         self.adapter._planned_activation_enabled = False
         self.adapter._activation_allowed_team_ids = set()
         self.adapter._planned_owner_ids = set()
@@ -3368,90 +3365,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         health = json.loads((await self.adapter._health(None)).text)
         self.assertEqual(health["direct_activations"]["dispatch_unknown"], 1)
 
-    async def test_stop_after_bound_direct_claim_fences_dispatch_and_dependency_wait(self):
-        self.adapter._activation_allowed_team_ids = {"team-ops"}
-        self.adapter._planned_owner_ids = {"user-1"}
-        issue_id = "issue-direct-claimed-stop-race"
-        session_id = "session-direct-claimed-stop-race"
-        title = "Claimed Direct Stop race"
-        self.adapter._linear.closure_contexts[issue_id] = {
-            "id": issue_id,
-            "title": title,
-            "state": {"id": "todo-1", "name": "Todo", "type": "unstarted"},
-            "team": {"id": "team-ops"},
-            "creator": {"id": "agent-derya"},
-            "parent": {},
-            "assignee": {"id": "user-1", "name": "Mutlu"},
-            "delegate": {"id": "agent-derya", "name": "Derya"},
-        }
-        self.assertTrue(self.adapter._ledger.reserve_direct_activation_grant(
-            operation_key="direct-claimed-stop-race",
-            source_platform="telegram",
-            source_user_id="telegram-mutlu",
-            source_message_id="message-claimed-stop-race",
-            source_session_id="hermes-claimed-stop-race",
-            source_profile="general",
-            actor_id="agent-derya",
-            team_id="team-ops",
-            issue_fingerprint=DeliveryLedger.direct_issue_fingerprint(
-                "team-ops", title
-            ),
-        ))
-        self.assertTrue(self.adapter._ledger.bind_direct_activation_grant(
-            "direct-claimed-stop-race", issue_id
-        ))
-        claimed = asyncio.Event()
-        release_created = asyncio.Event()
-
-        async def pause_after_claim(requested_issue_id):
-            self.assertEqual(requested_issue_id, issue_id)
-            grant = self.adapter._ledger.get_direct_activation_grant(issue_id)
-            self.assertEqual(grant["state"], "claimed")
-            self.assertEqual(grant["session_id"], session_id)
-            claimed.set()
-            await release_created.wait()
-            return [{"id": "blocker-1", "identifier": "OPS-1"}]
-
-        self.adapter._linear.get_open_blockers = pause_after_claim
-        self.adapter._reconcile_wait = mock.AsyncMock(return_value=True)
-        created = self.make_payload(
-            webhookId="webhook-direct-claimed-stop-race-created",
-            actor={"id": "agent-derya", "name": "Derya"},
-            agentSession={
-                "id": session_id,
-                "issue": {"id": issue_id, "identifier": "OPS-205", "title": title},
-            },
-        )
-        stop = self.make_payload(
-            webhookId="webhook-direct-claimed-stop-race-stop",
-            action="prompted",
-            agentActivity={
-                "id": "activity-direct-claimed-stop-race",
-                "signal": "stop",
-                "body": "stop",
-            },
-            agentSession=created["agentSession"],
-        )
-
-        created_task = asyncio.create_task(
-            self.adapter._handle_webhook(self.request_for(created))
-        )
-        await claimed.wait()
-        stop_response = await self.adapter._handle_webhook(self.request_for(stop))
-        release_created.set()
-        created_response = await created_task
-
-        self.assertEqual(json.loads(stop_response.text)["status"], "accepted")
-        self.assertEqual(
-            json.loads(created_response.text)["status"], "direct_activation_canceled"
-        )
-        self.assertEqual([event.text for event in self.events], ["/stop"])
-        self.adapter._reconcile_wait.assert_not_awaited()
-        self.assertIsNone(self.adapter._ledger.get_wait(session_id))
-        self.assertEqual(
-            self.adapter._ledger.get_direct_activation_grant(issue_id)["state"],
-            "canceled",
-        )
 
     async def test_bound_direct_grant_rejects_foreign_actor_without_consuming_grant(self):
         self.adapter._activation_allowed_team_ids = {"team-ops"}
@@ -3529,79 +3442,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.events), 1)
         self.assertEqual(self.events[0].source.chat_id, "session-direct-legitimate")
 
-    async def test_direct_webhook_before_grant_binding_recovers_same_native_session(self):
-        self.adapter._planned_activation_enabled = True
-        self.adapter._activation_allowed_team_ids = {"team-ops"}
-        self.adapter._planned_owner_ids = {"user-1"}
-        issue_id = "issue-direct-race"
-        self.adapter._linear.closure_contexts[issue_id] = {
-            "id": issue_id,
-            "title": "Race",
-            "state": {"id": "backlog-1", "name": "Backlog", "type": "backlog"},
-            "team": {"id": "team-ops"},
-            "creator": {"id": "agent-derya"},
-            "parent": {},
-            "assignee": {"id": "user-1", "name": "Mutlu"},
-            "delegate": {"id": "agent-derya", "name": "Derya"},
-        }
-        self.adapter._ledger.reserve_direct_activation_grant(
-            operation_key="direct-create-race",
-            source_platform="telegram",
-            source_user_id="telegram-mutlu",
-            source_message_id="message-race",
-            source_session_id="hermes-session-race",
-            source_profile="general",
-            actor_id="agent-derya",
-            team_id="team-ops",
-            issue_fingerprint=DeliveryLedger.direct_issue_fingerprint(
-                "team-ops", "Race"
-            ),
-        )
-        created = self.make_payload(
-            webhookId="webhook-direct-race",
-            actor={"id": "agent-derya", "name": "Derya"},
-            agentSession={
-                "id": "session-direct-race",
-                "issue": {"id": issue_id, "identifier": "OPS-996", "title": "Race"},
-            },
-        )
-
-        waiting = await self.adapter._handle_webhook(self.request_for(created))
-        self.assertEqual(
-            json.loads(waiting.text)["status"], "direct_activation_waiting_for_grant"
-        )
-        self.assertEqual(self.events, [])
-        self.assertTrue(self.adapter._ledger.bind_direct_activation_grant(
-            "direct-create-race", issue_id
-        ))
-
-        self.adapter._linear.blockers[issue_id] = [
-            {"id": "blocker-1", "identifier": "OPS-1"}
-        ]
-        self.assertFalse(await self.adapter._reconcile_direct_activation_event(issue_id))
-        self.assertEqual(self.events, [])
-        self.assertEqual(
-            self.adapter._ledger.get_direct_activation_grant(issue_id)["state"],
-            "claimed",
-        )
-        self.assertEqual(
-            self.adapter._ledger.get_direct_activation_event(issue_id)["state"],
-            "claimed",
-        )
-        self.adapter._linear.blockers[issue_id] = []
-        self.assertTrue(await self.adapter._reconcile_wait("session-direct-race"))
-        self.assertEqual(len(self.events), 1)
-        self.assertEqual(self.events[0].source.chat_id, "session-direct-race")
-        self.assertEqual(
-            self.adapter._ledger.get_direct_activation_grant(issue_id)["state"],
-            "dispatched",
-        )
-        self.assertEqual(
-            self.adapter._ledger.get_direct_activation_event(issue_id)["state"],
-            "dispatched",
-        )
-        self.assertFalse(await self.adapter._reconcile_direct_activation_event(issue_id))
-        self.assertEqual(len(self.events), 1)
 
     async def test_direct_grant_bound_during_webhook_context_read_still_activates(self):
         self.adapter._planned_activation_enabled = True
@@ -3739,7 +3579,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.events), 2)
 
     async def test_restart_recovers_direct_event_when_dependency_wait_is_disabled(self):
-        self.adapter._dependency_wait_enabled = False
         self.adapter._activation_allowed_team_ids = {"team-ops"}
         self.adapter._planned_owner_ids = {"user-1"}
         issue_id = "issue-direct-disabled-restart"
@@ -5424,32 +5263,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(duplicate.status, 200)
         self.assertEqual(json.loads(duplicate.text)["status"], "duplicate")
 
-    async def test_canceled_pre_admission_read_cannot_turn_retry_into_success(self):
-        del self.adapter.handle_message
-        entered = asyncio.Event()
-
-        async def slow_read(_issue_id):
-            entered.set()
-            await asyncio.wait_for(asyncio.Event().wait(), timeout=2)
-
-        self.adapter._linear.get_open_blockers = slow_read
-        request = self.request_for(self.make_payload(
-            agentSession={"id": "session-1", "issue": {"id": "issue-1"}}
-        ))
-        first = asyncio.create_task(self.adapter._handle_webhook(request))
-        try:
-            await asyncio.wait_for(entered.wait(), timeout=1)
-        finally:
-            first.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await first
-        self.adapter._ledger.close()
-        self.adapter._ledger = DeliveryLedger(str(Path(self.temp.name) / "ledger.sqlite3"))
-        retry = await self.adapter._handle_webhook(request)
-        self.assertEqual(retry.status, 503)
-        self.assertEqual(json.loads(retry.text)["status"], "processing")
-        self.assertEqual(self.adapter._linear.calls, [])
-        self.assertEqual(self.adapter._session_tasks, {})
 
     async def test_unfinished_claim_after_restart_is_retryable_for_both_ingress_paths(self):
         for payload in (self.make_payload(), self.make_data_payload()):
@@ -5526,7 +5339,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         # handle_message. Only the model handler and remote Linear I/O are fake.
         del self.adapter.handle_message
         self.adapter.set_message_handler(execute)
-        self.adapter._native_goal_continuation_enabled = False
 
         async def blockers(_issue_id):
             if not entered.is_set():
@@ -5549,7 +5361,7 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
                 with mock.patch.object(self.adapter._linear, "get_open_blockers", side_effect=blockers):
                     first_task = asyncio.create_task(post(first))
                     try:
-                        await asyncio.wait_for(entered.wait(), 2)
+                        await asyncio.wait_for(running.wait(), 2)
                         second_status = await post(second)
                         # Terminal upstream is insufficient while local intake
                         # or execution still owns the old session.
@@ -5579,11 +5391,9 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.adapter._ledger.get_issue_session(issue_id), "session-first")
                 self.assertEqual(self.adapter._ledger.get_session_issue("session-first"), issue_id)
                 self.assertIsNone(self.adapter._ledger.get_session_issue("session-second"))
-                self.adapter._native_goal_continuation_enabled = True
                 with mock.patch.object(self.adapter, "_cancel_linear_session_processing", new=mock.AsyncMock()) as cancel:
                     await self.adapter._stop_bound_turns(issue_id, "linear_issue_canceled")
                 cancel.assert_awaited_once_with("session-first")
-                self.adapter._native_goal_continuation_enabled = False
         finally:
             release.set()
             finish.set()
@@ -5596,7 +5406,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         read_started, release_read = asyncio.Event(), asyncio.Event()
         finish = asyncio.Event()
         del self.adapter.handle_message
-        self.adapter._native_goal_continuation_enabled = False
 
         async def execute(event):
             if event.text == "/stop":
@@ -5889,78 +5698,8 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-    async def test_blocked_delegation_waits_without_starting_hermes(self):
-        self.adapter._linear.blockers["issue-8"] = [
-            {"id": "blocker-7", "identifier": "OPS-7", "title": "Human approval", "state": "Todo"}
-        ]
-        payload = self.make_payload(
-            webhookId="webhook-wait-123",
-            agentSession={
-                "id": "session-8",
-                "issue": {"id": "issue-8", "identifier": "OPS-8", "title": "Resume me"},
-            },
-        )
-        response = await self.adapter._handle_webhook(self.request_for(payload))
-        self.assertEqual(json.loads(response.text)["status"], "awaiting_input")
-        self.assertEqual(self.events, [])
-        self.assertEqual(self.adapter._ledger.get_wait("session-8")["state"], "waiting")
-        self.assertEqual(self.adapter._linear.calls, [])
-        await self.adapter._drain_outbox_once()
-        self.assertEqual(self.adapter._linear.calls[0][1], "elicitation")
-        self.assertIn("OPS-7", self.adapter._linear.calls[0][2])
 
-    async def test_blocked_delegation_does_not_drain_outbox_in_webhook(self):
-        self.adapter._linear.blockers["issue-8"] = [
-            {"id": "blocker-7", "identifier": "OPS-7", "title": "Human approval"}
-        ]
-        payload = self.make_payload(
-            webhookId="webhook-wait-no-drain",
-            agentSession={
-                "id": "session-8",
-                "issue": {"id": "issue-8", "identifier": "OPS-8", "title": "No drain"},
-            },
-        )
 
-        with mock.patch.object(
-            self.adapter,
-            "_drain_outbox_once",
-            side_effect=AssertionError("webhook drained outbox"),
-        ):
-            response = await self.adapter._handle_webhook(self.request_for(payload))
-
-        self.assertEqual(json.loads(response.text)["status"], "awaiting_input")
-        self.assertEqual(self.adapter._ledger.outbox_counts()["pending"], 1)
-
-    async def test_blocker_update_uses_one_shot_live_resume_claim(self):
-        self.adapter._linear.blockers["issue-8"] = [
-            {"id": "blocker-7", "identifier": "OPS-7", "title": "Human approval", "state": "Todo"}
-        ]
-        created = self.make_payload(
-            webhookId="webhook-wait-456",
-            agentSession={
-                "id": "session-8",
-                "issue": {"id": "issue-8", "identifier": "OPS-8", "title": "Resume me"},
-            },
-        )
-        await self.adapter._handle_webhook(self.request_for(created))
-        self.adapter._linear.blockers["issue-8"] = []
-        updated = self.make_data_payload(webhookId="webhook-issue-done-1")
-        response = await self.adapter._handle_webhook(self.request_for(updated))
-        self.assertEqual(json.loads(response.text), {"status": "observed", "resumed": 1})
-        self.assertEqual(len(self.events), 1)
-        self.assertEqual(self.events[0].source.chat_id, "session-8")
-        self.assertTrue(self.events[0].message_id.startswith("linear-event-"))
-        self.assertTrue(self.events[0].metadata["linear_dependency_resume"])
-        self.assertIn("All blocking issues are complete", self.events[0].text)
-        self.assertIn("frozen creation snapshot", self.events[0].text)
-        self.assertLess(
-            self.events[0].text.index("Adapter-verified current dependency state"),
-            self.events[0].text.index("Linear promptContext"),
-        )
-        self.assertEqual(self.adapter._ledger.get_wait("session-8")["state"], "resumed")
-        duplicate = await self.adapter._handle_webhook(self.request_for(updated))
-        self.assertEqual(json.loads(duplicate.text)["status"], "duplicate")
-        self.assertEqual(len(self.events), 1)
 
     async def test_human_started_to_completed_queues_one_closure_without_rerunning_work(self):
         self.adapter._closure_reconciliation_enabled = True
@@ -6921,126 +6660,7 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call[1] for call in linear.calls], ["thought", "thought", "response"])
         self.assertEqual(linear.activity_ephemeral, [False, True, False])
 
-    async def test_dependency_resume_checks_closure_immediately_before_handle_message(self):
-        payload = self.make_payload(
-            webhookId="webhook-dependency-closure-race",
-            agentSession={
-                "id": "session-dependency-race",
-                "issue": {"id": "issue-dependency-race", "identifier": "OPS-74", "title": "Race"},
-            },
-        )
-        self.adapter._ledger.bind_issue_session(
-            "issue-dependency-race", "session-dependency-race"
-        )
-        self.adapter._ledger.put_wait(
-            "session-dependency-race",
-            "issue-dependency-race",
-            "dependency-race-delivery",
-            payload,
-            [{"id": "blocker", "identifier": "OPS-72", "title": "Blocker"}],
-        )
-        original_claim_wait = self.adapter._ledger.claim_wait
 
-        def claim_then_close(session_id, *, now=None):
-            claimed = original_claim_wait(session_id, now=now)
-            if claimed:
-                self.adapter._ledger.enqueue_closure_activity(
-                    "dependency-race-closure",
-                    "issue-dependency-race",
-                    session_id,
-                    "activity-dependency-race-closure",
-                    "Closure reconciliation complete.",
-                    {},
-                )
-            return claimed
-
-        self.adapter._ledger.claim_wait = claim_then_close
-        self.adapter._linear.blockers["issue-dependency-race"] = []
-
-        resumed = await self.adapter._reconcile_wait("session-dependency-race")
-
-        self.assertFalse(resumed)
-        self.assertEqual(self.events, [])
-        self.assertEqual(
-            self.adapter._ledger.get_wait("session-dependency-race")["state"], "canceled"
-        )
-
-    async def test_closure_readback_holds_session_lock_before_dependency_resume(self):
-        class BlockingClosureReadLinear(FakeLinear):
-            def __init__(self):
-                super().__init__("org-1")
-                self.read_started = asyncio.Event()
-                self.release_read = asyncio.Event()
-
-            async def get_issue_closure_context(self, issue_id):
-                self.read_started.set()
-                await self.release_read.wait()
-                return await super().get_issue_closure_context(issue_id)
-
-        linear = BlockingClosureReadLinear()
-        self.adapter._linear = linear
-        self.adapter._closure_reconciliation_enabled = True
-        self.adapter._closure_allowed_team_ids = {"team-ops"}
-        issue_id = "issue-readback-race"
-        session_id = "session-readback-race"
-        payload = self.make_payload(
-            webhookId="webhook-readback-race-session",
-            agentSession={
-                "id": session_id,
-                "issue": {"id": issue_id, "identifier": "OPS-73", "title": "Read race"},
-            },
-        )
-        self.adapter._ledger.bind_issue_session(issue_id, session_id)
-        self.adapter._ledger.put_wait(
-            session_id,
-            issue_id,
-            "readback-race-delivery",
-            payload,
-            [{"id": "blocker", "identifier": "OPS-72", "title": "Blocker"}],
-        )
-        linear.blockers[issue_id] = []
-        linear.closure_contexts[issue_id] = {
-            "id": issue_id,
-            "updated_at": "2026-08-04T12:45:00.000Z",
-            "completed_at": "2026-08-04T12:45:00.000Z",
-            "state": {"id": "done-1", "name": "Done", "type": "completed"},
-            "team": {"id": "team-ops"},
-            "team_states": [
-                {"id": "started-1", "name": "In Progress", "type": "started"},
-                {"id": "done-1", "name": "Done", "type": "completed"},
-            ],
-            "assignee": {"id": "user-1", "name": "Mutlu"},
-            "delegate": {"id": "agent-derya", "name": "Derya"},
-            "history": [{
-                "actor_id": "user-1",
-                "created_at": "2026-08-04T12:45:00.000Z",
-                "from_state": {"id": "started-1", "type": "started"},
-                "to_state": {"id": "done-1", "type": "completed"},
-            }],
-        }
-        completed = self.make_data_payload(
-            webhookId="webhook-readback-race-done",
-            actor={"id": "user-1", "name": "Mutlu"},
-            data={
-                "id": issue_id,
-                "updatedAt": "2026-08-04T12:45:00.000Z",
-                "state": {"id": "done-1", "type": "completed"},
-            },
-            updatedFrom={"stateId": "started-1"},
-        )
-
-        closure_task = asyncio.create_task(
-            self.adapter._reconcile_human_completion(completed, issue_id)
-        )
-        await linear.read_started.wait()
-        resume_task = asyncio.create_task(self.adapter._reconcile_wait(session_id))
-        await asyncio.sleep(0)
-        linear.release_read.set()
-
-        self.assertEqual(await closure_task, "closure_queued")
-        self.assertFalse(await resume_task)
-        self.assertEqual(self.events, [])
-        self.assertEqual(self.adapter._ledger.get_wait(session_id)["state"], "canceled")
 
     async def test_agent_authored_terminal_event_is_ignored_before_closure_readback(self):
         self.adapter._closure_reconciliation_enabled = True
@@ -7187,41 +6807,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.events[-1].text, "/stop")
 
 
-    async def test_inbox_unassign_cancels_wait_and_oauth_revoke_degrades_health(self):
-        self.adapter._linear.blockers["issue-8"] = [
-            {"id": "blocker-7", "identifier": "OPS-7", "title": "Blocker", "state": {"type": "started"}}
-        ]
-        created = self.make_payload()
-        created["agentSession"]["issue"]["id"] = "issue-8"
-        response = await self.adapter._handle_webhook(self.request_for(created))
-        self.assertEqual(response.status, 200)
-        self.assertEqual(self.adapter._ledger.get_wait("session-1")["state"], "waiting")
-
-        notification = {
-            "type": "AppUserNotification",
-            "action": "issueUnassignedFromYou",
-            "createdAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "organizationId": "org-1",
-            "oauthClientId": "oauth-1",
-            "appUserId": "agent-derya",
-            "notification": {"id": "notification-1", "issueId": "issue-8"},
-        }
-        response = await self.adapter._handle_webhook(self.request_for(notification))
-        self.assertEqual(response.status, 200)
-        self.assertEqual(self.adapter._ledger.get_wait("session-1")["state"], "canceled")
-
-        revoked = self.make_data_payload(
-            "OAuthApp",
-            action="revoked",
-            data={"id": "oauth-1", "updatedAt": "2026-07-16T10:00:01.000Z"},
-        )
-        response = await self.adapter._handle_webhook(self.request_for(revoked))
-        self.assertEqual(response.status, 200)
-        self.adapter._running = True
-        health = await self.adapter._health(None)
-        body = json.loads(health.body)
-        self.assertEqual(body["status"], "degraded")
-        self.assertTrue(body["oauth_revoked"])
 
     async def test_invalid_signature_stale_and_wrong_organization_fail_closed(self):
         invalid = await self.adapter._handle_webhook(
@@ -7510,7 +7095,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             "session_id": "hermes-session-1",
             "turn_id": "turn-1",
         }
-        self.adapter._native_goal_continuation_enabled = True
         self.adapter._active_turn_events[chat_id] = active_event
         self.adapter._completed_turn_results[chat_id] = completed_turn_result
 
@@ -7615,7 +7199,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             metadata={"linear_agent_session_id": "native-session-1"},
         )
         completed_turn_result = {"turn_id": "turn-1", "session_id": "hermes-1"}
-        self.adapter._native_goal_continuation_enabled = True
         self.adapter._active_turn_events[chat_id] = active_event
         self.adapter._completed_turn_results[chat_id] = completed_turn_result
 
