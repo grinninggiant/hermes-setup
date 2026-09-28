@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 import test_native_continuation as base
+from _fork_core import fork_core_only  # noqa: E402
 
 
 class DependencyLinear(base.FakeLinear, base.LinearClient):
@@ -172,6 +173,7 @@ class DependencyResumeTests(unittest.IsolatedAsyncioTestCase):
         runner._startup_restore_queue = []
         runner._queue_startup_restore_event = MethodType(GatewayStartupMixin._queue_startup_restore_event, runner)
         runner._adapter_for_source = lambda _source: self.adapter
+        runner._intake_adapter_for = lambda _source: self.adapter
         self.goal = None
         ensure = runner.ensure_goal_for_source
 
@@ -325,6 +327,8 @@ class DependencyResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.adapter._recover_unadmitted_dependency_wait("linear-session"))
         await self.settle()
         self.assertEqual(len(self.reached_handler), 1)
+
+    @fork_core_only
 
     async def test_processing_hook_read_failure_cannot_skip_durable_running_claim(self):
         await self.stranded_goal()

@@ -7842,9 +7842,16 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
                 "gateway.session_context.get_session_env",
                 side_effect=lambda name, default="": values.get(name, default),
             ):
-                package._pre_tool_progress(
-                    tool_name="read_file", **tool_hook_ids(fork, "review-task", "review-call"),
+                # Upstream runs background review on the "bg-review" thread and its hooks
+                # carry no execution_context; exercise that real boundary.
+                review = threading.Thread(
+                    target=lambda: package._pre_tool_progress(
+                        tool_name="read_file", **tool_hook_ids(fork, "review-task", "review-call"),
+                    ),
+                    name="bg-review",
                 )
+                review.start()
+                review.join(5)
                 tasks = list(self.adapter._tool_progress_tasks)
                 if tasks:
                     await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
