@@ -62,6 +62,10 @@ class RegistrationTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.root.chmod(0o700)
+        # Other suites load the real plugin into the global tool registry; isolate from it.
+        names_free = mock.patch("linear_tools._tool_names_available", return_value=True)
+        names_free.start()
+        self.addCleanup(names_free.stop)
 
     def tearDown(self):
         self.tempdir.cleanup()

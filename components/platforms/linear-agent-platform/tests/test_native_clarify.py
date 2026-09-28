@@ -909,3 +909,6 @@ class NativeClarifyTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from _fork_core import require_clarify_owner_binding as setUpModule  # noqa: E402
