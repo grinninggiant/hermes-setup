@@ -316,44 +316,6 @@ def _linear_adapter_factory(config: Any) -> Any:
     return adapter
 
 
-def _on_session_end(
-    *,
-    session_id: str = "",
-    turn_id: str = "",
-    completed: bool = False,
-    failed: bool = False,
-    interrupted: bool = False,
-    turn_exit_reason: str = "",
-    platform: str = "",
-    **_kwargs: Any,
-) -> None:
-    """Bridge Hermes' supported structured turn hook to the Linear adapter."""
-    if str(platform or "").casefold() != "linear":
-        return
-    try:
-        from gateway.session_context import get_session_env  # type: ignore[import-not-found]
-
-        chat_id = str(get_session_env("HERMES_SESSION_CHAT_ID", "")).strip()
-        profile = str(get_session_env("HERMES_SESSION_PROFILE", "")).strip()
-        if not chat_id:
-            return
-        for adapter in list(_progress_adapters):
-            record = getattr(adapter, "record_completed_turn", None)
-            if callable(record):
-                record(
-                    chat_id=chat_id,
-                    profile=profile,
-                    hermes_session_id=str(session_id or ""),
-                    turn_id=str(turn_id or ""),
-                    completed=completed,
-                    failed=failed,
-                    interrupted=interrupted,
-                    turn_exit_reason=str(turn_exit_reason or ""),
-                )
-    except Exception:
-        logger.warning("[linear] Structured turn hook could not be recorded", exc_info=True)
-
-
 def _progress_adapter(profile: str = "") -> Any | None:
     """Return the profile-matching live adapter, failing closed on ambiguity."""
     candidates = list(_progress_adapters)
@@ -546,18 +508,6 @@ def _on_interim_message(
     return None
 
 
-def _core_binds_clarify_owner() -> bool:
-    """Only the retired fork core bound clarify waiters to a Linear turn owner."""
-    try:
-        import inspect
-
-        from tools import clarify_gateway
-
-        return "turn_owner" in inspect.signature(clarify_gateway.register).parameters
-    except (ImportError, AttributeError, TypeError, ValueError):
-        return False
-
-
 def _block_unbound_linear_clarify(**kwargs: Any) -> dict[str, str] | None:
     """Keep Linear turns from waiting on a question no owner-bound reply can answer."""
     if str(kwargs.get("tool_name") or "") != "clarify":
@@ -571,7 +521,7 @@ def _block_unbound_linear_clarify(**kwargs: Any) -> dict[str, str] | None:
         ).strip().lower()
     except (ImportError, RuntimeError):
         return None
-    if platform != "linear" or _core_binds_clarify_owner():
+    if platform != "linear":
         return None
     return {
         "action": "block",
@@ -671,7 +621,6 @@ def register(ctx) -> None:
         register_hook("pre_tool_call", _block_unbound_linear_clarify)
         register_hook("pre_tool_call", _pre_tool_progress)
         register_hook("on_interim_message", _on_interim_message)
-        register_hook("on_session_end", _on_session_end)
     register_outbound_tools(
         ctx, direct_grant_bound_callback=_notify_direct_grant_bound
     )

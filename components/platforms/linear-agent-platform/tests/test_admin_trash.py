@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 import tempfile
@@ -187,7 +186,6 @@ class AdminTrashFlowTests(unittest.IsolatedAsyncioTestCase):
 
     def native_context(self):
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-        from hermes_cli import plugins
         from hermes_cli.plugins import PluginContext, PluginManager
         from hermes_cli.plugins_manifest import PluginManifest
 
