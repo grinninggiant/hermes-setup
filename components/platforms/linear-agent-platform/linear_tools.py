@@ -2259,8 +2259,15 @@ def _acceptance_invocation_context(
             session_profile = str(get_active_profile_name() or "")
         except (ImportError, RuntimeError, OSError):
             session_profile = ""
+    if get_session_env("HERMES_SESSION_PLATFORM", "") != "linear":
+        # Outside Linear: only the owner channels Direct already trusts (local Desktop/TUI,
+        # gateway-verified Telegram DM). Binding is the Hermes session; the issue is named per call.
+        direct = _direct_instruction_context(profile_id, handler_kwargs)
+        if direct is None:
+            return None
+        return LOCAL_ACCEPTANCE_PREFIX + direct["source_session_id"], turn_id
     checks = {
-        "platform": get_session_env("HERMES_SESSION_PLATFORM", "") == "linear",
+        "platform": True,
         "profile": session_profile == profile_id,
         "chat_id": bool(chat_id),
         "bound_session": bool(bound_session_id),
@@ -2273,6 +2280,38 @@ def _acceptance_invocation_context(
         )
         return None
     return chat_id, turn_id
+
+
+LOCAL_ACCEPTANCE_PREFIX = "owner-session:"
+
+
+async def _acceptance_issue(graphql: Any, chat_id: str, issue_id: str) -> dict[str, Any] | None:
+    """Resolve the issue an acceptance call may touch; Derya must be its live delegate."""
+    if chat_id.startswith(LOCAL_ACCEPTANCE_PREFIX):
+        issue = await graphql.get_issue_turn_context(issue_id) if issue_id else None
+    else:
+        context = await graphql.get_agent_turn_context(chat_id)
+        issue = context.get("issue") if (
+            isinstance(context, dict) and context.get("id") == chat_id
+            and context.get("status") == "active"
+            and context.get("app_user_id") == graphql.actor_id
+        ) else None
+    if not (
+        isinstance(issue, dict) and isinstance(issue.get("id"), str) and issue["id"]
+        and (not issue_id or issue["id"] == issue_id)
+        and isinstance(issue.get("delegate"), dict)
+        and issue["delegate"].get("id") == graphql.actor_id
+    ):
+        return None
+    return issue
+
+
+def _comment_pass_line(body: str, criterion_text: str) -> bool:
+    """True when one comment line names the exact criterion and says -> PASS."""
+    return any(
+        criterion_text in " ".join(line.split()) and "→ PASS" in line
+        for line in body.splitlines()
+    )
 
 
 def _policy_from_outbound(outbound: dict[str, Any]) -> OutboundPolicy:
@@ -2564,19 +2603,10 @@ def register_outbound_tools(
                 await graphql.connect()
                 if is_acceptance:
                     try:
-                        agent_context = await graphql.get_agent_turn_context(chat_id)
+                        issue = await _acceptance_issue(graphql, chat_id, str(safe_args.get("id") or ""))
                     except Exception:
-                        return {"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"}
-                    issue = agent_context.get("issue") if isinstance(agent_context, dict) else None
-                    if not (
-                        isinstance(issue, dict)
-                        and agent_context.get("id") == chat_id
-                        and agent_context.get("status") == "active"
-                        and agent_context.get("app_user_id") == graphql.actor_id
-                        and issue.get("id") == safe_args.get("id")
-                        and isinstance(issue.get("delegate"), dict)
-                        and issue["delegate"].get("id") == graphql.actor_id
-                    ):
+                        issue = None
+                    if issue is None:
                         return {"error": "linear_policy_denied", "reason": "acceptance_provenance_unavailable"}
                     for envelope in safe_args.get("acceptance_evidence", ()):
                         if not isinstance(envelope, dict):
@@ -2927,8 +2957,8 @@ def register_outbound_tools(
             check, field, equals = args.get("check"), str(args.get("field") or ""), args.get("equals")
             criterion_hash = args.get("criterion_hash")
             if (
-                set(args) - {"criterion_hash", "check", "field", "equals"}
-                or check not in {"health_field", "issue_state"}
+                set(args) - {"criterion_hash", "check", "field", "equals", "issue_id"}
+                or check not in {"health_field", "issue_state", "evidence_comment"}
                 or not isinstance(equals, str) or not equals or len(equals) > 200
                 or not isinstance(criterion_hash, str)
                 or (check == "health_field" and not re.fullmatch(r"[a-z_]+(\.[a-z_]+){0,3}", field))
@@ -2937,20 +2967,25 @@ def register_outbound_tools(
             graphql = LinearClient(oauth_store=LinearOAuthStore(oauth_file))
             try:
                 await graphql.connect()
-                context = await graphql.get_agent_turn_context(chat_id)
-                issue = context.get("issue") if isinstance(context, dict) else None
-                criteria = acceptance_criteria(str(issue.get("description") or "")) if isinstance(issue, dict) else ()
-                revision = str(issue.get("updatedAt") or "") if isinstance(issue, dict) else ""
-                if not (
-                    isinstance(issue, dict) and context.get("id") == chat_id
-                    and context.get("status") == "active"
-                    and context.get("app_user_id") == graphql.actor_id
-                    and (issue.get("delegate") or {}).get("id") == graphql.actor_id
-                    and isinstance(issue.get("id"), str) and issue["id"] and revision
-                    and any(c.criterion_hash == criterion_hash for c in criteria)
-                ):
+                issue = await _acceptance_issue(graphql, chat_id, str(args.get("issue_id") or ""))
+                criteria = acceptance_criteria(str(issue.get("description") or "")) if issue else ()
+                revision = str(issue.get("updatedAt") or "") if issue else ""
+                criterion = next((c for c in criteria if c.criterion_hash == criterion_hash), None)
+                if issue is None or not revision or criterion is None:
                     return json.dumps(denied)
-                if check == "health_field":
+                if check == "evidence_comment":
+                    # Derya's own evidence comment on this issue must carry "<criterion> → PASS".
+                    comment = await graphql.get_comment_evidence(equals)
+                    field = "comment." + equals
+                    passed = (
+                        comment["user_id"] == graphql.actor_id and comment["issue_id"] == issue["id"]
+                        and _comment_pass_line(comment["body"], criterion.text)
+                    )
+                    observed = equals + "#" + hashlib.sha256(comment["body"].encode("utf-8")).hexdigest()
+                    if not passed:
+                        return json.dumps({"result": "FAIL", "check": check, "field": field, "observed": "no_pass_line"})
+                    equals = observed
+                elif check == "health_field":
                     observed: Any = await asyncio.to_thread(_read_local_health, health_port)
                     for part in field.split("."):
                         observed = observed.get(part) if isinstance(observed, dict) else None
@@ -2993,12 +3028,15 @@ def register_outbound_tools(
                     "description": (
                         "Run a system-owned read-only check for one acceptance criterion of the current "
                         "Linear AgentSession issue. health_field reads the local gateway /health JSON field; "
-                        "issue_state reads the issue's live state name. On PASS returns one-use evidence: pass "
+                        "issue_state reads the issue's live state name. evidence_comment: equals is the id of "
+                        "Derya's comment on the issue that contains a line with the exact criterion text and "
+                        "'→ PASS'. Outside a Linear AgentSession pass issue_id. On PASS returns one-use evidence: pass "
                         "criterion_hash, test_class, evidence_digest, evidence_pointer, observed_revision, "
                         "result, timestamp as acceptance_evidence to mark_acceptance in the same turn."),
                     "parameters": {"type": "object", "properties": {
                         "criterion_hash": {"type": "string"},
-                        "check": {"type": "string", "enum": ["health_field", "issue_state"]},
+                        "check": {"type": "string", "enum": ["health_field", "issue_state", "evidence_comment"]},
+                        "issue_id": {"type": "string", "description": "Issue UUID; required outside a Linear AgentSession"},
                         "field": {"type": "string", "description": "Dotted /health path, e.g. version (health_field only)"},
                         "equals": {"type": "string", "description": "Exact expected value"},
                     }, "required": ["criterion_hash", "check", "equals"], "additionalProperties": False}},
