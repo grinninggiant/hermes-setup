@@ -27,8 +27,6 @@ Offline regression coverage includes a thirteen-hour answer delay and ledger reo
 exact vendor question/answer timestamps, same-owner checks, and idempotent rearming.
 These tests do not replace a live delayed-answer acceptance run. No timeout, retention,
 credential scope, policy or human-owned completion control changes in this release.
-The retention CLI test fixtures explicitly use private file modes; production mode
-validation is unchanged.
 
 ## Evidence-only Direct reconciliation (0.8.36)
 
@@ -284,26 +282,21 @@ The final activity cannot overtake the indicator, retries reuse deterministic ac
 | `outbound_ledger.py` | Content-minimizing operation-key ledger for mutation replay and ambiguous outcomes |
 | `linear_tools.py` | Approval-compatible Hermes model-tool registration and policy/transport orchestration |
 | `ledger.py` | Persistent semantic-dedup ledger |
-| `retention.py` | Standalone read-only Operations retention inventory, classifier, and manifest writer |
-| `quota_watchdog.py` | Read-only, drift-checked workspace issue-quota counter and continuity policy |
 | `plugin.yaml` | Hermes plugin manifest |
 | `scripts/install_linear_oauth.py` | Attended localhost PKCE installer (legacy/interactive only) |
 | `scripts/linear_mobile_pkce_once.py` | One-shot mobile PKCE installer using 1Password exact-field resolution |
-| `scripts/linear_retention_dry_run.py` | Explicit-output retention dry-run CLI; it has no mutation path |
-| `scripts/linear_quota_watchdog.py` | Standalone quota-watchdog CLI using the shared OAuth/client stack |
-| `scripts/linear_quota_watchdog.sh` | `no_agent=true` Hermes cron wrapper |
 | `tests/test_native_platform.py` | Security, OAuth, prompt, stop, and dedup tests |
 | `tests/test_native_continuation.py` | Native GoalManager delivery, CAS/restart, fences, retention, health, and blocker-pagination tests |
 | `tests/test_mobile_pkce.py` | Mobile callback, capability, path, no-clobber, and redaction tests |
 
-## Workspace issue-quota watchdog
+## Workspace issue-quota gate
 
-Weekly watchdog is secondary only; create-time gate is primary; no automatic deletion and blocked creates must reuse/dedup an existing issue/session/comment until approved retention frees capacity.
+Blocked creates must reuse/dedup an existing issue/session/comment until approved retention frees capacity; nothing deletes issues automatically.
 
 Every model-facing `linear_save_issue` create admitted by a profile-local mutation
 allowlist takes the same fleet-global POSIX admission lock across all nine profiles,
 then first resolves an existing exact operation-key replay through that profile's
-outbound ledger and uses the watchdog's same complete, cursor-paginated, double-read
+outbound ledger and uses a complete, cursor-paginated, double-read
 workspace inventory counter. Issues from every team, including OPS and GAME, count
 toward the same Linear Free workspace limit. Every profile carries the same reviewed
 workspace-team UUID manifest; both `organization.teams` and `administrableTeams`
@@ -325,50 +318,6 @@ failed and returns `quota_pre_dispatch_changed` without sending the create. This
 human/third-party writer races; Linear exposes no atomic quota-CAS mutation, so a residual
 call-boundary race remains and the vendor's own capacity rejection is still authoritative.
 Ambiguous vendor outcomes retain the durable fleet fence and never blind-retry.
-
-The watchdog reads every workspace issue through root `issues` cursor pagination,
-including archived issues from all teams, then repeats the inventory read and fails
-closed unless the validated issue/team bytes and ordering are identical under the
-same reviewed, fully administrable team manifest. A newly created or inaccessible
-team is a governance/config drift and must be added to the reviewed manifest before
-admission resumes. It has no
-Linear mutation operation. Severity is
-`warning` at 200, `high` at 225, and `critical` at 240 of the 250-issue capacity.
-The buffer is `250 - total`.
-
-Continuity uses the latest seven dated samples. Rolling net growth is the net
-issue delta from the oldest to newest retained sample divided by elapsed days;
-an exhaustion date exists only for positive growth. Alerts are emitted on the
-first non-OK result, severity change, a cumulative five-issue movement since the
-last alert, a change among unknown/growing/nonpositive trends, or an exhaustion
-date movement of at least seven days. Repeated unchanged evaluations are silent.
-
-Create a dedicated, already-existing directory owned by the runtime user at
-exactly mode `0700`; pass it explicitly rather than placing continuity beside
-OAuth credentials. The sole durable watchdog file is secret-free JSON at mode
-`0600`. A corrupt file, unsafe permissions, malformed identity, incomplete page, or
-inventory drift aborts without replacing state or emitting an alert.
-
-```bash
-install -d -m 0700 /absolute/profile/state/linear-quota-watchdog
-/Users/mutlupolatcan/.hermes/runtime/hermes-agent/venv/bin/python \
-  components/platforms/linear-agent-platform/scripts/linear_quota_watchdog.py \
-  --oauth-file /absolute/profile/credentials/linear-oauth.json \
-  --state-dir /absolute/profile/state/linear-quota-watchdog \
-  --expected-team-id 772a55a0-9914-4a36-a0c2-d026ef421324 \
-  --expected-team-id 01f1c4eb-8bca-4d5b-aa70-ef2abfb099c4 \
-  --dry-run
-```
-
-`--dry-run` emits one canonical JSON summary and does not write watchdog state.
-Normal stdout is either the exact user-facing alert plus a newline or zero bytes.
-For Hermes cron with `no_agent=true`, configure the wrapper's `LINEAR_OAUTH_FILE`,
-`LINEAR_QUOTA_STATE_DIR`, `LINEAR_QUOTA_OPERATIONS_TEAM_ID`, and
-`LINEAR_QUOTA_GAME_TEAM_ID` values and execute `scripts/linear_quota_watchdog.sh`.
-The CLI still accepts deprecated `--team-id` and `--expected-team-key` flags for
-external wrapper compatibility, but ignores them: they never scope or filter the
-workspace-wide count. The wrapper forwards `--dry-run` when supplied. Do not place
-tokens in the cron definition or wrapper.
 
 ## Semantic lifecycle actions
 
@@ -471,9 +420,6 @@ gateway:
           quota_team_ids:
             - 772a55a0-9914-4a36-a0c2-d026ef421324  # OPS
             - 01f1c4eb-8bca-4d5b-aa70-ef2abfb099c4  # GAME
-          quota_retention_team_id: 772a55a0-9914-4a36-a0c2-d026ef421324
-          quota_retention_team_key: OPS
-          quota_retention_minimum_age_days: 180
           endpoint: https://mcp.linear.app/mcp
           expected_actor_id: <profile-app-user-uuid>
           expected_organization_id: <installed-organization-uuid>
@@ -494,16 +440,16 @@ The plugin source is deployed to each profile-local runtime directory:
 /Users/mutlupolatcan/.hermes/profiles/<profile>/plugins/linear/
 ```
 
-The tracked deployment allowlist is exactly `__init__.py`, `acceptance.py`, `adapter.py`, `ledger.py`, `linear_client.py`, `oauth_store.py`, `mcp_client.py`, `outbound_policy.py`, `outbound_ledger.py`, `linear_tools.py`, `retention.py`, and `plugin.yaml`. Copy only those twelve files from `components/platforms/linear-agent-platform/`; never copy tests, caches, credentials, OAuth stores, or SQLite state. The current release candidate requires all nine profiles to establish source/runtime hash parity, fresh process activation, healthy queues, SQLite integrity, typed OPS+GAME quota configuration, and profile-scoped real AgentSession canaries. Earlier versioned acceptances are historical evidence, not proof of what is serving now. Exact entry sets, symlink status, directory/file modes, source/runtime hashes, process restart, and `/health` version must be established by a fresh live audit for each target.
+The tracked deployment allowlist is exactly `__init__.py`, `acceptance.py`, `adapter.py`, `ledger.py`, `linear_client.py`, `oauth_store.py`, `mcp_client.py`, `outbound_policy.py`, `outbound_ledger.py`, `linear_tools.py`, and `plugin.yaml`. Copy only those eleven files from `components/platforms/linear-agent-platform/`; never copy tests, caches, credentials, OAuth stores, or SQLite state. The current release candidate requires all nine profiles to establish source/runtime hash parity, fresh process activation, healthy queues, SQLite integrity, typed OPS+GAME quota configuration, and profile-scoped real AgentSession canaries. Earlier versioned acceptances are historical evidence, not proof of what is serving now. Exact entry sets, symlink status, directory/file modes, source/runtime hashes, process restart, and `/health` version must be established by a fresh live audit for each target.
 
 Deployment is an approval-gated operation, not a blind fleet copy. There is intentionally no partial shell recipe here: source review, promotion, rollback and runtime restart must remain one fail-closed procedure. For one named profile:
 
-1. **Pin the reviewed source.** Record the approved commit, require a clean worktree, export the twelve allowlisted files from that commit (not mutable working-tree paths), and verify the reviewed SHA-256 manifest.
+1. **Pin the reviewed source.** Record the approved commit, require a clean worktree, export the eleven allowlisted files from that commit (not mutable working-tree paths), and verify the reviewed SHA-256 manifest.
 2. **Confine and serialize.** Validate every source, profile, plugin and backup ancestor as a real non-symlink directory under the expected roots; acquire a profile-specific exclusive lock before creating any stage or rollback path.
-3. **Stage completely.** Create a unique same-filesystem stage directory at mode `0700`; install exactly the twelve allowlisted files at `0600`; reject symlinks, missing files, extra entries or hash mismatch.
+3. **Stage completely.** Create a unique same-filesystem stage directory at mode `0700`; install exactly the eleven allowlisted files at `0600`; reject symlinks, missing files, extra entries or hash mismatch.
 4. **Preserve rollback.** Create a unique non-existing rollback slot at mode `0700`, print its immutable coordinates before mutation, and preserve the complete previous target there.
 5. **Promote atomically.** Rename the complete staged directory into `/Users/mutlupolatcan/.hermes/profiles/<profile>/plugins/linear`. A state-aware `EXIT`/`HUP`/`INT`/`TERM` handler must restore the checked rollback whenever promotion does not reach verified state, while preserving a failed candidate for audit.
-6. **Read back.** Verify target path confinement, exact twelve-file set, directory/file modes and source-manifest hashes after promotion. Release the lock only after this succeeds.
+6. **Read back.** Verify target path confinement, exact eleven-file set, directory/file modes and source-manifest hashes after promotion. Release the lock only after this succeeds.
 7. **Restart and accept.** Mutlu sends `/restart` in only that profile's Telegram chat; then run its local `/health`, local/public `405/401/404`, signed lifecycle and ledger checks. Keep rollback until acceptance is complete.
 8. **Roll back symmetrically.** Stop or gate the named gateway, acquire the same profile lock, validate the exact printed rollback coordinates, preserve the failed current target, atomically restore the prior directory, read back its manifest/modes, release the lock, send `/restart`, and rerun acceptance. Never select “latest backup” heuristically.
 
@@ -538,7 +484,7 @@ The helper writes and prints the immutable rollback path and tree digest before 
   --rollback-digest '<exact rollback_digest>'
 ```
 
-Runtime promotion, config mutation and `/restart` remain separate approval gates. Runtime extras are preserved inside the exact rollback tree rather than copied into the new twelve-file target.
+Runtime promotion, config mutation and `/restart` remain separate approval gates. Runtime extras are preserved inside the exact rollback tree rather than copied into the new eleven-file target.
 
 The read-only fleet audit must report five dimensions separately: allowlisted source/runtime hashes, exact entry sets, symlink status, directory/file modes, and the version served by the restarted process. A deployment must produce a new reviewed manifest for the named target rather than inheriting an older acceptance count.
 
@@ -690,12 +636,6 @@ done
 
 Unsigned webhook requests must return `401`; webhook `GET` must return `405`; hostname root paths must return `404`. Cloudflare Access is not placed in front of Linear webhooks because vendor delivery cannot complete an interactive Access challenge.
 
-## Operations retention dry run
-
-The standalone retention command reuses the selected profile's `LinearOAuthStore` and `LinearClient` and issues GraphQL queries only. `retention.py` is part of the exact twelve-file gateway allowlist because create admission imports the same classifier; its standalone CLI still cannot archive, delete, update, or otherwise mutate Linear. It fails closed on incomplete or drifting inventory evidence and produces only aggregate JSON on stdout; issue candidates are written to the explicit output file at mode `0600`.
-
-The same classifier is also wired into `linear_save_issue` create admission. Configure `outbound_mcp.quota_retention_team_id` to the Operations team UUID, `quota_retention_team_key: OPS`, and `quota_retention_minimum_age_days: 180` on every profile. After the authoritative workspace count projects 240 or more issues, admission runs the complete read-only Operations classifier in the same fleet-global lock before reservation or vendor dispatch and returns its aggregate result as `retention_dry_run`. With no exact verified successor attestations the in-memory run deliberately yields zero deletion candidates rather than inventing cleanup. A classifier/readback failure denies creation as `immediate_retention_dry_run_unavailable`; projected count 250 or higher returns both quota and retention evidence and never calls `save_issue`. The weekly watchdog remains a secondary trend safety net.
-
 ## Human reopen activation
 
 For a still-delegated human-owned issue, a signed `completed/canceled → started` Issue update is a first-class activation edge. The adapter requires live assignee=event actor, allowed team, delegate=current app user, exact state/revision readback, a terminal previous state resolved from the authoritative team state set, and no open actor AgentSession. It durably claims the exact transition before calling Linear's native `agentSessionCreateOnIssue(issueId)` mutation. The resulting `created` webhook follows the existing manager-session ACK/progress/response path. Delivery replay produces no second session. A lost mutation response remains fenced against mutation retry, but the signed `created` webhook may reconcile it only when authoritative readback shows exactly one open current-app session whose ID equals the webhook session ID; otherwise ambiguity stays blocked. No Telegram execution or synthetic comment is created.
@@ -772,7 +712,7 @@ Coverage includes invalid signatures, replay attempts, organization mismatch, se
 11. A live cross-agent mention canary proves that Linear emits the target agent's native Agent Session before cross-agent automation is enabled.
 12. In the general-only canary, a human assignee's `started -> completed` transition produces an ephemeral closure `thought` followed by one final `response`, with no Telegram prompt, no second Hermes run, no state mutation, and closure/outbox pending/in-flight/dead counts of zero; replay and restart produce no duplicate activities.
 13. A human-owned delegated issue moved from `Done/Completed` to `In Progress` creates exactly one fresh native AgentSession without another mention; the new session shows thought/progress/response on Linear, while replay, self, stale, drift, and open-session cases create zero additional sessions.
-14. Projected `239 → 240` returns an immediate retention dry-run summary before create dispatch; `249 → 250` and `250 → 251` return quota plus retention evidence and dispatch no mutation.
+14. Projected `239 → 240` returns `immediate_retention_required` before create dispatch; `249 → 250` and `250 → 251` return quota evidence and dispatch no mutation.
 
 ## Rollback
 

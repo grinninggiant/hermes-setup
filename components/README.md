@@ -42,7 +42,7 @@ Ad hoc read-only discovery may be temporary once. A capability needed twice gets
 | `linear_diagnostics.py --profile P issue OPS-N` | same | R (vendor) | profile OAuth identity | state, delegate, sessions, local binding | exit 3 on vendor error |
 | `linear_diagnostics.py --profile P session ID` | same | R (vendor) | profile OAuth identity | owner/state/terminal count; no body | exit 3 on vendor error |
 | `linear_save_issue` / `linear_save_comment` / `mark_acceptance` tools | same (plugin) | W | profile app user, allowlisted team | read-back | operation key, outbound policy, ledger `outcome_unknown` |
-| `retention.py`, `quota_watchdog.py`, `direct_reconciliation.py` | same | R, W only with `--apply` + dry-run hash | explicit team UUID | JSON manifest | dry-run hash, explicit approval for trash |
+| `direct_reconciliation.py` | same | R, W only with `--apply` + dry-run hash | explicit team UUID | JSON manifest | dry-run hash, explicit approval for trash |
 | `restartctl.py status [--task-id T] [--recent N]` | `operations/gateway-restart-coordinator` | R | fleet queue | JSON, no payload/evidence body | exit 2 on missing task |
 | `request_gateway_restart` tool / `restartctl.py request` | `operations/gateway-restart-request` | W | general, coder | queue row + ledger | requester identity, artifact hash, one restart |
 | `backup_ops.py` | `scripts/` (OPS-204) | R/W per subcommand | fleet | JSON | retention policy guards (OPS-220) |
