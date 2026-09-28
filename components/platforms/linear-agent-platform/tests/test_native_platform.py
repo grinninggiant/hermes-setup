@@ -153,41 +153,7 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIs(context.hooks["pre_gateway_dispatch"], package._pre_gateway_dispatch)
         self.assertIs(context.hooks["pre_tool_call"], package._pre_tool_progress)
         self.assertIs(context.hooks["on_interim_message"], package._on_interim_message)
-        self.assertIs(context.hooks["on_session_end"], package._on_session_end)
-
-    def test_session_end_hook_forwards_structured_result_to_profile_adapter(self):
-        adapter = mock.Mock()
-
-        def session_env(name, default=""):
-            return {
-                "HERMES_SESSION_CHAT_ID": "linear-session",
-                "HERMES_SESSION_PROFILE": "researcher",
-            }.get(name, default)
-
-        with (
-            mock.patch.object(package, "_progress_adapters", [adapter]),
-            mock.patch("gateway.session_context.get_session_env", side_effect=session_env),
-        ):
-            package._on_session_end(
-                session_id="hermes-session",
-                turn_id="turn-1",
-                completed=False,
-                failed=False,
-                interrupted=False,
-                turn_exit_reason="max_iterations_reached(90/90)",
-                platform="linear",
-            )
-
-        adapter.record_completed_turn.assert_called_once_with(
-            chat_id="linear-session",
-            profile="researcher",
-            hermes_session_id="hermes-session",
-            turn_id="turn-1",
-            completed=False,
-            failed=False,
-            interrupted=False,
-            turn_exit_reason="max_iterations_reached(90/90)",
-        )
+        self.assertNotIn("on_session_end", context.hooks)
 
     def test_codex_streamed_commentary_hook_gap_is_an_explicit_residual(self):
         from run_agent import AIAgent
@@ -7087,16 +7053,7 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             ),
             metadata={"linear_agent_session_id": "native-session-1"},
         )
-        completed_turn_result = {
-            "completed": False,
-            "failed": False,
-            "interrupted": False,
-            "turn_exit_reason": "max_iterations_reached(1/1)",
-            "session_id": "hermes-session-1",
-            "turn_id": "turn-1",
-        }
         self.adapter._active_turn_events[chat_id] = active_event
-        self.adapter._completed_turn_results[chat_id] = completed_turn_result
 
         result = await self.adapter.send(chat_id, notice)
 
@@ -7107,9 +7064,6 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(self.adapter._linear.activity_ephemeral[-1])
         self.assertIs(self.adapter._active_turn_events[chat_id], active_event)
-        self.assertIs(
-            self.adapter._completed_turn_results[chat_id], completed_turn_result
-        )
 
     async def test_exact_budget_notice_is_suppressed_after_terminal_fences(self):
         notice = "⚠️ Iteration budget exhausted (1/1) — asking model to summarise"
@@ -7198,18 +7152,13 @@ class AdapterWebhookTests(unittest.IsolatedAsyncioTestCase):
             ),
             metadata={"linear_agent_session_id": "native-session-1"},
         )
-        completed_turn_result = {"turn_id": "turn-1", "session_id": "hermes-1"}
         self.adapter._active_turn_events[chat_id] = active_event
-        self.adapter._completed_turn_results[chat_id] = completed_turn_result
 
         for notice in (restart_notice, recovered_notice):
             result = await self.adapter.send(chat_id, notice)
             self.assertTrue(result.success)
 
         self.assertIs(self.adapter._active_turn_events[chat_id], active_event)
-        self.assertIs(
-            self.adapter._completed_turn_results[chat_id], completed_turn_result
-        )
 
     async def test_restart_notice_near_matches_remain_final_content(self):
         notices = (

@@ -14,10 +14,8 @@ from unittest import mock
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
-    BasePlatformAdapter,
     MessageEvent,
     MessageType,
-    ProcessingOutcome,
 )
 
 try:
@@ -25,7 +23,6 @@ try:
 except ImportError:  # Upstream cores carry no platform goal-status seam.
     GoalStatusNotice = GoalStatusNoticeKind = None
 from gateway.session import SessionSource
-from _fork_core import fork_core_only  # noqa: E402
 
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -581,220 +578,6 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
 
 
 
-    @fork_core_only
-
-    async def test_metadata_light_native_wake_has_owned_turn_inside_handler(self):
-
-        FakeGoalManager.existing = True
-        self.adapter._ledger.bind_issue_session("issue-164", "linear-session")
-        event = MessageEvent(
-            text="native continuation", message_type=MessageType.TEXT,
-            source=turn_event().source, internal=True,
-        )
-        from tools import clarify_gateway
-
-        observed = []
-        sent = []
-        key = "agent:main:webhook:dm:linear-session"
-        self.drain_patch.stop()
-        self.adapter._linear.get_agent_session_delivery_context = mock.AsyncMock(
-            return_value={"id": "linear-session", "app_user_id": "app-user"}
-        )
-
-        async def create_activity(session_id, activity_type, body, *, activity_id, ephemeral=False):
-            sent.append((session_id, activity_type))
-            return activity_id
-
-        self.adapter._linear.create_activity = create_activity
-
-        async def handler(received):
-            # This handler stands in for the model turn; the dispatcher/callback
-            # ownership handoff itself is exercised in test_native_clarify.
-            self.adapter.open_progress_turn("linear-session", "native-wake-turn")
-            clarify_gateway.register(
-                "native-wake-question", key, "Fixture question", None,
-                turn_owner=("hermes-session", "native-wake-turn"))
-            observed.append(await self.adapter.send_clarify(
-                "linear-session", "Fixture question", None, "native-wake-question", key
-            ))
-            return None
-
-        self.adapter.set_message_handler(handler)
-        try:
-            await BasePlatformAdapter._process_message_background(self.adapter, event, key)
-            self.assertEqual(len(observed), 1)
-            self.assertTrue(observed[0].success, observed[0].error)
-            self.assertEqual(sent, [("linear-session", "elicitation")])
-        finally:
-            clarify_gateway.clear_session(key)
-
-    @fork_core_only
-
-    async def test_metadata_light_veto_does_not_bind_or_execute(self):
-
-        FakeGoalManager.existing = True
-        self.adapter._ledger.bind_issue_session("issue-164", "linear-session")
-        self.adapter._linear.state_type = "completed"
-        event = MessageEvent(
-            text="native continuation", message_type=MessageType.TEXT,
-            source=turn_event().source, internal=True,
-        )
-        handler = mock.AsyncMock(return_value=None)
-        self.adapter.set_message_handler(handler)
-        await BasePlatformAdapter._process_message_background(
-            self.adapter, event, "agent:main:webhook:dm:linear-session"
-        )
-        handler.assert_not_awaited()
-        self.assertNotIn("linear-session", self.adapter._active_turn_events)
-
-
-
-    @fork_core_only
-
-    async def test_core_delivery_stages_until_native_judge_then_delivers_once(self):
-        """The core calls response preparation before its native goal judge."""
-
-        FakeGoalManager.existing = True
-        FakeGoalManager.existing_status = "active"
-        FakeGoalManager.decision = {
-            "status": "done",
-            "should_continue": False,
-            "continuation_prompt": None,
-            "verdict": "done",
-            "reason": "evidence complete",
-            "message": "",
-        }
-        event = turn_event()
-        await self.adapter.on_processing_start(event)
-        event._gateway_turn_result = MappingProxyType(
-            {**dict(event._gateway_turn_result), "completed": True, "turn_exit_reason": "completed"}
-        )
-        self.assertFalse(hasattr(event, "_gateway_post_turn_response"))
-        response = await BasePlatformAdapter._response_after_delivery_decision(
-            self.adapter, event, "final response with evidence"
-        )
-
-        self.assertIsNone(response)
-        self.assertEqual(self.adapter._ledger.list_turn_decisions("linear-session"), [])
-        self.assertIn("linear-session", self.adapter._pending_turn_deliveries)
-        from gateway.run_goals import GatewayGoalsMixin
-
-        self.assertEqual(
-            GatewayGoalsMixin._final_text_for_post_turn_hooks(
-                event._gateway_turn_result, event
-            ),
-            "final response with evidence",
-        )
-
-        # Native core goal judging runs after response preparation and sees the original text.
-        FakeGoalManager.existing_status = "done"
-        self.adapter._linear.description = "## Acceptance\n- [x] tests pass\n- [x] restart is safe"
-        self.assertTrue(
-            self.adapter._acceptance_is_fully_checked(
-                {"description": self.adapter._linear.description}
-            )
-        )
-        self.adapter.record_completed_turn(
-            chat_id="linear-session",
-            hermes_session_id="hermes-session",
-            turn_id="turn-native-judge",
-            completed=True,
-            failed=False,
-            interrupted=False,
-            turn_exit_reason="completed",
-        )
-        await self.adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
-        await self.adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
-
-        rows = self.adapter._ledger.list_turn_decisions("linear-session")
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["outcome"], "success")
-        response_rows = self.adapter._ledger._db.execute(
-            "SELECT COUNT(*) FROM outbox WHERE payload_json LIKE '%\"activity_type\":\"response\"%'"
-        ).fetchone()[0]
-        self.assertEqual(response_rows, 1)
-
-    async def test_structured_turn_hook_never_pauses_native_goal_owner(self):
-        FakeGoalManager.existing = True
-        event = turn_event(internal=True)
-        await self.adapter.on_processing_start(event)
-
-        self.adapter.record_completed_turn(
-            chat_id="linear-session",
-            hermes_session_id="hermes-session",
-            turn_id="turn-1",
-            completed=False,
-            failed=False,
-            interrupted=False,
-            turn_exit_reason="max_iterations_reached(90/90)",
-        )
-
-        self.assertEqual(FakeGoalManager.pause_calls, 0)
-
-    async def test_ordinary_turn_never_calls_plugin_goal_judge_or_schedules(self):
-        event = turn_event()
-        await self.adapter.on_processing_start(event)
-        self.adapter.record_completed_turn(
-            chat_id="linear-session",
-            hermes_session_id="hermes-session",
-            turn_id="turn-native-owned",
-            completed=False,
-            failed=False,
-            interrupted=False,
-            turn_exit_reason="max_iterations_reached(90/90)",
-        )
-
-        await self.adapter.send("linear-session", "native loop owns this summary")
-
-        self.assertEqual(self.admitted, [])
-        self.assertEqual(FakeGoalManager.background_snapshots, [])
-        self.assertEqual(FakeGoalManager.instances, [])
-
-
-
-
-
-
-
-
-    async def test_recovery_preserves_running_decision_with_live_local_owner(self):
-        row = self.adapter._ledger.reserve_turn_decision(
-            "linear-session", "issue-164", "hermes-session", 123000000, 2, "continue"
-        )
-        self.adapter._ledger.transition_turn_decision(
-            row["decision_id"], "pending", "enqueued"
-        )
-        self.adapter._ledger.transition_turn_decision(
-            row["decision_id"], "enqueued", "running"
-        )
-        self.adapter._active_turn_events["linear-session"] = turn_event(internal=True)
-
-        await self.adapter._recover_turn_decisions()
-
-        recovered = self.adapter._ledger.get_turn_decision(row["decision_id"])
-        self.assertEqual(recovered["dispatch_state"], "running")
-
-
-
-
-
-    @fork_core_only
-
-    async def test_native_goal_status_notice_is_not_a_linear_response(self):
-        notice = GoalStatusNotice(
-            kind=GoalStatusNoticeKind.GOAL,
-            status="continue",
-            text="Continuing persistent goal.",
-        )
-
-        self.assertIsNone(
-            await self.adapter.prepare_goal_status_notice(source(), notice)
-        )
-
-
-
-
-
     def test_fake_goal_manager_owner_check_fences_stale_evaluation(self):
         manager = FakeGoalManager("hermes-session")
         manager.state = SimpleNamespace(
@@ -858,55 +641,6 @@ class NativeContinuationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(self.adapter._acceptance_checkbox_matches(issue)), 7)
         self.assertTrue(self.adapter._acceptance_is_fully_checked(issue))
-
-    async def test_disabled_restart_recovery_and_fencing_are_inert(self):
-        row = self.adapter._ledger.reserve_turn_decision(
-            "linear-session", "issue-164", "hermes-session", 123000000, 2, "continue"
-        )
-        self.adapter._ledger.transition_turn_decision(row["decision_id"], "pending", "enqueued")
-        self.adapter._ledger.bind_issue_session("issue-164", "linear-session")
-        self.adapter._cancel_linear_session_processing = mock.AsyncMock()
-
-        await self.adapter._recover_turn_decisions()
-        stopped = await self.adapter._stop_bound_turns("issue-164", "disabled stop")
-
-        # Recovery and fencing stay inert, but removing the delegate still stops live work.
-        self.assertTrue(stopped)
-        self.assertEqual(
-            self.adapter._ledger.get_turn_decision(row["decision_id"])["dispatch_state"],
-            "enqueued",
-        )
-        self.assertEqual(self.admitted, [])
-        self.adapter._cancel_linear_session_processing.assert_awaited_once_with("linear-session")
-
-
-
-
-
-
-    async def test_disabled_feature_fails_before_goal_or_decision_mutation(self):
-        event = turn_event()
-
-        result = await self.adapter._prepare_native_owned_turn_delivery(
-            event, "ordinary response", event._gateway_turn_result
-        )
-
-        self.assertEqual(result, "ordinary response")
-        self.assertEqual(FakeGoalManager.instances, [])
-        decision_count = self.adapter._ledger._db.execute(
-            "SELECT COUNT(*) FROM turn_decisions"
-        ).fetchone()[0]
-        self.assertEqual(decision_count, 0)
-
-
-
-
-
-
-
-
-
-
 
     def test_linear_policy_owned_delivery_disables_response_streaming(self):
         self.assertIs(self.adapter.supports_response_streaming, False)

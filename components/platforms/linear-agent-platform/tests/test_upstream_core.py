@@ -117,21 +117,15 @@ class LinearClarifyTests(unittest.TestCase):
         ):
             return package._block_unbound_linear_clarify(tool_name=tool_name)
 
-    def test_clarify_is_blocked_on_linear_without_owner_bound_waiters(self):
-        with mock.patch.object(package, "_core_binds_clarify_owner", return_value=False):
-            directive = self._hook("clarify", "linear")
+    def test_clarify_is_blocked_on_linear(self):
+        directive = self._hook("clarify", "linear")
 
         self.assertEqual(directive["action"], "block")
         self.assertIn("final response", directive["message"])
 
-    def test_clarify_stays_available_when_the_core_binds_owners(self):
-        with mock.patch.object(package, "_core_binds_clarify_owner", return_value=True):
-            self.assertIsNone(self._hook("clarify", "linear"))
-
     def test_other_platforms_and_tools_are_untouched(self):
-        with mock.patch.object(package, "_core_binds_clarify_owner", return_value=False):
-            self.assertIsNone(self._hook("clarify", "telegram"))
-            self.assertIsNone(self._hook("read_file", "linear"))
+        self.assertIsNone(self._hook("clarify", "telegram"))
+        self.assertIsNone(self._hook("read_file", "linear"))
 
 
 class BackgroundReviewProgressTests(unittest.TestCase):
